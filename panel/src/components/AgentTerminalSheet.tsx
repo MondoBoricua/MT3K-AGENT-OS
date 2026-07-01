@@ -35,13 +35,20 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const activePane = panes.find((p) => p.paneId === paneId) ?? (panes.length === 1 ? panes[0] : null);
   const paneToWatch = activePane?.paneId;
 
-  // reset whenever a different agent is opened (by id); a single-pane agent jumps straight to fullscreen
+  // reset whenever a different agent is opened (by id); a single-pane agent jumps straight to fullscreen.
+  // launch target is remembered per agent (localStorage) so repeat opens are one tap.
   const agentId = agent?.id;
   useEffect(() => {
     const single = !!agent && agent.panes?.length === 1;
     setPaneId(single ? agent!.panes![0].paneId : null);
     setText(""); setFullscreen(single); setTerm("");
-    setLaunched(null); setLaunching(false); setLaunchProject(""); setLaunchCwd("~"); setMissingDir(false);
+    let proj = "", cwd = "~";
+    try {
+      const saved = JSON.parse(localStorage.getItem(`mt3k.launch.${agentId}`) ?? "{}");
+      if (saved.projectId && projects.some((p) => p.id === saved.projectId)) proj = saved.projectId;
+      else if (saved.cwd) cwd = saved.cwd;
+    } catch { /* corrupt/absent → defaults */ }
+    setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false);
   }, [agentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // poll the pane's rendered screen while the fullscreen viewer is open
@@ -92,6 +99,7 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
     if (r?.ok && r.paneId) {
       const pane: PaneRef = { paneId: r.paneId, label: r.label ?? r.session ?? "", window: r.session ?? "", cwd: r.cwd ?? "" };
       setLaunched(pane); setPaneId(r.paneId); setFullscreen(true); setMissingDir(false);
+      try { localStorage.setItem(`mt3k.launch.${agent.id}`, JSON.stringify(launchProject ? { projectId: launchProject } : { cwd: launchCwd.trim() || "~" })); } catch { /* private mode */ }
       onToast?.(`${agent.name} abierto · ${pane.cwd}`, true);
     } else if (r?.missingDir) {
       setMissingDir(true); // show the "create & open" affordance inline instead of a dead-end error
@@ -193,15 +201,26 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
             // no live pane → offer to spawn one (a tracked project, or any path like ~)
             <div className="flex flex-col gap-2">
               <p className="mb-1 font-mono text-[11px] text-white/45">Abrir una sesión nueva de {agent.name} en tmux — ¿dónde?</p>
+
               <button onClick={() => { setLaunchProject(""); setMissingDir(false); }}
-                className={`rounded-xl border px-3 py-2.5 text-left font-mono text-xs transition ${launchProject === "" ? "border-accent/50 bg-accent/10 text-white" : "border-ink-line bg-ink-850/50 text-white/70 hover:border-accent/40"}`}>
-                📁 Ruta específica
+                className={`flex items-center justify-between rounded-xl border px-3 py-2.5 text-left font-mono text-xs transition ${launchProject === "" ? "border-accent/60 bg-accent/15 text-white" : "border-ink-line bg-ink-850/50 text-white/70 hover:border-accent/40"}`}>
+                <span>📁 Ruta específica</span>
+                {launchProject === "" && <span className="text-accent">✓</span>}
               </button>
               {launchProject === "" && (
                 <>
                   <input value={launchCwd} onChange={(e) => { setLaunchCwd(e.target.value); setMissingDir(false); }} placeholder="~" spellCheck={false} autoCapitalize="off"
                     onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); launch(); } }}
                     className="rounded-lg border border-ink-line bg-ink-850/60 px-3 py-2 font-mono text-base text-white placeholder:text-white/30 focus:border-accent/50 focus:outline-none sm:text-sm" />
+                  {/* quick-picks: one tap instead of typing a path on the phone */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {["~", "~/Developer", "~/Desktop"].map((q) => (
+                      <button key={q} onClick={() => { setLaunchCwd(q); setMissingDir(false); }}
+                        className={`rounded-full border px-2.5 py-1 font-mono text-[10px] transition ${launchCwd === q ? "border-accent/60 bg-accent/15 text-accent" : "border-ink-line bg-ink-850/50 text-white/50 hover:text-white"}`}>
+                        {q}
+                      </button>
+                    ))}
+                  </div>
                   {missingDir && (
                     <button onClick={() => launch(true)} disabled={launching}
                       className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-left font-mono text-[11px] text-amber-200 transition hover:bg-amber-400/20 disabled:opacity-40">
@@ -210,16 +229,29 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
                   )}
                 </>
               )}
-              {projects.map((p) => (
-                <button key={p.id} onClick={() => { setLaunchProject(p.id); setMissingDir(false); }}
-                  className={`rounded-xl border px-3 py-2.5 text-left font-mono text-xs transition ${launchProject === p.id ? "border-accent/50 bg-accent/10 text-white" : "border-ink-line bg-ink-850/50 text-white/70 hover:border-accent/40"}`}>
-                  {p.name}
+
+              {projects.length > 0 && (
+                <>
+                  <p className="mt-1 font-mono text-[10px] uppercase tracking-wider text-white/35">o un proyecto trackeado</p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {projects.map((p) => (
+                      <button key={p.id} onClick={() => { setLaunchProject(p.id); setMissingDir(false); }}
+                        className={`flex items-center justify-between rounded-lg border px-2.5 py-2 text-left font-mono text-[11px] transition ${launchProject === p.id ? "border-accent/60 bg-accent/15 text-white" : "border-ink-line bg-ink-850/50 text-white/60 hover:border-accent/40 hover:text-white"}`}>
+                        <span className="truncate">{p.name}</span>
+                        {launchProject === p.id && <span className="ml-1 shrink-0 text-accent">✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {/* sticky CTA that says WHERE it will open — always reachable without scrolling back */}
+              <div className="sticky bottom-0 -mx-1 mt-1 bg-ink-900/95 px-1 pb-1 pt-2 backdrop-blur">
+                <button onClick={() => launch()} disabled={launching}
+                  className="w-full rounded-lg bg-accent/20 px-4 py-2.5 text-sm font-medium text-accent transition hover:bg-accent/30 disabled:opacity-40">
+                  {launching ? "abriendo…" : `▶ abrir en ${launchProject ? (projects.find((p) => p.id === launchProject)?.name ?? launchProject) : (launchCwd.trim() || "~")}`}
                 </button>
-              ))}
-              <button onClick={() => launch()} disabled={launching}
-                className="mt-1 rounded-lg bg-accent/20 px-4 py-2.5 text-sm font-medium text-accent transition hover:bg-accent/30 disabled:opacity-40">
-                {launching ? "abriendo…" : "▶ abrir sesión"}
-              </button>
+              </div>
             </div>
           ) : (
             <p className="py-6 text-center font-mono text-xs text-white/40">
