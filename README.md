@@ -70,6 +70,10 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
 
 All tmux control is **LAN-only** and goes through `tmux` directly (no shell) — see the API table.
 
+Because launches spawn the raw binary (no shell), your shell **aliases don't apply**. To launch an
+agent with extra env/flags on a given host, copy `data/launch.example.json` → `data/launch.json`
+(gitignored, host-local) and set per-agent `env` / `args` there.
+
 ## Deploying to another host
 
 See **[DEPLOY.md](DEPLOY.md)**. ⛔ It opens with a **blocking privacy gate**: the repo carries baked,

@@ -373,8 +373,21 @@ async function api(req, res, path) {
       return sendJSON(res, 400, { ok: false, err: "esa ruta no es una carpeta" });
     }
     const session = `mt3k-${agentId}-${Date.now().toString(36).slice(-5)}`;
+    // optional host-local launch flags (data/launch.json, gitignored) — shell aliases don't apply
+    // here because we spawn the raw binary, so per-host env/args live in data instead:
+    //   { "claude": { "env": { "IS_SANDBOX": "1" }, "args": ["--dangerously-skip-permissions"] } }
+    let cmd = [bin];
+    try {
+      const lc = readJSON(join(ROOT, "data", "launch.json"))[agentId];
+      if (lc) {
+        const envPairs = Object.entries(lc.env || {}).filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === "string").map(([k, v]) => `${k}=${v}`);
+        const args = (Array.isArray(lc.args) ? lc.args : []).filter((a) => typeof a === "string");
+        if (envPairs.length) cmd = ["/usr/bin/env", ...envPairs, bin, ...args];
+        else cmd = [bin, ...args];
+      }
+    } catch { /* no launch.json → plain binary */ }
     // -d detached · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
-    const r = await run("tmux", ["new-session", "-d", "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, bin], ROOT, 8000);
+    const r = await run("tmux", ["new-session", "-d", "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "tmux new-session falló (¿tmux instalado?)" });
     const [paneId, label] = (r.out || "").split("|");
     logEvent(`launch · ${agentId} · ${session} · ${tildify(cwd)}`);

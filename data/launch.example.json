@@ -1,0 +1,5 @@
+{
+  "_comment": "Host-local launch flags for /api/launch (copy to data/launch.json — gitignored). Shell aliases don't apply because the panel spawns the raw binary, so put per-host env/args here.",
+  "claude": { "env": { "IS_SANDBOX": "1" }, "args": ["--dangerously-skip-permissions"] },
+  "codex": { "args": ["--dangerously-bypass-approvals-and-sandbox"] }
+}
