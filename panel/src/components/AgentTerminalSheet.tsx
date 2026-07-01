@@ -27,6 +27,7 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const [launchProject, setLaunchProject] = useState<string>("");
   const [launchCwd, setLaunchCwd] = useState("~");
   const [missingDir, setMissingDir] = useState(false); // free-form path doesn't exist → offer to create it
+  const [showLaunch, setShowLaunch] = useState(false); // force the launch form even when sessions exist (＋ nueva sesión)
   const termRef = useRef<HTMLPreElement>(null);
 
   // a just-launched pane isn't in agent.panes until the next status poll — merge it in meanwhile
@@ -48,7 +49,7 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
       if (saved.projectId && projects.some((p) => p.id === saved.projectId)) proj = saved.projectId;
       else if (saved.cwd) cwd = saved.cwd;
     } catch { /* corrupt/absent → defaults */ }
-    setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false);
+    setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false); setShowLaunch(false);
   }, [agentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // poll the pane's rendered screen while the fullscreen viewer is open
@@ -98,7 +99,7 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
     setLaunching(false);
     if (r?.ok && r.paneId) {
       const pane: PaneRef = { paneId: r.paneId, label: r.label ?? r.session ?? "", window: r.session ?? "", cwd: r.cwd ?? "" };
-      setLaunched(pane); setPaneId(r.paneId); setFullscreen(true); setMissingDir(false);
+      setLaunched(pane); setPaneId(r.paneId); setFullscreen(true); setMissingDir(false); setShowLaunch(false);
       try { localStorage.setItem(`mt3k.launch.${agent.id}`, JSON.stringify(launchProject ? { projectId: launchProject } : { cwd: launchCwd.trim() || "~" })); } catch { /* private mode */ }
       onToast?.(`${agent.name} abierto · ${pane.cwd}`, true);
     } else if (r?.missingDir) {
@@ -131,10 +132,18 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
               <div className="truncate font-mono text-[10px] text-white/40">{activePane.cwd} ({activePane.label})</div>
             </div>
           </div>
-          <button onClick={exitFullscreen}
-            className="shrink-0 rounded-lg border border-ink-line px-2.5 py-1 font-mono text-[10px] text-white/55 transition hover:text-white">
-            {panes.length > 1 ? "← sesiones" : "✕ salir"}
-          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {agent.launchable && (
+              <button onClick={() => { setFullscreen(false); setPaneId(null); setShowLaunch(true); }} title="abrir otra sesión"
+                className="rounded-lg border border-ink-line px-2.5 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent">
+                ＋ nueva
+              </button>
+            )}
+            <button onClick={exitFullscreen}
+              className="rounded-lg border border-ink-line px-2.5 py-1 font-mono text-[10px] text-white/55 transition hover:text-white">
+              {panes.length > 1 ? "← sesiones" : "✕ salir"}
+            </button>
+          </div>
         </header>
 
         {/* sanitized HTML: ansiToHtml escapes all text; spans carry only numeric-derived colors */}
@@ -189,18 +198,24 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
             <div>
               <div className="font-mono text-sm font-semibold">{agent.name}</div>
               <div className="font-mono text-[11px] text-white/45">
-                {panes.length === 0 ? "sin sesión activa en tmux" : `${panes.length} ${panes.length === 1 ? "sesión" : "sesiones"} en tmux`}
+                {panes.length === 0
+                  ? agent.running ? "corriendo fuera de tmux — ábrele una sesión nueva" : "sin sesión activa en tmux"
+                  : `${panes.length} ${panes.length === 1 ? "sesión" : "sesiones"} en tmux`}
               </div>
             </div>
           </div>
           <button onClick={onClose} className="rounded-lg border border-ink-line px-2.5 py-1 font-mono text-xs text-white/55 transition hover:text-white">cerrar</button>
         </header>
 
-        {panes.length === 0 ? (
-          agent.launchable ? (
-            // no live pane → offer to spawn one (a tracked project, or any path like ~)
+        {agent.launchable && (showLaunch || panes.length === 0) ? (
+            // launch form: no live pane, or "＋ nueva sesión" was tapped with sessions running
             <div className="flex flex-col gap-2">
-              <p className="mb-1 font-mono text-[11px] text-white/45">Abrir una sesión nueva de {agent.name} en tmux — ¿dónde?</p>
+              <div className="mb-1 flex items-center justify-between">
+                <p className="font-mono text-[11px] text-white/45">Abrir una sesión nueva de {agent.name} en tmux — ¿dónde?</p>
+                {showLaunch && panes.length > 0 && (
+                  <button onClick={() => setShowLaunch(false)} className="shrink-0 font-mono text-[10px] text-white/45 transition hover:text-white">← sesiones</button>
+                )}
+              </div>
 
               <button onClick={() => { setLaunchProject(""); setMissingDir(false); }}
                 className={`flex items-center justify-between rounded-xl border px-3 py-2.5 text-left font-mono text-xs transition ${launchProject === "" ? "border-accent/60 bg-accent/15 text-white" : "border-ink-line bg-ink-850/50 text-white/70 hover:border-accent/40"}`}>
@@ -253,11 +268,10 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
                 </button>
               </div>
             </div>
-          ) : (
-            <p className="py-6 text-center font-mono text-xs text-white/40">
-              {agent.online ? "Este agente es una app (GUI) y no se puede abrir en tmux." : "Agente offline."}
-            </p>
-          )
+        ) : panes.length === 0 ? (
+          <p className="py-6 text-center font-mono text-xs text-white/40">
+            {agent.online ? "Este agente es una app (GUI) y no se puede abrir en tmux." : "Agente offline."}
+          </p>
         ) : (
           // session picker — pick which tmux pane to open in fullscreen
           <div className="flex flex-col gap-2">
@@ -269,6 +283,12 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
                 <div className="font-mono text-[10px] text-white/40">{p.label} · {p.paneId}</div>
               </button>
             ))}
+            {agent.launchable && (
+              <button onClick={() => setShowLaunch(true)}
+                className="rounded-xl border border-dashed border-ink-line px-3 py-2.5 text-left font-mono text-xs text-white/50 transition hover:border-accent/50 hover:text-accent">
+                ＋ abrir otra sesión
+              </button>
+            )}
           </div>
         )}
       </div>

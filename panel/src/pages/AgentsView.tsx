@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import type { AgentRow } from "../lib/api";
+import { getLogs } from "../lib/api";
 import AgentLogo from "../components/AgentLogo";
 
 const HACKER = "/sprites/hacker.webp"; // standing/idle (row 2 = running-left, full frames)
@@ -11,6 +13,22 @@ type Props = { agents: AgentRow[]; onOpen: (a: AgentRow) => void };
 export default function AgentsView({ agents, onOpen }: Props) {
   const live = agents.filter((a) => a.running).length;
   const ready = agents.filter((a) => a.online).length;
+  const sessions = agents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
+
+  // wall HUD feed: last few OS events (launch/send/query…) from today's log
+  const [feed, setFeed] = useState<string[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const pull = async () => {
+      const r = await getLogs();
+      if (!alive || !r?.logs?.length) return;
+      const lines = r.logs[0].content.split("\n").filter((l) => l.startsWith("- "));
+      setFeed(lines.slice(-4).reverse().map((l) => l.replace(/^- /, "")));
+    };
+    pull();
+    const id = setInterval(pull, 30000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
   return (
     <div className="room relative flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -22,6 +40,33 @@ export default function AgentsView({ agents, onOpen }: Props) {
       <div className="relative flex-1">
         <div className="room-wall absolute inset-x-0 top-0 h-1/2" />
         <div className="room-floor absolute inset-x-0 bottom-0 h-[72%]" />
+
+        {/* wall-mounted mission-control screen — fills the empty upper half of the room */}
+        <div className="wallscreen absolute left-1/2 top-[6%] z-20 w-[min(620px,92%)] -translate-x-1/2 px-4 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-accent">◉ Sala de operaciones</span>
+            <span className="font-mono text-[10px] text-white/45">{live} codeando · {sessions.length} {sessions.length === 1 ? "sesión" : "sesiones"} tmux</span>
+          </div>
+          {/* live tmux sessions as tappable chips */}
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {sessions.map(({ agent: a, pane: p }) => (
+              <button key={p.paneId} onClick={() => onOpen(a)}
+                className="flex items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 font-mono text-[10px] text-emerald-200 transition hover:bg-emerald-400/20">
+                <AgentLogo id={a.id} online className="h-3 w-3" />
+                <span className="max-w-[160px] truncate">{p.cwd}</span>
+              </button>
+            ))}
+            {sessions.length === 0 && <span className="font-mono text-[10px] text-white/30">sin sesiones en tmux — toca un agente y dale ▶ abrir</span>}
+          </div>
+          {/* recent OS events */}
+          {feed.length > 0 && (
+            <div className="mt-2 flex flex-col gap-0.5 border-t border-white/10 pt-2">
+              {feed.map((l, i) => (
+                <div key={i} className="truncate font-mono text-[9px] text-white/35" style={{ opacity: 1 - i * 0.18 }}>{l}</div>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* scroll starts at the first agent on mobile (mx-auto centers it only when it fits) */}
         <div className="absolute inset-0 z-10 flex snap-x items-end justify-start overflow-x-auto pb-[6%] sm:justify-center">
@@ -70,7 +115,7 @@ export default function AgentsView({ agents, onOpen }: Props) {
                       <span className="font-mono text-[11px] font-semibold leading-tight">{a.name}</span>
                     </div>
                     <div className={`font-mono text-[9px] uppercase tracking-wider ${a.running ? "text-emerald-300" : a.online ? "text-white/45" : "text-white/25"}`}>
-                      {a.running ? "● codeando" : a.online ? "○ listo" : "offline"}
+                      {a.running ? (sendable ? "● codeando" : "● fuera de tmux") : a.online ? "○ listo" : "offline"}
                     </div>
                   </div>
                   {/* action hint: live session → write, launchable-only → spawn */}

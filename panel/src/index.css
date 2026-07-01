@@ -121,6 +121,20 @@ body {
   box-shadow: 0 4px 0 oklch(14% 0.01 270);
 }
 
+/* wall-mounted mission-control screen (Agents View HUD) */
+.wallscreen {
+  border: 2px solid oklch(34% 0.02 270);
+  border-radius: 10px;
+  background:
+    repeating-linear-gradient(oklch(100% 0 0 / 0.02) 0 1px, transparent 1px 3px),
+    linear-gradient(oklch(13% 0.02 270 / 0.92), oklch(10% 0.02 270 / 0.92));
+  box-shadow: 0 0 34px -10px oklch(62% 0.23 25 / 0.35), inset 0 0 40px -20px oklch(62% 0.23 25 / 0.25);
+}
+.wallscreen::after {
+  content: ""; position: absolute; inset: 0; border-radius: 8px; pointer-events: none;
+  background: linear-gradient(115deg, transparent 30%, oklch(100% 0 0 / 0.03) 45%, transparent 60%);
+}
+
 /* pixel-art room: back wall + synthwave perspective floor */
 .room {
   background:
