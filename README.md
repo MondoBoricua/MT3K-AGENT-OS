@@ -1,0 +1,103 @@
+# MT3K Agent OS
+
+A local, file-based **agentic operating system** + a visual **knowledge-graph dashboard** for every repo you map with [graphify](https://github.com/safishamsi/graphify).
+
+Your "shared brain": each project is graphed once, then the panel shows its knowledge graph, god nodes, map confidence, token savings, and an in-panel wiki — and you can ask questions that run `graphify query` live. No external DB, no vector store, no cloud — JSON + markdown on disk.
+
+## Layout
+
+```
+CLAUDE.md            kernel — routing + agent registry
+agents/              specialist agents (e.g. @mapper)
+data/
+  projects.example.json  template — the panel reads projects.json (or falls back to empty)
+  projects.json          the repos the panel tracks — GITIGNORED, host-local, never committed
+  logs/                  file-based memory (sessions, queries, refreshes) — GITIGNORED
+scripts/
+  build-data.mjs     ingests each repo's graphify-out/ → panel data
+  server.mjs         local API (query / refresh / discover / agents) + serves the panel
+panel/               Vite + React + TS + Tailwind dashboard
+```
+
+## Run
+
+```bash
+# 1. build the dashboard
+pnpm --dir panel install
+pnpm --dir panel build
+
+# 2. start the OS (serves panel + API on one port)
+node scripts/server.mjs        # → http://localhost:4288
+```
+
+For development with hot-reload: `pnpm --dir panel dev` (Vite :5273, proxies `/api`) **+** `node scripts/server.mjs`.
+
+## Install with an agent
+
+Hand this prompt to a coding agent (Claude Code, Codex, Cursor `cursor-agent`, …) to set it up from scratch on a clean machine:
+
+```text
+Set up MT3K Agent OS on this machine. Steps:
+
+1. Verify prerequisites are on PATH: node ≥18, pnpm, tmux, git, and graphify
+   (https://github.com/safishamsi/graphify). Install whatever is missing, then stop and
+   tell me if you can't.
+2. Clone the repo and cd into it:
+   git clone <REPO_URL> MT3K-AGENT-OS && cd MT3K-AGENT-OS
+3. Start clean — the repo may carry the previous owner's baked data. Reset it:
+   - write data/projects.json as: {"projects": []}
+   - empty data/logs/ (delete every *.md inside it)
+   - delete panel/public/data/*.json and panel/dist/data/*.json
+   Then confirm none of my own paths/projects remain anywhere under data/ or panel/*/data/.
+4. Build the dashboard:  pnpm --dir panel install && pnpm --dir panel build
+5. Start the OS:  node scripts/server.mjs   (serves panel + API on http://localhost:4288)
+6. Report back: the URL, and the agent CLIs it detected at GET /api/agents
+   (id + online/running/launchable for each).
+
+Then tell me how to add my first repo: graph it with `graphify .` inside the repo, then
+use ＋ Add a project in the panel (or add it to data/projects.json and run
+node scripts/build-data.mjs).
+```
+
+> Deploying to a shared/remote host instead of a clean local machine? Read **[DEPLOY.md](DEPLOY.md)** first — the privacy gate and auth requirements below are mandatory there.
+
+## Agents View
+
+The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap one to:
+
+- **✎ write** — if it's already running in a tmux pane, open its live terminal and type into it, with an arrow-key pad for TUI menus.
+- **▶ open** — if it's installed but has no session, spawn a fresh tmux session running that CLI in a directory you pick (a tracked project or any path like `~`), then jump straight into its terminal.
+
+All tmux control is **LAN-only** and goes through `tmux` directly (no shell) — see the API table.
+
+## Deploying to another host
+
+See **[DEPLOY.md](DEPLOY.md)**. ⛔ It opens with a **blocking privacy gate**: the repo carries baked,
+host-specific data (`panel/{public,dist}/data/*.json`, `data/projects.json`, `data/logs/`) — deploying
+as-is leaks the owner's projects. Zero it out and verify the served manifest is empty **before** exposing
+the host. The panel has no auth and `/api/send` types into tmux panes, so production needs a reverse
+proxy + auth or VPN-only access.
+
+## Adding a project
+
+Graph a repo (`graphify .` inside it), then either:
+- Click **＋ Add a project** in the panel — it auto-discovers graphed repos under `~/Developer`, or
+- Add it to `data/projects.json` and run `node scripts/build-data.mjs`.
+
+## API
+
+| Endpoint | What it does |
+|---|---|
+| `POST /api/query` | runs `graphify query` in a repo (traversal, $0) |
+| `POST /api/refresh` | `graphify update` + re-ingest |
+| `POST /api/add-project` | track a repo (graphs it if needed) + ingest |
+| `GET /api/discover` | graphed repos not yet tracked |
+| `GET /api/agents` | detects installed agent CLIs (Claude Code, Codex, OpenCode, Gemini, Grok, Antigravity `agy`, Cursor `cursor-agent`), their live tmux panes, and whether each is `launchable` |
+| `POST /api/launch` | spawns a fresh detached tmux session running an agent's CLI (`{ agentId, projectId? \| cwd? }`) and returns the new `paneId` — binary comes from an allowlist, cwd is a tracked project or a real path like `~` |
+| `POST /api/send` | types text into an agent's tmux pane (`{ paneId, text, enter? }`) — LAN-only, used by Agents View |
+| `POST /api/key` | sends a single allowlisted key to a pane (`{ paneId, key }`: `Up`/`Down`/`Enter`/`Escape`/`Tab`…) for navigating TUI menus |
+| `GET /api/pane?id=%N` | live capture of an agent's tmux pane (rendered screen + ANSI colors) for the terminal viewer |
+| `GET /api/skills` | reads `~/.agents/skills` SKILL.md frontmatter |
+| `GET /api/logs` | file-based memory for Memory / Activity |
+
+Brand colors and logo are sourced from MT3K Web.

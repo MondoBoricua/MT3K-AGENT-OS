@@ -1,0 +1,29 @@
+# deps & build
+node_modules/
+panel/dist/
+panel/node_modules/
+*.tsbuildinfo
+
+# generated panel data (rebuilt from graphify-out via scripts/build-data.mjs)
+panel/public/data/*.json
+
+# PRIVATE, host-local memory — NEVER commit (leaks the owner's projects/activity).
+# The repo ships templates instead; each machine keeps its own real data locally.
+data/projects.json
+data/logs/*.md
+graphify-out/
+
+# os / editor
+.DS_Store
+*.log
+
+# playwright mcp scratch (screenshots / snapshots)
+.playwright-mcp/
+
+# secrets — never commit
+.env
+.env.*
+*.local
+
+# host-specific deploy notes — keep local (contains homelab IPs/hosts)
+DEPLOY.md
