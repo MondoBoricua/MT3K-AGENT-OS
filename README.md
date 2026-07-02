@@ -74,10 +74,42 @@ Because launches spawn the raw binary (no shell), your shell **aliases don't app
 agent with extra env/flags on a given host, copy `data/launch.example.json` → `data/launch.json`
 (gitignored, host-local) and set per-agent `env` / `args` there.
 
-**Auth:** set `MT3K_TOKEN=<secret>` in the server's environment to require `Authorization: Bearer`
-on every `/api/*` call (the panel prompts once and stores it in the browser). Unset → open, for a
+### Auth token (recommended)
+
+Set `MT3K_TOKEN` in the server's environment and every `/api/*` call requires
+`Authorization: Bearer <token>` (SSE uses `?t=<token>`). Unset → everything stays open, for a
 trusted LAN. Strongly recommended anywhere `/api/launch` + `data/launch.json` can spawn agents
 with permissive flags.
+
+**Run ad-hoc (dev / your laptop):**
+
+```bash
+MT3K_TOKEN=$(openssl rand -hex 16) node scripts/server.mjs   # prints nothing — save your token!
+# or with a token you choose:
+MT3K_TOKEN=my-secret node scripts/server.mjs
+```
+
+**Run under systemd (a provisioned host):** put it in a unit override so it survives restarts —
+
+```bash
+sudo mkdir -p /etc/systemd/system/mt3k-agent-os.service.d
+sudo tee /etc/systemd/system/mt3k-agent-os.service.d/override.conf >/dev/null <<EOF
+[Service]
+Environment=MT3K_TOKEN=$(openssl rand -hex 16)
+# without this, restarting the service kills every tmux session the panel launched:
+KillMode=process
+EOF
+sudo chmod 600 /etc/systemd/system/mt3k-agent-os.service.d/override.conf
+sudo systemctl daemon-reload && sudo systemctl restart mt3k-agent-os
+```
+
+**Where it lives:**
+- *Server:* only in that environment variable — the override file above (readable by root only),
+  or your shell command. It's never written to `data/` or served anywhere. To read it back:
+  `grep MT3K_TOKEN /etc/systemd/system/mt3k-agent-os.service.d/override.conf`.
+- *Browser:* the panel asks for the token the first time the API answers 401 and keeps it in
+  that browser's `localStorage` (`mt3k.token`) — you paste it once per device. To change the
+  token: update the override, restart the service, and the panel will prompt again.
 
 ## Deploying to another host
 
