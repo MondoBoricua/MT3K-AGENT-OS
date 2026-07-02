@@ -128,11 +128,21 @@ sudo systemctl daemon-reload && sudo systemctl restart mt3k-agent-os
 
 ## Deploying to another host
 
-See **[DEPLOY.md](DEPLOY.md)**. ⛔ It opens with a **blocking privacy gate**: the repo carries baked,
-host-specific data (`panel/{public,dist}/data/*.json`, `data/projects.json`, `data/logs/`) — deploying
-as-is leaks the owner's projects. Zero it out and verify the served manifest is empty **before** exposing
-the host. The panel has no auth and `/api/send` types into tmux panes, so production needs a reverse
-proxy + auth or VPN-only access.
+A fresh `git clone` is clean by design: everything private (`data/projects.json`, `data/launch.json`,
+`data/hosts.json`, `data/notify.json`, `data/logs/`, `panel/public/data/`, `graphify-out/`) is
+gitignored, ships as `*.example.json` templates, and the server falls back to empty defaults.
+
+- **Deploy from git, not from your working copy.** An `scp`/`rsync` of a working tree carries your
+  local `data/` and the baked graphs in `panel/{public,dist}/data/*.json` — that leaks your projects
+  and your federation tokens. If you must copy files, exclude those paths and verify the host serves
+  `/data/manifest.json` → `{"projects":[]}` before exposing it.
+- **Set `MT3K_TOKEN`** (see [Auth token](#auth-token-recommended)). The API launches agents and types
+  into tmux panes — never expose `:4288` beyond a trusted LAN without the token (and ideally a
+  reverse proxy or VPN on top).
+- Run it under **systemd with `KillMode=process`** (snippet in the Auth section) so service restarts
+  don't kill the agents' tmux sessions.
+- Target needs: node ≥ 22, tmux, pnpm (one-time panel build), and optionally graphify to graph repos
+  on that host. Updating = `git pull` + `pnpm --dir panel build` + restart.
 
 ## Adding a project
 
