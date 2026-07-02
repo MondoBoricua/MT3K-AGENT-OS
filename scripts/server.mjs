@@ -136,9 +136,10 @@ async function procTree() {
     childrenOf.get(ppid).push(pid);
     if (!comm.includes(".app/")) running.add(base(comm)); // skip GUI-app internals (e.g. Codex.app/Resources/codex)
   }
-  // collect basenames of all descendant processes of a pid (the real agent often lives under the kitty/tmux wrapper)
+  // basenames of a pid's process AND all its descendants (the agent may BE the pane's root process
+  // — tmux runs the binary directly on launch — or live under a kitty/shell wrapper)
   const descendants = (pid) => {
-    const out = new Set(), stack = [...(childrenOf.get(pid) || [])];
+    const out = new Set(), stack = [pid, ...(childrenOf.get(pid) || [])];
     let guard = 0;
     while (stack.length && guard++ < 500) {
       const p = stack.pop();
@@ -170,19 +171,96 @@ async function discoverPanes(descendants) {
 async function detectAgents() {
   const { running, descendants } = await procTree();
   const panes = await discoverPanes(descendants);
-  return AGENT_DEFS.map((a) => {
+  const rows = AGENT_DEFS.map((a) => {
     const installed = a.bins.some(onPath) || a.paths.some((p) => existsSync(expand(p)));
     const proc = a.proc || [];
     const isRunning = installed && proc.some((name) => running.has(name));
-    // every pane whose process tree contains this agent's binary — supports multiple sessions of the same CLI
+    // every pane whose process tree contains this agent's binary — supports multiple sessions of the same CLI.
+    // prefix match covers vendor/arch names ("codex-aarch64-…") that tmux/ps report for the same CLI.
     const agentPanes = proc.length
-      ? panes.filter((pn) => pn.comms.some((c) => proc.includes(c)))
+      ? panes.filter((pn) => pn.comms.some((c) => proc.includes(c) || proc.some((p) => c.startsWith(p + "-"))))
           .map((pn) => ({ paneId: pn.paneId, label: pn.label, window: pn.window, cwd: pn.cwd }))
       : [];
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)
     return { id: a.id, name: a.name, online: installed, running: isRunning, launchable: installed && proc.length > 0, panes: agentPanes };
   });
+  await updateWaiting(rows.flatMap((r) => r.panes.map((p) => ({ ...p, agentName: r.name }))));
+  for (const r of rows) {
+    for (const p of r.panes) p.waiting = paneWatch.get(p.paneId)?.waiting ?? false;
+    r.waiting = r.panes.some((p) => p.waiting);
+  }
+  return rows;
 }
+
+// paste text into a pane via set-buffer/paste-buffer — safe for arbitrary text (no key interpretation)
+async function pasteToPane(paneId, text, enter) {
+  const buf = "mt3k_send";
+  const set = await run("tmux", ["set-buffer", "-b", buf, "--", text], ROOT, 5000);
+  if (!set.ok) return { ok: false, err: set.err || "set-buffer falló" };
+  const paste = await run("tmux", ["paste-buffer", "-d", "-p", "-b", buf, "-t", paneId], ROOT, 5000);
+  if (!paste.ok) return { ok: false, err: paste.err || "paste-buffer falló" };
+  if (enter) await run("tmux", ["send-keys", "-t", paneId, "Enter"], ROOT, 5000);
+  return { ok: true };
+}
+
+// --- federation: hosts this panel aggregates (data/hosts.json, host-local, NEVER automatic) ---
+function readHosts() {
+  try { return (readJSON(join(ROOT, "data", "hosts.json")).hosts || []).filter((h) => h.id && h.url); } catch { return []; }
+}
+async function federatedAgents() {
+  const local = await detectAgents();
+  const remote = await Promise.all(readHosts().map(async (h) => {
+    try {
+      const r = await fetch(`${h.url.replace(/\/$/, "")}/api/agents?flat=1`, {
+        headers: h.token ? { authorization: `Bearer ${h.token}` } : {}, signal: AbortSignal.timeout(3000),
+      });
+      if (!r.ok) return [];
+      // only agents actually installed over there — keeps the room from filling with offline desks
+      return ((await r.json()).agents || []).filter((a) => a.online).map((a) => ({ ...a, host: h.id }));
+    } catch { return []; } // host down → just its absence, never an error here
+  }));
+  return [...local, ...remote.flat()];
+}
+
+// --- waiting-for-input watcher: a pane whose screen goes still is an agent waiting on you ---
+// promptish tail → waiting after 10s of stillness; anything else after 45s (spinners keep repainting).
+const PROMPT_RE = /(do you want|y\/n|yes\/no|proceed\?|trust|permission|allow|esperando|continuar|❯\s*1\.|\?\s*$)/i;
+const paneWatch = new Map(); // paneId → { hash, changedAt, waiting, notifiedAt }
+async function updateWaiting(panes) {
+  const now = Date.now();
+  const seen = new Set();
+  for (const pn of panes) {
+    seen.add(pn.paneId);
+    const r = await run("tmux", ["capture-pane", "-t", pn.paneId, "-p"], ROOT, 4000);
+    if (!r.ok) continue;
+    const screen = r.out.trimEnd();
+    const st = paneWatch.get(pn.paneId) ?? { hash: null, changedAt: now, waiting: false, notifiedAt: 0 };
+    if (screen !== st.hash) {
+      st.hash = screen; st.changedAt = now; st.waiting = false;
+    } else {
+      const still = now - st.changedAt;
+      const promptish = PROMPT_RE.test(screen.split("\n").slice(-8).join("\n"));
+      const was = st.waiting;
+      st.waiting = still >= (promptish ? 10000 : 45000);
+      if (st.waiting && !was && now - st.notifiedAt > 600000) { st.notifiedAt = now; notifyWaiting(pn); }
+    }
+    paneWatch.set(pn.paneId, st);
+  }
+  for (const id of [...paneWatch.keys()]) if (!seen.has(id)) paneWatch.delete(id);
+}
+// push notification via ntfy (data/notify.json: { "ntfy": "https://ntfy.sh/tu-topic" }) — optional
+function notifyWaiting(pn) {
+  logEvent(`waiting · ${pn.agentName} · ${pn.cwd}`);
+  let cfg; try { cfg = readJSON(join(ROOT, "data", "notify.json")); } catch { return; }
+  if (!cfg?.ntfy) return;
+  fetch(cfg.ntfy, {
+    method: "POST",
+    body: `${pn.agentName} espera tu input · ${pn.cwd}`,
+    headers: { Title: "MT3K Agent OS", Priority: "high", Tags: "hourglass" },
+  }).catch(() => { /* notification is best-effort */ });
+}
+// keep watching even when no browser is polling — otherwise notifications only fire while the panel is open
+setInterval(() => detectAgents().catch(() => {}), 15000);
 
 // scan for graphified repos that aren't tracked yet: ~/Developer (deep) + home top-level (shallow,
 // catches repos graphed outside Developer, e.g. ~/.proxmox or ~/.agent-forge-skills)
@@ -222,7 +300,11 @@ async function api(req, res, path) {
   }
   if (path === "/api/skills") return sendJSON(res, 200, { skills: readSkills() });
   if (path === "/api/logs") return sendJSON(res, 200, { logs: readLogs() });
-  if (path === "/api/agents") return sendJSON(res, 200, { agents: await detectAgents() });
+  if (path === "/api/agents") {
+    // flat=1 → this host only (what federating peers request; also stops any federation loop)
+    const flat = new URL(req.url, "http://x").searchParams.get("flat");
+    return sendJSON(res, 200, { agents: flat ? await detectAgents() : await federatedAgents() });
+  }
   if (path === "/api/discover") return sendJSON(res, 200, { repos: discover() });
 
   if (path === "/api/add-project" && req.method === "POST") {
@@ -248,7 +330,7 @@ async function api(req, res, path) {
   if (path === "/api/status") {
     const mf = join(ROOT, "panel", "public", "data", "manifest.json");
     return sendJSON(res, 200, {
-      agents: await detectAgents(),
+      agents: await federatedAgents(),
       uptimeMs: Date.now() - START,
       graphify: await graphifyVersion(),
       skills: readSkills().length,
@@ -323,15 +405,42 @@ async function api(req, res, path) {
     // confirm the pane still exists before sending
     const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
-    // set-buffer/paste-buffer handles arbitrary text safely (leading dashes, spaces, newlines) — no key interpretation
-    const buf = "mt3k_send";
-    const set = await run("tmux", ["set-buffer", "-b", buf, "--", text], ROOT, 5000);
-    if (!set.ok) return sendJSON(res, 500, { ok: false, err: set.err || "set-buffer falló" });
-    const paste = await run("tmux", ["paste-buffer", "-d", "-p", "-b", buf, "-t", paneId], ROOT, 5000);
-    if (!paste.ok) return sendJSON(res, 500, { ok: false, err: paste.err || "paste-buffer falló" });
-    if (enter) await run("tmux", ["send-keys", "-t", paneId, "Enter"], ROOT, 5000);
+    const r = await pasteToPane(paneId, text, enter);
+    if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err });
     logEvent(`send · ${paneId} · "${text.slice(0, 80).replace(/\s+/g, " ").trim()}"`);
     return sendJSON(res, 200, { ok: true, paneId });
+  }
+
+  // one message → every live agent pane on this host (and, unless flat=1, on federated hosts too)
+  if (path === "/api/broadcast" && req.method === "POST") {
+    const { text } = await body(req);
+    if (typeof text !== "string" || !text.trim()) return sendJSON(res, 400, { ok: false, err: "texto vacío" });
+    if (text.length > 4000) return sendJSON(res, 400, { ok: false, err: "texto demasiado largo (máx 4000)" });
+    const locals = (await detectAgents()).flatMap((a) => a.panes);
+    let sent = 0;
+    for (const p of locals) { if ((await pasteToPane(p.paneId, text, true)).ok) sent++; }
+    const flat = new URL(req.url, "http://x").searchParams.get("flat");
+    if (!flat) {
+      for (const h of readHosts()) {
+        try {
+          const r = await fetch(`${h.url.replace(/\/$/, "")}/api/broadcast?flat=1`, {
+            method: "POST", signal: AbortSignal.timeout(5000),
+            headers: { "content-type": "application/json", ...(h.token ? { authorization: `Bearer ${h.token}` } : {}) },
+            body: JSON.stringify({ text }),
+          });
+          if (r.ok) sent += (await r.json()).sent || 0;
+        } catch { /* host down → skip */ }
+      }
+    }
+    logEvent(`broadcast · ${sent} panes · "${text.slice(0, 60).replace(/\s+/g, " ").trim()}"`);
+    return sendJSON(res, 200, { ok: true, sent });
+  }
+
+  // quick prompts for the compose bar — host-local data/macros.json or sensible defaults
+  if (path === "/api/macros") {
+    let macros = ["continúa", "¿en qué vas? dame un resumen corto", "commit y push lo que tengas", "para lo que estás haciendo"];
+    try { const m = readJSON(join(ROOT, "data", "macros.json")).macros; if (Array.isArray(m) && m.length) macros = m.filter((x) => typeof x === "string"); } catch { /* defaults */ }
+    return sendJSON(res, 200, { macros });
   }
 
   // send a single named key to a tmux pane (arrow-key nav in TUI menus: Codex/Claude pickers, etc.)
@@ -352,7 +461,7 @@ async function api(req, res, path) {
   // launch an agent CLI in a fresh detached tmux session (LAN-only). The binary comes from
   // AGENT_DEFS (allowlist) — never from the client; cwd is a tracked project or a real dir.
   if (path === "/api/launch" && req.method === "POST") {
-    const { agentId, projectId, cwd: cwdIn, create } = await body(req);
+    const { agentId, projectId, cwd: cwdIn, create, firstPrompt } = await body(req);
     const def = AGENT_DEFS.find((a) => a.id === agentId);
     if (!def || !(def.proc && def.proc.length)) return sendJSON(res, 400, { ok: false, err: "agente no lanzable" });
     const bin = def.bins.map(absBin).find(Boolean);
@@ -393,6 +502,22 @@ async function api(req, res, path) {
     const r = await run("tmux", ["new-session", "-d", "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "tmux new-session falló (¿tmux instalado?)" });
     const [paneId, label] = (r.out || "").split("|");
+    // optional first message: wait for the CLI to boot (screen settles), then paste + enter.
+    // fire-and-forget — the client already has its pane and is watching it live.
+    if (typeof firstPrompt === "string" && firstPrompt.trim() && firstPrompt.length <= 4000) {
+      (async () => {
+        let prev = "";
+        for (let i = 0; i < 10; i++) {
+          await new Promise((ok) => setTimeout(ok, 2000));
+          const cap = await run("tmux", ["capture-pane", "-t", paneId, "-p"], ROOT, 4000);
+          if (!cap.ok) return; // pane died before boot
+          if (cap.out.trim() && cap.out === prev) break; // two identical captures → CLI is idle at its prompt
+          prev = cap.out;
+        }
+        await pasteToPane(paneId, firstPrompt.trim(), true);
+        logEvent(`first-prompt · ${agentId} · "${firstPrompt.slice(0, 60).replace(/\s+/g, " ").trim()}"`);
+      })().catch(() => {});
+    }
     logEvent(`launch · ${agentId} · ${session} · ${tildify(cwd)}`);
     return sendJSON(res, 200, { ok: true, paneId, label: label || session, session, cwd: tildify(cwd) });
   }
@@ -452,6 +577,36 @@ async function api(req, res, path) {
   return sendJSON(res, 404, { ok: false, err: "no route" });
 }
 
+// forward one request to a federated host (data/hosts.json). Streams SSE bodies through.
+function rawBody(req) {
+  return new Promise((resolve) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => resolve(d)); });
+}
+async function proxyToHost(req, res, path, hostId) {
+  const h = readHosts().find((x) => x.id === hostId);
+  if (!h) return sendJSON(res, 400, { ok: false, err: `host desconocido: ${hostId}` });
+  const u = new URL(req.url, "http://x");
+  u.searchParams.delete("host"); u.searchParams.delete("t"); // our token never leaves this host
+  const target = `${h.url.replace(/\/$/, "")}${path}${u.searchParams.size ? `?${u.searchParams}` : ""}`;
+  const init = {
+    method: req.method,
+    signal: req.method === "GET" && path === "/api/pane-stream" ? undefined : AbortSignal.timeout(120000),
+    headers: { "content-type": "application/json", ...(h.token ? { authorization: `Bearer ${h.token}` } : {}) },
+  };
+  if (req.method === "POST") init.body = await rawBody(req);
+  let r;
+  try { r = await fetch(target, init); } catch { return sendJSON(res, 502, { ok: false, err: `${hostId} no responde` }); }
+  if ((r.headers.get("content-type") || "").includes("text/event-stream")) {
+    res.writeHead(r.status, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
+    const reader = r.body.getReader();
+    req.on("close", () => reader.cancel().catch(() => {}));
+    try { for (;;) { const { done, value } = await reader.read(); if (done) break; res.write(value); } } catch { /* stream dropped */ }
+    return res.end();
+  }
+  const text = await r.text();
+  res.writeHead(r.status, { "content-type": "application/json", "access-control-allow-origin": "*" });
+  res.end(text);
+}
+
 function serveStatic(res, path) {
   // /data/* is served live from public/data (rebuilt by build-data.mjs on every add/refresh)
   if (path.startsWith("/data/")) {
@@ -483,6 +638,9 @@ createServer(async (req, res) => {
   try {
     if (path.startsWith("/api/")) {
       if (!authorized(req)) return sendJSON(res, 401, { ok: false, err: "token requerido" });
+      // federation: ?host=<id> forwards the request verbatim to that host's panel with ITS token
+      const targetHost = new URL(req.url, "http://x").searchParams.get("host");
+      if (targetHost) return await proxyToHost(req, res, path, targetHost);
       return await api(req, res, path);
     }
     return serveStatic(res, path);

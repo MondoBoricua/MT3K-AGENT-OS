@@ -11,6 +11,9 @@ panel/public/data/*.json
 # The repo ships templates instead; each machine keeps its own real data locally.
 data/projects.json
 data/launch.json
+data/hosts.json
+data/notify.json
+data/macros.json
 data/logs/*.md
 graphify-out/
 

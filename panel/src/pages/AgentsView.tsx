@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AgentRow } from "../lib/api";
-import { getLogs } from "../lib/api";
+import { getLogs, broadcast, agentKey } from "../lib/api";
 import AgentLogo from "../components/AgentLogo";
 
 const HACKER = "/sprites/hacker.webp"; // standing/idle (row 2 = running-left, full frames)
@@ -8,12 +8,26 @@ const LAPTOP = "/sprites/laptop.png"; // coding-on-laptop strip (6 good frames)
 const CODE_COLORS = ["#34d399", "#e6edf3", "#fb923c", "#60a5fa"];
 const CODE_W = [82, 56, 70, 44];
 
-type Props = { agents: AgentRow[]; onOpen: (a: AgentRow) => void };
+type Props = { agents: AgentRow[]; onOpen: (a: AgentRow) => void; onToast?: (text: string, live: boolean) => void };
 
-export default function AgentsView({ agents, onOpen }: Props) {
+export default function AgentsView({ agents, onOpen, onToast }: Props) {
   const live = agents.filter((a) => a.running).length;
   const ready = agents.filter((a) => a.online).length;
   const sessions = agents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
+  const waitingCount = sessions.filter((s) => s.pane.waiting).length;
+
+  // broadcast: one message → every live session on every federated host
+  const [bcText, setBcText] = useState("");
+  const [bcSending, setBcSending] = useState(false);
+  const sendBroadcast = async () => {
+    const text = bcText.trim();
+    if (!text || bcSending) return;
+    setBcSending(true);
+    const r = await broadcast(text);
+    setBcSending(false);
+    if (r?.ok) { setBcText(""); onToast?.(`📣 enviado a ${r.sent} ${r.sent === 1 ? "sesión" : "sesiones"}`, true); }
+    else onToast?.(r?.err ? `error: ${r.err}` : "broadcast falló", false);
+  };
 
   // wall HUD feed: last few OS events (launch/send/query…) from today's log
   const [feed, setFeed] = useState<string[]>([]);
@@ -45,19 +59,37 @@ export default function AgentsView({ agents, onOpen }: Props) {
         <div className="wallscreen absolute left-1/2 top-[6%] z-20 w-[min(620px,92%)] -translate-x-1/2 px-4 py-3">
           <div className="flex items-center justify-between gap-3">
             <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-accent">◉ Sala de operaciones</span>
-            <span className="font-mono text-[10px] text-white/45">{live} codeando · {sessions.length} {sessions.length === 1 ? "sesión" : "sesiones"} tmux</span>
+            <span className="font-mono text-[10px] text-white/45">
+              {live} codeando · {sessions.length} {sessions.length === 1 ? "sesión" : "sesiones"}
+              {waitingCount > 0 && <span className="text-amber-300"> · ⏳ {waitingCount} esperando</span>}
+            </span>
           </div>
-          {/* live tmux sessions as tappable chips */}
+          {/* live tmux sessions as tappable chips (amber = waiting for your input) */}
           <div className="mt-2 flex flex-wrap gap-1.5">
             {sessions.map(({ agent: a, pane: p }) => (
-              <button key={p.paneId} onClick={() => onOpen(a)}
-                className="flex items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 font-mono text-[10px] text-emerald-200 transition hover:bg-emerald-400/20">
+              <button key={`${agentKey(a)}-${p.paneId}`} onClick={() => onOpen(a)}
+                className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] transition ${
+                  p.waiting ? "border-amber-400/40 bg-amber-400/10 text-amber-200 hover:bg-amber-400/20" : "border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20"}`}>
                 <AgentLogo id={a.id} online className="h-3 w-3" />
+                {a.host && <span className="text-sky-300">{a.host}·</span>}
                 <span className="max-w-[160px] truncate">{p.cwd}</span>
+                {p.waiting && <span>⏳</span>}
               </button>
             ))}
             {sessions.length === 0 && <span className="font-mono text-[10px] text-white/30">sin sesiones en tmux — toca un agente y dale ▶ abrir</span>}
           </div>
+          {/* broadcast: one line → every live session everywhere */}
+          {sessions.length > 0 && (
+            <div className="mt-2 flex gap-1.5">
+              <input value={bcText} onChange={(e) => setBcText(e.target.value)} placeholder={`📣 broadcast a ${sessions.length > 1 ? "todas las sesiones" : "la sesión"}…`}
+                spellCheck={false} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); sendBroadcast(); } }}
+                className="min-w-0 flex-1 rounded-lg border border-ink-line bg-ink-850/60 px-2.5 py-1.5 font-mono text-[11px] text-white placeholder:text-white/25 focus:border-accent/50 focus:outline-none" />
+              <button onClick={sendBroadcast} disabled={bcSending || !bcText.trim()}
+                className="shrink-0 rounded-lg bg-accent/20 px-3 py-1.5 font-mono text-[11px] text-accent transition hover:bg-accent/30 disabled:opacity-40">
+                {bcSending ? "…" : "enviar"}
+              </button>
+            </div>
+          )}
           {/* recent OS events */}
           {feed.length > 0 && (
             <div className="mt-2 flex flex-col gap-0.5 border-t border-white/10 pt-2">
@@ -77,7 +109,7 @@ export default function AgentsView({ agents, onOpen }: Props) {
               const sendable = (a.panes?.length ?? 0) > 0;
               const openable = sendable || !!a.launchable; // launchable agents open the sheet to spawn a session
               return (
-                <div key={a.id}
+                <div key={agentKey(a)}
                   onClick={() => openable && onOpen(a)}
                   role={openable ? "button" : undefined}
                   tabIndex={openable ? 0 : undefined}
@@ -113,9 +145,10 @@ export default function AgentsView({ agents, onOpen }: Props) {
                     <div className="flex items-center justify-center gap-1.5">
                       <AgentLogo id={a.id} online={a.online} className="h-3.5 w-3.5" />
                       <span className="font-mono text-[11px] font-semibold leading-tight">{a.name}</span>
+                      {a.host && <span className="rounded border border-sky-400/30 bg-sky-400/10 px-1 font-mono text-[8px] text-sky-300">{a.host}</span>}
                     </div>
-                    <div className={`font-mono text-[9px] uppercase tracking-wider ${a.running ? "text-emerald-300" : a.online ? "text-white/45" : "text-white/25"}`}>
-                      {a.running ? (sendable ? "● codeando" : "● fuera de tmux") : a.online ? "○ listo" : "offline"}
+                    <div className={`font-mono text-[9px] uppercase tracking-wider ${a.waiting ? "text-amber-300" : a.running ? "text-emerald-300" : a.online ? "text-white/45" : "text-white/25"}`}>
+                      {a.waiting ? "⏳ esperando input" : a.running ? (sendable ? "● codeando" : "● fuera de tmux") : a.online ? "○ listo" : "offline"}
                     </div>
                   </div>
                   {/* action hint: live session → write, launchable-only → spawn */}

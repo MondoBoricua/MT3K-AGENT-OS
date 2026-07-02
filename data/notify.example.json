@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy to data/notify.json (gitignored) to get a push when an agent sits waiting for input. Any ntfy topic works (selfhosted or ntfy.sh).",
+  "ntfy": "https://ntfy.sh/tu-topic-secreto"
+}

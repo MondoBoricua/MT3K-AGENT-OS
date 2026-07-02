@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy to data/macros.json (gitignored) to customize the one-tap quick prompts in the terminal compose bar.",
+  "macros": ["continúa", "¿en qué vas? dame un resumen corto", "commit y push lo que tengas", "para lo que estás haciendo"]
+}

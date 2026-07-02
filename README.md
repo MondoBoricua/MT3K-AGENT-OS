@@ -65,10 +65,25 @@ node scripts/build-data.mjs).
 
 The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap one to:
 
-- **✎ write** — if it's already running in a tmux pane, open its live terminal and type into it, with an arrow-key pad for TUI menus.
-- **▶ open** — if it's installed but has no session, spawn a fresh tmux session running that CLI in a directory you pick (a tracked project or any path like `~`), then jump straight into its terminal.
+- **✎ write** — if it's already running in a tmux pane, open its live terminal (SSE-streamed) and type
+  into it, with an arrow-key pad for TUI menus, one-tap **quick prompts** (`data/macros.json`), and
+  **⏻ kill** to end a session. **＋ nueva** spawns parallel sessions of the same agent.
+- **▶ open** — if it's installed but has no session, spawn a fresh tmux session running that CLI in a
+  directory you pick (a tracked project or any path like `~` — created on demand if missing), with an
+  optional **first message** that is pasted once the CLI finishes booting.
+- **⏳ waiting** — a pane whose screen goes still (10s on a prompt, 45s otherwise) is flagged amber
+  everywhere; add `data/notify.json` with an [ntfy](https://ntfy.sh) topic to get a push on your phone.
+- **📣 broadcast** — the wall HUD sends one message to every live session on every federated host.
 
 All tmux control is **LAN-only** and goes through `tmux` directly (no shell) — see the API table.
+
+### Federation (multi-host wall)
+
+Federation is **manual and one-way**: copy `data/hosts.example.json` → `data/hosts.json` on the host
+that should *aggregate* (e.g. your laptop) and list each remote panel's `url` + its `MT3K_TOKEN`.
+That host's wall then shows the remote agents (tagged with the host id) and proxies terminal
+view/typing/launch/kill to them server-side — remote tokens never reach the browser. Hosts that
+aren't listed never connect anywhere; nothing is discovered automatically.
 
 Because launches spawn the raw binary (no shell), your shell **aliases don't apply**. To launch an
 agent with extra env/flags on a given host, copy `data/launch.example.json` → `data/launch.json`
@@ -138,6 +153,13 @@ Graph a repo (`graphify .` inside it), then either:
 | `POST /api/send` | types text into an agent's tmux pane (`{ paneId, text, enter? }`) — LAN-only, used by Agents View |
 | `POST /api/key` | sends a single allowlisted key to a pane (`{ paneId, key }`: `Up`/`Down`/`Enter`/`Escape`/`Tab`…) for navigating TUI menus |
 | `GET /api/pane?id=%N` | live capture of an agent's tmux pane (rendered screen + ANSI colors) for the terminal viewer |
+| `GET /api/pane-stream?id=%N` | SSE stream of the same screen — pushed only when it changes (viewer falls back to polling) |
+| `POST /api/kill` | kills a tmux pane/session (`{ paneId }`) |
+| `POST /api/broadcast` | `{ text }` → pasted into every live agent pane, here and on federated hosts |
+| `GET /api/macros` | quick prompts for the compose bar (`data/macros.json` or defaults) |
+
+Any of the tmux endpoints accepts `?host=<id>` to target a federated host (see `data/hosts.json`) —
+the server forwards the call with that host's own token.
 | `GET /api/skills` | reads `~/.agents/skills` SKILL.md frontmatter |
 | `GET /api/logs` | file-based memory for Memory / Activity |
 

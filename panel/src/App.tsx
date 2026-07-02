@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Manifest, ProjectData } from "./types";
-import { refreshProject, getStatus, getToken, setToken, type AgentRow, type SearchHit } from "./lib/api";
+import { refreshProject, getStatus, getToken, setToken, agentKey, type AgentRow, type SearchHit } from "./lib/api";
 import CommandPalette from "./components/CommandPalette";
 import { HomeIcon, SkillsIcon, MemoryIcon, GraphIcon, ActivityIcon, SettingsIcon, MenuIcon, CloseIcon, GitHubIcon, XIcon, LinkedInIcon, TikTokIcon, YouTubeIcon, MailIcon, AgentsViewIcon } from "./components/icons";
 import KnowledgeGraph from "./pages/KnowledgeGraph";
@@ -77,11 +77,12 @@ export default function App() {
       setAgents(s.agents);
       if (!firstPoll.current) {
         for (const a of s.agents) {
-          if (a.running && prevAgents.current[a.id] === false) pushToast(`${a.name} entró`, true);
-          else if (!a.running && prevAgents.current[a.id] === true) pushToast(`${a.name} salió`, false);
+          const tag = a.host ? `${a.name} @${a.host}` : a.name;
+          if (a.running && prevAgents.current[agentKey(a)] === false) pushToast(`${tag} entró`, true);
+          else if (!a.running && prevAgents.current[agentKey(a)] === true) pushToast(`${tag} salió`, false);
         }
       }
-      prevAgents.current = Object.fromEntries(s.agents.map((a) => [a.id, a.running]));
+      prevAgents.current = Object.fromEntries(s.agents.map((a) => [agentKey(a), a.running]));
       firstPoll.current = false;
     });
     const start = () => {
@@ -139,10 +140,10 @@ export default function App() {
   const goProject = (id: string) => { setSelected(id); setPage("Knowledge Graph"); };
   const onlineCount = agents.filter((a) => a.online).length;
   const runningCount = agents.filter((a) => a.running).length;
-  // open the shared terminal sheet (from the room or the sidebar). We key by id so the sheet
-  // tracks the live agent (panes refresh on each poll).
-  const openAgent = (a: AgentRow) => { setSheetAgentId(a.id); setNavOpen(false); };
-  const sheetAgent = sheetAgentId ? agents.find((a) => a.id === sheetAgentId) ?? null : null;
+  // open the shared terminal sheet (from the room or the sidebar). We key by host:id so the sheet
+  // tracks the live agent (panes refresh on each poll) even across federated hosts.
+  const openAgent = (a: AgentRow) => { setSheetAgentId(agentKey(a)); setNavOpen(false); };
+  const sheetAgent = sheetAgentId ? agents.find((a) => agentKey(a) === sheetAgentId) ?? null : null;
 
   return (
     <div className="relative flex h-screen overflow-hidden text-white">
@@ -187,24 +188,32 @@ export default function App() {
             const cls = `flex items-center gap-2.5 rounded-lg border px-3 py-1.5 text-left font-mono text-xs transition ${
               a.running ? "border-emerald-400/40 bg-emerald-400/10 font-semibold text-white/90" : a.online ? "border-ink-line text-white/55" : "border-ink-line text-white/30"
             } ${openable ? "cursor-pointer hover:border-accent/50 hover:bg-accent/10" : ""}`;
-            // brand logo + a running pulse dot overlaid at its corner
+            // brand logo + a status dot at its corner (amber = waiting for input, green = working)
             const logo = (
               <span className="relative shrink-0">
                 <AgentLogo id={a.id} online={a.online} className="h-[18px] w-[18px]" />
-                {a.running && <span className="absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400 ring-2 ring-ink-850" />}
+                {a.running && (
+                  <span className={`absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 animate-pulse rounded-full ring-2 ring-ink-850 ${a.waiting ? "bg-amber-400 shadow-[0_0_6px] shadow-amber-400" : "bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400"}`} />
+                )}
+              </span>
+            );
+            const label = (
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate">{a.name}</span>
+                {a.host && <span className="shrink-0 rounded border border-sky-400/30 bg-sky-400/10 px-1 text-[9px] text-sky-300">{a.host}</span>}
               </span>
             );
             // clickable quick-access: live session → terminal (⌨), launchable-only → spawn one (▶)
             return openable ? (
-              <button key={a.id} onClick={() => openAgent(a)} title={sendable ? `abrir terminal · ${a.name}` : `abrir sesión · ${a.name}`} className={cls}>
+              <button key={agentKey(a)} onClick={() => openAgent(a)} title={sendable ? `abrir terminal · ${a.name}` : `abrir sesión · ${a.name}`} className={cls}>
                 {logo}
-                <span className="truncate">{a.name}</span>
-                <span className="ml-auto shrink-0 text-[10px] text-accent">{sendable ? `⌨${(a.panes?.length ?? 0) > 1 ? a.panes!.length : ""}` : "▶"}</span>
+                {label}
+                <span className="ml-auto shrink-0 text-[10px] text-accent">{a.waiting ? "⏳" : sendable ? `⌨${(a.panes?.length ?? 0) > 1 ? a.panes!.length : ""}` : "▶"}</span>
               </button>
             ) : (
-              <div key={a.id} className={cls}>
+              <div key={agentKey(a)} className={cls}>
                 {logo}
-                <span className="truncate">{a.name}</span>
+                {label}
                 {a.running && <span className="ml-auto shrink-0 text-[9px] text-emerald-300">live</span>}
               </div>
             );
@@ -260,7 +269,7 @@ export default function App() {
         {page === "Skills" && <Skills />}
         {page === "Memory" && <Memory />}
         {page === "Activity" && <Activity />}
-        {page === "Agents View" && <AgentsView agents={agents} onOpen={openAgent} />}
+        {page === "Agents View" && <AgentsView agents={agents} onOpen={openAgent} onToast={pushToast} />}
         {page === "Settings" && <Settings manifest={manifest} onChanged={() => loadManifest(`?t=${Date.now()}`)} />}
       </main>
 

@@ -1,7 +1,11 @@
 export interface SkillRow { name: string; slug: string; description: string }
 export interface LogEntry { date: string; content: string }
-export interface PaneRef { paneId: string; label: string; window: string; cwd: string }
-export interface AgentRow { id: string; name: string; online: boolean; running: boolean; launchable?: boolean; panes?: PaneRef[] }
+export interface PaneRef { paneId: string; label: string; window: string; cwd: string; waiting?: boolean }
+export interface AgentRow { id: string; name: string; online: boolean; running: boolean; launchable?: boolean; waiting?: boolean; host?: string; panes?: PaneRef[] }
+// unique key for an agent across federated hosts (same CLI can exist on several machines)
+export const agentKey = (a: Pick<AgentRow, "id" | "host">) => `${a.host ?? "local"}:${a.id}`;
+// tmux-touching endpoints ride ?host= so the server proxies them to the right federated panel
+const hostQ = (host?: string) => (host ? `?host=${encodeURIComponent(host)}` : "");
 
 // optional bearer token (only needed when the server runs with MT3K_TOKEN set)
 export const getToken = () => localStorage.getItem("mt3k.token") ?? "";
@@ -32,12 +36,16 @@ export const getSkills = () => jget<{ skills: SkillRow[] }>("/api/skills");
 export const getAgents = () => jget<{ agents: AgentRow[] }>("/api/agents");
 export const getLogs = () => jget<{ logs: LogEntry[] }>("/api/logs");
 export const askQuery = (projectId: string, q: string) => jpost<{ ok: boolean; answer: string }>("/api/query", { projectId, q });
-export const sendToPane = (paneId: string, text: string, enter = true) => jpost<{ ok: boolean; paneId?: string; err?: string }>("/api/send", { paneId, text, enter });
-export const getPane = (paneId: string) => jget<{ ok: boolean; content: string }>(`/api/pane?id=${encodeURIComponent(paneId)}`);
-export const sendKey = (paneId: string, key: string) => jpost<{ ok: boolean; paneId?: string; key?: string; err?: string }>("/api/key", { paneId, key });
-export const killPane = (paneId: string) => jpost<{ ok: boolean; err?: string }>("/api/kill", { paneId });
-export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: string; create?: boolean }) =>
-  jpost<{ ok: boolean; paneId?: string; label?: string; session?: string; cwd?: string; err?: string; missingDir?: boolean }>("/api/launch", { agentId, ...opts });
+export const sendToPane = (paneId: string, text: string, enter = true, host?: string) => jpost<{ ok: boolean; paneId?: string; err?: string }>(`/api/send${hostQ(host)}`, { paneId, text, enter });
+export const getPane = (paneId: string, host?: string) => jget<{ ok: boolean; content: string }>(`/api/pane?id=${encodeURIComponent(paneId)}${host ? `&host=${encodeURIComponent(host)}` : ""}`);
+export const sendKey = (paneId: string, key: string, host?: string) => jpost<{ ok: boolean; paneId?: string; key?: string; err?: string }>(`/api/key${hostQ(host)}`, { paneId, key });
+export const killPane = (paneId: string, host?: string) => jpost<{ ok: boolean; err?: string }>(`/api/kill${hostQ(host)}`, { paneId });
+export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: string; create?: boolean; firstPrompt?: string; host?: string }) => {
+  const { host, ...rest } = opts;
+  return jpost<{ ok: boolean; paneId?: string; label?: string; session?: string; cwd?: string; err?: string; missingDir?: boolean }>(`/api/launch${hostQ(host)}`, { agentId, ...rest });
+};
+export const broadcast = (text: string) => jpost<{ ok: boolean; sent?: number; err?: string }>("/api/broadcast", { text });
+export const getMacros = () => jget<{ macros: string[] }>("/api/macros");
 export const refreshProject = (projectId: string) => jpost<{ ok: boolean; log: string }>("/api/refresh", { projectId });
 
 export interface DiscoverRepo { name: string; path: string; files: number }

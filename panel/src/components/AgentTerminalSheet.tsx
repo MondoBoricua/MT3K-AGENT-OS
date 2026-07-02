@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, agentKey } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import AgentLogo from "./AgentLogo";
 
@@ -29,7 +29,12 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const [missingDir, setMissingDir] = useState(false); // free-form path doesn't exist → offer to create it
   const [showLaunch, setShowLaunch] = useState(false); // force the launch form even when sessions exist (＋ nueva sesión)
   const [killed, setKilled] = useState<string[]>([]); // panes we killed but the status poll hasn't dropped yet
+  const [firstPrompt, setFirstPrompt] = useState(""); // optional first message pasted once the CLI boots
+  const [macros, setMacros] = useState<string[]>([]); // one-tap quick prompts for the compose bar
   const termRef = useRef<HTMLPreElement>(null);
+  const host = agent?.host; // set → this agent lives on a federated host; every tmux call is proxied there
+
+  useEffect(() => { getMacros().then((r) => { if (r?.macros) setMacros(r.macros); }); }, []);
 
   // a just-launched pane isn't in agent.panes until the next status poll — merge it in meanwhile
   const basePanes: PaneRef[] = (agent?.panes ?? []).filter((p) => !killed.includes(p.paneId));
@@ -37,21 +42,22 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const activePane = panes.find((p) => p.paneId === paneId) ?? (panes.length === 1 ? panes[0] : null);
   const paneToWatch = activePane?.paneId;
 
-  // reset whenever a different agent is opened (by id); a single-pane agent jumps straight to fullscreen.
-  // launch target is remembered per agent (localStorage) so repeat opens are one tap.
-  const agentId = agent?.id;
+  // reset whenever a different agent is opened (by host:id); a single-pane agent jumps straight to fullscreen.
+  // launch target is remembered per agent+host (localStorage) so repeat opens are one tap.
+  const aKey = agent ? agentKey(agent) : undefined;
   useEffect(() => {
     const single = !!agent && agent.panes?.length === 1;
     setPaneId(single ? agent!.panes![0].paneId : null);
     setText(""); setFullscreen(single); setTerm("");
     let proj = "", cwd = "~";
     try {
-      const saved = JSON.parse(localStorage.getItem(`mt3k.launch.${agentId}`) ?? "{}");
-      if (saved.projectId && projects.some((p) => p.id === saved.projectId)) proj = saved.projectId;
+      const saved = JSON.parse(localStorage.getItem(`mt3k.launch.${aKey}`) ?? "{}");
+      // projects come from the LOCAL manifest — a remote host launches by path only
+      if (!agent?.host && saved.projectId && projects.some((p) => p.id === saved.projectId)) proj = saved.projectId;
       else if (saved.cwd) cwd = saved.cwd;
     } catch { /* corrupt/absent → defaults */ }
-    setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false); setShowLaunch(false); setKilled([]);
-  }, [agentId]); // eslint-disable-line react-hooks/exhaustive-deps
+    setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false); setShowLaunch(false); setKilled([]); setFirstPrompt("");
+  }, [aKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live view while fullscreen: SSE first (server pushes only when the screen changes),
   // falling back to 900ms polling if the stream errors (old server, proxy, etc.)
@@ -61,20 +67,21 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
     let iv: ReturnType<typeof setInterval> | undefined;
     let es: EventSource | null = null;
     const poll = () => {
-      const pull = async () => { const r = await getPane(paneToWatch); if (alive && r?.ok) setTerm(r.content ?? ""); };
+      const pull = async () => { const r = await getPane(paneToWatch, host); if (alive && r?.ok) setTerm(r.content ?? ""); };
       pull();
       iv = setInterval(pull, 900);
     };
     try {
       const t = getToken(); // EventSource can't send headers → token rides the query string
-      es = new EventSource(`/api/pane-stream?id=${encodeURIComponent(paneToWatch)}${t ? `&t=${encodeURIComponent(t)}` : ""}`);
+      const hq = host ? `&host=${encodeURIComponent(host)}` : "";
+      es = new EventSource(`/api/pane-stream?id=${encodeURIComponent(paneToWatch)}${hq}${t ? `&t=${encodeURIComponent(t)}` : ""}`);
       es.onmessage = (e) => { if (alive) setTerm(JSON.parse(e.data) as string); };
       es.onerror = () => { es?.close(); es = null; if (alive && !iv) poll(); };
     } catch {
       poll();
     }
     return () => { alive = false; es?.close(); if (iv) clearInterval(iv); };
-  }, [paneToWatch, fullscreen]);
+  }, [paneToWatch, fullscreen, host]);
 
   // lock body scroll behind the fullscreen overlay
   useEffect(() => {
@@ -90,16 +97,25 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const send = async () => {
     if (!activePane || !text.trim() || sending) return;
     setSending(true);
-    const r = await sendToPane(activePane.paneId, text, enterOnSend);
+    const r = await sendToPane(activePane.paneId, text, enterOnSend, host);
     setSending(false);
     if (r?.ok) { onToast?.(`enviado a ${agent?.name} · ${activePane.label}`, true); setText(""); }
     else { onToast?.(r?.err ? `error: ${r.err}` : `no se pudo enviar a ${agent?.name}`, false); }
   };
 
+  // one-tap quick prompt: sends immediately (with enter) — the whole point is zero typing on the phone
+  const sendMacro = async (m: string) => {
+    if (!activePane || sending) return;
+    setSending(true);
+    const r = await sendToPane(activePane.paneId, m, true, host);
+    setSending(false);
+    if (!r?.ok) onToast?.(r?.err ? `error: ${r.err}` : "no se pudo enviar", false);
+  };
+
   // tap a named key into the pane (arrow-key nav in TUI menus: Codex/Claude pickers, etc.)
   const key = async (k: string) => {
     if (!activePane) return;
-    const r = await sendKey(activePane.paneId, k);
+    const r = await sendKey(activePane.paneId, k, host);
     if (!r?.ok) onToast?.(r?.err ? `error: ${r.err}` : "no se pudo enviar la tecla", false);
   };
 
@@ -108,13 +124,14 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const launch = async (create = false) => {
     if (!agent || launching) return;
     setLaunching(true);
-    const opts = launchProject ? { projectId: launchProject, create } : { cwd: launchCwd.trim() || "~", create };
+    const fp = firstPrompt.trim() ? { firstPrompt: firstPrompt.trim() } : {};
+    const opts = launchProject ? { projectId: launchProject, create, host, ...fp } : { cwd: launchCwd.trim() || "~", create, host, ...fp };
     const r = await launchAgent(agent.id, opts);
     setLaunching(false);
     if (r?.ok && r.paneId) {
       const pane: PaneRef = { paneId: r.paneId, label: r.label ?? r.session ?? "", window: r.session ?? "", cwd: r.cwd ?? "" };
-      setLaunched(pane); setPaneId(r.paneId); setFullscreen(true); setMissingDir(false); setShowLaunch(false);
-      try { localStorage.setItem(`mt3k.launch.${agent.id}`, JSON.stringify(launchProject ? { projectId: launchProject } : { cwd: launchCwd.trim() || "~" })); } catch { /* private mode */ }
+      setLaunched(pane); setPaneId(r.paneId); setFullscreen(true); setMissingDir(false); setShowLaunch(false); setFirstPrompt("");
+      try { localStorage.setItem(`mt3k.launch.${agentKey(agent)}`, JSON.stringify(launchProject ? { projectId: launchProject } : { cwd: launchCwd.trim() || "~" })); } catch { /* private mode */ }
       onToast?.(`${agent.name} abierto · ${pane.cwd}`, true);
     } else if (r?.missingDir) {
       setMissingDir(true); // show the "create & open" affordance inline instead of a dead-end error
@@ -127,7 +144,7 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   // kill a tmux session from the panel (confirm first — it takes the agent down with it)
   const kill = async (pid: string) => {
     if (!window.confirm("¿Matar esta sesión de tmux? El agente que corre ahí se cierra.")) return;
-    const r = await killPane(pid);
+    const r = await killPane(pid, host);
     if (r?.ok) {
       setKilled((k) => [...k, pid]);
       if (launched?.paneId === pid) setLaunched(null);
@@ -156,7 +173,10 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
           <div className="flex min-w-0 items-center gap-2">
             <AgentLogo id={agent.id} online={agent.online} className="h-5 w-5 shrink-0" />
             <div className="min-w-0">
-              <div className="truncate font-mono text-xs font-semibold">{agent.name} <span className="text-emerald-400">●</span></div>
+              <div className="flex items-center gap-1.5 truncate font-mono text-xs font-semibold">
+                {agent.name} <span className="text-emerald-400">●</span>
+                {host && <span className="rounded border border-sky-400/30 bg-sky-400/10 px-1 text-[9px] font-normal text-sky-300">{host}</span>}
+              </div>
               <div className="truncate font-mono text-[10px] text-white/40">{activePane.cwd} ({activePane.label})</div>
             </div>
           </div>
@@ -195,6 +215,17 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
             <button onClick={() => key("Escape")} title="Escape" className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-2 font-mono text-[10px] text-white/80 transition active:bg-accent/20 active:text-accent">esc</button>
             <button onClick={() => key("Tab")} title="Tab" className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-2 font-mono text-[10px] text-white/80 transition active:bg-accent/20 active:text-accent">tab</button>
           </div>
+          {/* quick prompts: one tap = sent (data/macros.json or defaults) */}
+          {macros.length > 0 && (
+            <div className="mb-2 flex gap-1.5 overflow-x-auto pb-0.5">
+              {macros.map((m) => (
+                <button key={m} onClick={() => sendMacro(m)} disabled={sending}
+                  className="shrink-0 rounded-full border border-ink-line bg-ink-850/60 px-2.5 py-1 font-mono text-[10px] text-white/60 transition hover:border-accent/50 hover:text-accent disabled:opacity-40">
+                  ⚡ {m}
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -277,7 +308,7 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
                 </>
               )}
 
-              {projects.length > 0 && (
+              {!host && projects.length > 0 && (
                 <>
                   <p className="mt-1 font-mono text-[10px] uppercase tracking-wider text-white/35">o un proyecto trackeado</p>
                   <div className="grid grid-cols-2 gap-1.5">
@@ -291,6 +322,11 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
                   </div>
                 </>
               )}
+
+              {/* optional first message — pasted automatically once the CLI finishes booting */}
+              <textarea value={firstPrompt} onChange={(e) => setFirstPrompt(e.target.value)} rows={2}
+                placeholder="mensaje inicial (opcional) — se envía solo cuando el agente arranque"
+                className="mt-1 w-full resize-none rounded-lg border border-ink-line bg-ink-850/60 px-3 py-2 font-mono text-base text-white placeholder:text-white/25 focus:border-accent/50 focus:outline-none sm:text-xs" />
 
               {/* sticky CTA that says WHERE it will open — always reachable without scrolling back */}
               <div className="sticky bottom-0 -mx-1 mt-1 bg-ink-900/95 px-1 pb-1 pt-2 backdrop-blur">
@@ -311,9 +347,9 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
             {panes.map((p) => (
               <div key={p.paneId} className="flex items-stretch gap-1.5">
                 <button onClick={() => { setPaneId(p.paneId); setFullscreen(true); }}
-                  className="min-w-0 flex-1 rounded-xl border border-ink-line bg-ink-850/50 px-3 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink-850">
-                  <div className="truncate font-mono text-xs text-white">{p.cwd}</div>
-                  <div className="font-mono text-[10px] text-white/40">{p.label} · {p.paneId}</div>
+                  className={`min-w-0 flex-1 rounded-xl border px-3 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink-850 ${p.waiting ? "border-amber-400/40 bg-amber-400/5" : "border-ink-line bg-ink-850/50"}`}>
+                  <div className="truncate font-mono text-xs text-white">{p.waiting && <span className="mr-1 text-amber-300">⏳</span>}{p.cwd}</div>
+                  <div className="font-mono text-[10px] text-white/40">{p.label} · {p.paneId}{p.waiting ? " · esperando input" : ""}</div>
                 </button>
                 <button onClick={() => kill(p.paneId)} title="matar esta sesión"
                   className="shrink-0 rounded-xl border border-red-400/25 px-3 font-mono text-xs text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200">
