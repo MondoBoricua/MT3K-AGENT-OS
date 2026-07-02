@@ -46,6 +46,12 @@ export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: s
 };
 export const broadcast = (text: string) => jpost<{ ok: boolean; sent?: number; err?: string }>("/api/broadcast", { text });
 export const getMacros = () => jget<{ macros: string[] }>("/api/macros");
+
+export interface FedHost { id: string; name: string; url: string; hasToken: boolean; reachable: boolean }
+export const getHosts = () => jget<{ hosts: FedHost[] }>("/api/hosts");
+export const saveHost = (h: { id?: string; name?: string; url: string; token?: string }) =>
+  jpost<{ ok: boolean; id?: string; reachable?: boolean; status?: number; err?: string }>("/api/save-host", h);
+export const removeHost = (id: string) => jpost<{ ok: boolean }>("/api/remove-host", { id });
 export const refreshProject = (projectId: string) => jpost<{ ok: boolean; log: string }>("/api/refresh", { projectId });
 
 export interface DiscoverRepo { name: string; path: string; files: number }

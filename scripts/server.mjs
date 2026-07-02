@@ -436,6 +436,59 @@ async function api(req, res, path) {
     return sendJSON(res, 200, { ok: true, sent });
   }
 
+  // --- federated hosts CRUD (edits data/hosts.json from Settings) ---
+  // list never returns tokens — the browser only ever learns whether one is set
+  if (path === "/api/hosts") {
+    const hosts = await Promise.all(readHosts().map(async (h) => {
+      let reachable = false;
+      try {
+        const r = await fetch(`${h.url.replace(/\/$/, "")}/api/agents?flat=1`, {
+          headers: h.token ? { authorization: `Bearer ${h.token}` } : {}, signal: AbortSignal.timeout(2500),
+        });
+        reachable = r.ok;
+      } catch { /* down/unreachable */ }
+      return { id: h.id, name: h.name || h.id, url: h.url, hasToken: !!h.token, reachable };
+    }));
+    return sendJSON(res, 200, { hosts });
+  }
+
+  if (path === "/api/save-host" && req.method === "POST") {
+    const { id: idIn, name, url: urlIn, token } = await body(req);
+    if (typeof urlIn !== "string" || !/^https?:\/\/[^\s/]+/.test(urlIn.trim())) return sendJSON(res, 400, { ok: false, err: "URL inválida (http://ip:puerto)" });
+    const url = urlIn.trim().replace(/\/$/, "");
+    const id = (idIn || name || new URL(url).hostname).toString().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24);
+    if (!id) return sendJSON(res, 400, { ok: false, err: "nombre/id inválido" });
+    const hf = join(ROOT, "data", "hosts.json");
+    const cfg = existsSync(hf) ? readJSON(hf) : { hosts: [] };
+    cfg.hosts = cfg.hosts || [];
+    const prev = cfg.hosts.find((h) => h.id === id);
+    const entry = {
+      id, name: (name || id).toString().slice(0, 40), url,
+      // empty token on edit keeps the stored one — so editing the URL never forces re-pasting the secret
+      token: typeof token === "string" && token.trim() ? token.trim() : prev?.token || "",
+    };
+    cfg.hosts = [...cfg.hosts.filter((h) => h.id !== id), entry];
+    writeFileSync(hf, JSON.stringify(cfg, null, 2) + "\n");
+    // reachability probe so Settings can show instant feedback
+    let reachable = false, status = 0;
+    try {
+      const r = await fetch(`${url}/api/agents?flat=1`, { headers: entry.token ? { authorization: `Bearer ${entry.token}` } : {}, signal: AbortSignal.timeout(3000) });
+      reachable = r.ok; status = r.status;
+    } catch { /* down */ }
+    logEvent(`save-host · ${id} · ${url} · ${reachable ? "ok" : `unreachable(${status || "timeout"})`}`);
+    return sendJSON(res, 200, { ok: true, id, reachable, status });
+  }
+
+  if (path === "/api/remove-host" && req.method === "POST") {
+    const { id } = await body(req);
+    const hf = join(ROOT, "data", "hosts.json");
+    const cfg = existsSync(hf) ? readJSON(hf) : { hosts: [] };
+    cfg.hosts = (cfg.hosts || []).filter((h) => h.id !== id);
+    writeFileSync(hf, JSON.stringify(cfg, null, 2) + "\n");
+    logEvent(`remove-host · ${id}`);
+    return sendJSON(res, 200, { ok: true });
+  }
+
   // quick prompts for the compose bar — host-local data/macros.json or sensible defaults
   if (path === "/api/macros") {
     let macros = ["continúa", "¿en qué vas? dame un resumen corto", "commit y push lo que tengas", "para lo que estás haciendo"];
