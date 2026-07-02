@@ -134,7 +134,10 @@ async function procTree() {
     byPid.set(pid, comm);
     if (!childrenOf.has(ppid)) childrenOf.set(ppid, []);
     childrenOf.get(ppid).push(pid);
-    if (!comm.includes(".app/")) running.add(base(comm)); // skip GUI-app internals (e.g. Codex.app/Resources/codex)
+    // index every path segment, not just the basename: cursor-agent's process is
+    // ".../cursor-agent/versions/x.y/node" — the agent's name only appears as a directory.
+    // GUI-app internals stay excluded (e.g. Codex.app/Resources/codex ≠ the codex CLI running).
+    if (!comm.includes(".app/")) for (const seg of comm.split("/")) if (seg) running.add(seg);
   }
   // basenames of a pid's process AND all its descendants (the agent may BE the pane's root process
   // — tmux runs the binary directly on launch — or live under a kitty/shell wrapper)
@@ -143,7 +146,7 @@ async function procTree() {
     let guard = 0;
     while (stack.length && guard++ < 500) {
       const p = stack.pop();
-      if (byPid.has(p)) out.add(base(byPid.get(p)));
+      if (byPid.has(p)) out.add(byPid.get(p)); // full executable path — matching inspects its segments
       for (const c of childrenOf.get(p) || []) stack.push(c);
     }
     return out;
@@ -176,9 +179,11 @@ async function detectAgents() {
     const proc = a.proc || [];
     const isRunning = installed && proc.some((name) => running.has(name));
     // every pane whose process tree contains this agent's binary — supports multiple sessions of the same CLI.
-    // prefix match covers vendor/arch names ("codex-aarch64-…") that tmux/ps report for the same CLI.
+    // segment match: the agent name may be the basename, a vendor/arch name ("codex-aarch64-…"),
+    // or a directory in the executable's path (".../cursor-agent/versions/x.y/node").
+    const segMatch = (c, p) => c.split("/").some((s) => s === p || s.startsWith(p + "-"));
     const agentPanes = proc.length
-      ? panes.filter((pn) => pn.comms.some((c) => proc.includes(c) || proc.some((p) => c.startsWith(p + "-"))))
+      ? panes.filter((pn) => pn.comms.some((c) => proc.some((p) => segMatch(c, p))))
           .map((pn) => ({ paneId: pn.paneId, label: pn.label, window: pn.window, cwd: pn.cwd }))
       : [];
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)

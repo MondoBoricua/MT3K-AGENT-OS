@@ -32,6 +32,23 @@ node scripts/server.mjs        # → http://localhost:4288
 
 For development with hot-reload: `pnpm --dir panel dev` (Vite :5273, proxies `/api`) **+** `node scripts/server.mjs`.
 
+## Start on boot (autostart)
+
+```bash
+./scripts/install-service.sh install                 # open LAN panel
+./scripts/install-service.sh install --token SECRET  # with API auth (recommended)
+./scripts/install-service.sh status | uninstall
+```
+
+- **macOS** → a LaunchAgent (`~/Library/LaunchAgents/com.mt3k.agent-os.plist`): starts at login,
+  restarts if it dies, logs to `~/Library/Logs/mt3k-agent-os.log`. It pins `TMPDIR` to your real
+  user temp dir — without that, a launchd-run server can't see your tmux sessions.
+- **Linux** → a systemd unit (`/etc/systemd/system/mt3k-agent-os.service`, needs sudo): starts at
+  boot, `Restart=always`, and `KillMode=process` so service restarts never kill the agents' tmux
+  sessions.
+
+Uninstalling stops the panel only — agent tmux sessions keep running.
+
 ## Install with an agent
 
 Hand this prompt to a coding agent (Claude Code, Codex, Cursor `cursor-agent`, …) to set it up from scratch on a clean machine:
@@ -39,18 +56,17 @@ Hand this prompt to a coding agent (Claude Code, Codex, Cursor `cursor-agent`, �
 ```text
 Set up MT3K Agent OS on this machine. Steps:
 
-1. Verify prerequisites are on PATH: node ≥18, pnpm, tmux, git, and graphify
+1. Verify prerequisites are on PATH: node ≥22, pnpm, tmux, git, and graphify
    (https://github.com/safishamsi/graphify). Install whatever is missing, then stop and
    tell me if you can't.
 2. Clone the repo and cd into it:
    git clone <REPO_URL> MT3K-AGENT-OS && cd MT3K-AGENT-OS
-3. Start clean — the repo may carry the previous owner's baked data. Reset it:
-   - write data/projects.json as: {"projects": []}
-   - empty data/logs/ (delete every *.md inside it)
-   - delete panel/public/data/*.json and panel/dist/data/*.json
-   Then confirm none of my own paths/projects remain anywhere under data/ or panel/*/data/.
-4. Build the dashboard:  pnpm --dir panel install && pnpm --dir panel build
-5. Start the OS:  node scripts/server.mjs   (serves panel + API on http://localhost:4288)
+   (a fresh clone is clean by design: private data is gitignored and ships as
+   *.example.json templates — nothing to reset)
+3. Build the dashboard:  pnpm --dir panel install && pnpm --dir panel build
+4. Start the OS:  node scripts/server.mjs   (serves panel + API on http://localhost:4288)
+   — or install it as an autostart service:  ./scripts/install-service.sh install
+5. Verify it starts empty: GET /data/manifest.json must return {"projects":[]}.
 6. Report back: the URL, and the agent CLIs it detected at GET /api/agents
    (id + online/running/launchable for each).
 
@@ -59,7 +75,8 @@ use ＋ Add a project in the panel (or add it to data/projects.json and run
 node scripts/build-data.mjs).
 ```
 
-> Deploying to a shared/remote host instead of a clean local machine? Read **[DEPLOY.md](DEPLOY.md)** first — the privacy gate and auth requirements below are mandatory there.
+> Deploying to a shared/remote host instead of your own machine? See
+> **[Deploying to another host](#deploying-to-another-host)** — set `MT3K_TOKEN` there.
 
 ## Agents View
 
