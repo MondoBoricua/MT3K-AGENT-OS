@@ -73,7 +73,8 @@ function run(cmd, args, cwd, timeoutMs = 60000) {
 function logEvent(line) {
   mkdirSync(LOGS, { recursive: true });
   const day = new Date().toISOString().slice(0, 10);
-  appendFileSync(join(LOGS, `${day}.md`), `- ${new Date().toISOString().slice(11, 19)} — ${line}\n`);
+  // local wall-clock time (the HUD feed shows these lines) — the filename stays UTC-dated
+  appendFileSync(join(LOGS, `${day}.md`), `- ${new Date().toTimeString().slice(0, 8)} — ${line}\n`);
 }
 
 // --- skills cache ---
@@ -372,7 +373,9 @@ async function api(req, res, path) {
     } else if (!statSync(cwd).isDirectory()) {
       return sendJSON(res, 400, { ok: false, err: "esa ruta no es una carpeta" });
     }
-    const session = `mt3k-${agentId}-${Date.now().toString(36).slice(-5)}`;
+    // readable session name: mt3k-claude-onvacation-x4f (target dir + short suffix for uniqueness)
+    const dirSlug = (basename(cwd) || "home").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 20) || "home";
+    const session = `mt3k-${agentId}-${dirSlug}-${Date.now().toString(36).slice(-3)}`;
     // optional host-local launch flags (data/launch.json, gitignored) — shell aliases don't apply
     // here because we spawn the raw binary, so per-host env/args live in data instead:
     //   { "claude": { "env": { "IS_SANDBOX": "1" }, "args": ["--dangerously-skip-permissions"] } }
@@ -392,6 +395,37 @@ async function api(req, res, path) {
     const [paneId, label] = (r.out || "").split("|");
     logEvent(`launch · ${agentId} · ${session} · ${tildify(cwd)}`);
     return sendJSON(res, 200, { ok: true, paneId, label: label || session, session, cwd: tildify(cwd) });
+  }
+
+  // kill an agent's tmux pane (its dedicated session dies with its last pane)
+  if (path === "/api/kill" && req.method === "POST") {
+    const { paneId } = await body(req);
+    if (typeof paneId !== "string" || !/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
+    const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
+    if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+    const r = await run("tmux", ["kill-pane", "-t", paneId], ROOT, 5000);
+    if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "kill-pane falló" });
+    logEvent(`kill · ${paneId}`);
+    return sendJSON(res, 200, { ok: true, paneId });
+  }
+
+  // live pane stream (SSE): pushes the rendered screen only when it changes — smoother than polling
+  if (path === "/api/pane-stream") {
+    const paneId = new URL(req.url, "http://x").searchParams.get("id") || "";
+    if (!/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
+    let last = null, closed = false;
+    const tick = async () => {
+      if (closed) return;
+      const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-S", "-200"], ROOT, 5000);
+      if (!r.ok) { res.write(`event: gone\ndata: {}\n\n`); return end(); }
+      if (r.out !== last) { last = r.out; res.write(`data: ${JSON.stringify(r.out)}\n\n`); }
+    };
+    const iv = setInterval(tick, 500);
+    const end = () => { if (!closed) { closed = true; clearInterval(iv); try { res.end(); } catch { /* gone */ } } };
+    req.on("close", end);
+    tick();
+    return; // keep the connection open
   }
 
   if (path === "/api/query" && req.method === "POST") {
@@ -434,11 +468,23 @@ function serveStatic(res, path) {
   res.end(readFileSync(file));
 }
 
+// optional auth: set MT3K_TOKEN in the env to require `Authorization: Bearer <token>` on /api/*.
+// Unset → open (trusted homelab LAN). SSE can't send headers, so ?t=<token> is also accepted.
+const TOKEN = process.env.MT3K_TOKEN || null;
+const authorized = (req) => {
+  if (!TOKEN) return true;
+  if (req.headers.authorization === `Bearer ${TOKEN}`) return true;
+  return new URL(req.url, "http://x").searchParams.get("t") === TOKEN;
+};
+
 createServer(async (req, res) => {
   const path = decodeURIComponent(new URL(req.url, "http://x").pathname);
-  if (req.method === "OPTIONS") { res.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type", "access-control-allow-methods": "GET,POST,OPTIONS" }); return res.end(); }
+  if (req.method === "OPTIONS") { res.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type,authorization", "access-control-allow-methods": "GET,POST,OPTIONS" }); return res.end(); }
   try {
-    if (path.startsWith("/api/")) return await api(req, res, path);
+    if (path.startsWith("/api/")) {
+      if (!authorized(req)) return sendJSON(res, 401, { ok: false, err: "token requerido" });
+      return await api(req, res, path);
+    }
     return serveStatic(res, path);
   } catch (e) {
     sendJSON(res, 500, { ok: false, err: String(e) });

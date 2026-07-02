@@ -74,6 +74,11 @@ Because launches spawn the raw binary (no shell), your shell **aliases don't app
 agent with extra env/flags on a given host, copy `data/launch.example.json` → `data/launch.json`
 (gitignored, host-local) and set per-agent `env` / `args` there.
 
+**Auth:** set `MT3K_TOKEN=<secret>` in the server's environment to require `Authorization: Bearer`
+on every `/api/*` call (the panel prompts once and stores it in the browser). Unset → open, for a
+trusted LAN. Strongly recommended anywhere `/api/launch` + `data/launch.json` can spawn agents
+with permissive flags.
+
 ## Deploying to another host
 
 See **[DEPLOY.md](DEPLOY.md)**. ⛔ It opens with a **blocking privacy gate**: the repo carries baked,

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Manifest, ProjectData } from "./types";
-import { refreshProject, getStatus, type AgentRow, type SearchHit } from "./lib/api";
+import { refreshProject, getStatus, getToken, setToken, type AgentRow, type SearchHit } from "./lib/api";
 import CommandPalette from "./components/CommandPalette";
 import { HomeIcon, SkillsIcon, MemoryIcon, GraphIcon, ActivityIcon, SettingsIcon, MenuIcon, CloseIcon, GitHubIcon, XIcon, LinkedInIcon, TikTokIcon, YouTubeIcon, MailIcon, AgentsViewIcon } from "./components/icons";
 import KnowledgeGraph from "./pages/KnowledgeGraph";
@@ -45,8 +45,23 @@ export default function App() {
   const [toasts, setToasts] = useState<{ id: number; text: string; live: boolean }[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pendingSel, setPendingSel] = useState<{ project: string; id: string } | null>(null);
+  const [authNeeded, setAuthNeeded] = useState(false);
+  const [tokenDraft, setTokenDraft] = useState("");
   const prevAgents = useRef<Record<string, boolean>>({});
   const firstPoll = useRef(true);
+
+  // server runs with MT3K_TOKEN and ours is missing/wrong → ask once, store in localStorage
+  useEffect(() => {
+    const onUnauthorized = () => setAuthNeeded(true);
+    window.addEventListener("mt3k:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("mt3k:unauthorized", onUnauthorized);
+  }, []);
+  const saveToken = () => {
+    if (!tokenDraft.trim()) return;
+    setToken(tokenDraft.trim());
+    setAuthNeeded(false); setTokenDraft("");
+    window.dispatchEvent(new Event("mt3k:refresh-change")); // re-kick the status poll with the new token
+  };
 
   const pushToast = (text: string, live: boolean) => {
     const id = Date.now() + Math.random();
@@ -258,6 +273,24 @@ export default function App() {
 
       {/* shared terminal/compose sheet — opened from Agents View or the sidebar quick-access list */}
       <AgentTerminalSheet agent={sheetAgent} projects={manifest?.projects ?? []} onClose={() => setSheetAgentId(null)} onToast={pushToast} />
+
+      {/* token gate — shows when the server requires MT3K_TOKEN and ours is missing/wrong */}
+      {authNeeded && (
+        <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 backdrop-blur-sm">
+          <div className="w-[min(360px,90%)] rounded-2xl border border-ink-line bg-ink-900/95 p-5 shadow-2xl">
+            <div className="mb-1 font-mono text-sm font-semibold">🔐 Token requerido</div>
+            <p className="mb-3 font-mono text-[11px] text-white/45">Este servidor corre con MT3K_TOKEN. Pégalo una vez y queda guardado en este navegador.</p>
+            <input value={tokenDraft} onChange={(e) => setTokenDraft(e.target.value)} type="password" placeholder="token…" autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter") saveToken(); }}
+              className="mb-3 w-full rounded-lg border border-ink-line bg-ink-850/60 px-3 py-2 font-mono text-sm text-white placeholder:text-white/30 focus:border-accent/50 focus:outline-none" />
+            <button onClick={saveToken} disabled={!tokenDraft.trim()}
+              className="w-full rounded-lg bg-accent/20 px-4 py-2 text-sm font-medium text-accent transition hover:bg-accent/30 disabled:opacity-40">
+              guardar y conectar
+            </button>
+            {getToken() && <p className="mt-2 text-center font-mono text-[10px] text-amber-300/70">el token guardado fue rechazado — verifica y vuelve a pegarlo</p>}
+          </div>
+        </div>
+      )}
 
       {/* agent notifications */}
       <div className="pointer-events-none fixed bottom-4 right-4 z-[70] flex flex-col gap-2">

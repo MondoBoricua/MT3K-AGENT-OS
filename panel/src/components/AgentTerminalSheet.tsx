@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import AgentLogo from "./AgentLogo";
 
@@ -28,10 +28,11 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const [launchCwd, setLaunchCwd] = useState("~");
   const [missingDir, setMissingDir] = useState(false); // free-form path doesn't exist → offer to create it
   const [showLaunch, setShowLaunch] = useState(false); // force the launch form even when sessions exist (＋ nueva sesión)
+  const [killed, setKilled] = useState<string[]>([]); // panes we killed but the status poll hasn't dropped yet
   const termRef = useRef<HTMLPreElement>(null);
 
   // a just-launched pane isn't in agent.panes until the next status poll — merge it in meanwhile
-  const basePanes: PaneRef[] = agent?.panes ?? [];
+  const basePanes: PaneRef[] = (agent?.panes ?? []).filter((p) => !killed.includes(p.paneId));
   const panes: PaneRef[] = launched && !basePanes.some((p) => p.paneId === launched.paneId) ? [...basePanes, launched] : basePanes;
   const activePane = panes.find((p) => p.paneId === paneId) ?? (panes.length === 1 ? panes[0] : null);
   const paneToWatch = activePane?.paneId;
@@ -49,17 +50,30 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
       if (saved.projectId && projects.some((p) => p.id === saved.projectId)) proj = saved.projectId;
       else if (saved.cwd) cwd = saved.cwd;
     } catch { /* corrupt/absent → defaults */ }
-    setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false); setShowLaunch(false);
+    setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false); setShowLaunch(false); setKilled([]);
   }, [agentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // poll the pane's rendered screen while the fullscreen viewer is open
+  // live view while fullscreen: SSE first (server pushes only when the screen changes),
+  // falling back to 900ms polling if the stream errors (old server, proxy, etc.)
   useEffect(() => {
     if (!paneToWatch || !fullscreen) { setTerm(""); return; }
     let alive = true;
-    const pull = async () => { const r = await getPane(paneToWatch); if (alive && r?.ok) setTerm(r.content ?? ""); };
-    pull();
-    const id = setInterval(pull, 900);
-    return () => { alive = false; clearInterval(id); };
+    let iv: ReturnType<typeof setInterval> | undefined;
+    let es: EventSource | null = null;
+    const poll = () => {
+      const pull = async () => { const r = await getPane(paneToWatch); if (alive && r?.ok) setTerm(r.content ?? ""); };
+      pull();
+      iv = setInterval(pull, 900);
+    };
+    try {
+      const t = getToken(); // EventSource can't send headers → token rides the query string
+      es = new EventSource(`/api/pane-stream?id=${encodeURIComponent(paneToWatch)}${t ? `&t=${encodeURIComponent(t)}` : ""}`);
+      es.onmessage = (e) => { if (alive) setTerm(JSON.parse(e.data) as string); };
+      es.onerror = () => { es?.close(); es = null; if (alive && !iv) poll(); };
+    } catch {
+      poll();
+    }
+    return () => { alive = false; es?.close(); if (iv) clearInterval(iv); };
   }, [paneToWatch, fullscreen]);
 
   // lock body scroll behind the fullscreen overlay
@@ -110,6 +124,20 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
     }
   };
 
+  // kill a tmux session from the panel (confirm first — it takes the agent down with it)
+  const kill = async (pid: string) => {
+    if (!window.confirm("¿Matar esta sesión de tmux? El agente que corre ahí se cierra.")) return;
+    const r = await killPane(pid);
+    if (r?.ok) {
+      setKilled((k) => [...k, pid]);
+      if (launched?.paneId === pid) setLaunched(null);
+      if (paneId === pid) { setPaneId(null); setFullscreen(false); }
+      onToast?.("sesión cerrada", false);
+    } else {
+      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo cerrar la sesión", false);
+    }
+  };
+
   // leaving fullscreen: back to the picker if there are other sessions, otherwise close the sheet
   const exitFullscreen = () => {
     if (panes.length > 1) { setFullscreen(false); setPaneId(null); setText(""); }
@@ -139,6 +167,10 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
                 ＋ nueva
               </button>
             )}
+            <button onClick={() => kill(activePane.paneId)} title="matar esta sesión de tmux"
+              className="rounded-lg border border-red-400/25 px-2.5 py-1 font-mono text-[10px] text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200">
+              ⏻ matar
+            </button>
             <button onClick={exitFullscreen}
               className="rounded-lg border border-ink-line px-2.5 py-1 font-mono text-[10px] text-white/55 transition hover:text-white">
               {panes.length > 1 ? "← sesiones" : "✕ salir"}
@@ -277,11 +309,17 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
           <div className="flex flex-col gap-2">
             <p className="mb-1 font-mono text-[11px] text-white/45">¿a cuál sesión?</p>
             {panes.map((p) => (
-              <button key={p.paneId} onClick={() => { setPaneId(p.paneId); setFullscreen(true); }}
-                className="rounded-xl border border-ink-line bg-ink-850/50 px-3 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink-850">
-                <div className="truncate font-mono text-xs text-white">{p.cwd}</div>
-                <div className="font-mono text-[10px] text-white/40">{p.label} · {p.paneId}</div>
-              </button>
+              <div key={p.paneId} className="flex items-stretch gap-1.5">
+                <button onClick={() => { setPaneId(p.paneId); setFullscreen(true); }}
+                  className="min-w-0 flex-1 rounded-xl border border-ink-line bg-ink-850/50 px-3 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink-850">
+                  <div className="truncate font-mono text-xs text-white">{p.cwd}</div>
+                  <div className="font-mono text-[10px] text-white/40">{p.label} · {p.paneId}</div>
+                </button>
+                <button onClick={() => kill(p.paneId)} title="matar esta sesión"
+                  className="shrink-0 rounded-xl border border-red-400/25 px-3 font-mono text-xs text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200">
+                  ✕
+                </button>
+              </div>
             ))}
             {agent.launchable && (
               <button onClick={() => setShowLaunch(true)}
