@@ -1,8 +1,19 @@
 # MT3K Agent OS
 
+<p>
+  <img alt="Node" src="https://img.shields.io/badge/Node-22%2B-339933?style=for-the-badge&logo=node.js&logoColor=white">
+  <img alt="React" src="https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react&logoColor=black">
+  <img alt="Vite" src="https://img.shields.io/badge/Vite-5-646CFF?style=for-the-badge&logo=vite&logoColor=white">
+  <a href="https://www.patreon.com/MT3K"><img alt="Patreon" src="https://img.shields.io/badge/Patreon-Support_MT3K-FF424D?style=for-the-badge&logo=patreon"></a>
+</p>
+
 A local, file-based **agentic operating system** + a visual **knowledge-graph dashboard** for every repo you map with [graphify](https://github.com/safishamsi/graphify).
 
 Your "shared brain": each project is graphed once, then the panel shows its knowledge graph, god nodes, map confidence, token savings, and an in-panel wiki — and you can ask questions that run `graphify query` live. No external DB, no vector store, no cloud — JSON + markdown on disk.
+
+## Support
+
+MT3K Agent OS is free and open source (MIT). If it's useful to you, [**become a patron**](https://www.patreon.com/MT3K) — patrons ($5+) get early-access posts on new MT3K releases and a voice in what ships next.
 
 ## Layout
 
