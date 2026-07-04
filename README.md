@@ -11,6 +11,29 @@ A local, file-based **agentic operating system** + a visual **knowledge-graph da
 
 Your "shared brain": each project is graphed once, then the panel shows its knowledge graph, god nodes, map confidence, token savings, and an in-panel wiki — and you can ask questions that run `graphify query` live. No external DB, no vector store, no cloud — JSON + markdown on disk.
 
+<p align="center">
+  <img src="img/knowledge-graph.png" alt="MT3K Agent OS — interactive knowledge graph of a mapped repo: 3D cluster view, map confidence, most important files" />
+</p>
+
+<table align="center">
+  <tr>
+    <td align="center"><img src="img/agents-view.png" alt="Agents View: mission-control wall with every agent CLI, live sessions and waiting states" width="420"></td>
+    <td align="center"><img src="img/skills.png" alt="Skills view: every SKILL.md in your canon, searchable" width="420"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Agents View — the mission-control wall</sub></td>
+    <td align="center"><sub>Skills — your whole canon, searchable</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="img/terminal.png" alt="Live agent terminal streamed to the browser via SSE, with quick prompts and an arrow-key pad" width="420"></td>
+    <td align="center"><img src="img/mobile-terminal.png" alt="The same live terminal from a phone: type into a Claude Code session from anywhere on your LAN" width="200"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Live terminal in the browser (SSE)</sub></td>
+    <td align="center"><sub>…and from your phone</sub></td>
+  </tr>
+</table>
+
 ## Support
 
 MT3K Agent OS is free and open source (MIT). If it's useful to you, [**become a patron**](https://www.patreon.com/MT3K) — patrons ($5+) get early-access posts on new MT3K releases and a voice in what ships next.
