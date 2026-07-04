@@ -1,6 +1,6 @@
 {
   "_comment": "Federation is MANUAL and one-way: copy to data/hosts.json (gitignored) on the host that AGGREGATES. Listed hosts never connect back. Each entry needs that host's own MT3K_TOKEN.",
   "hosts": [
-    { "id": "coding", "name": "my second box", "url": "http://192.168.1.x:4288", "token": "<ese-host-su-MT3K_TOKEN>" }
+    { "id": "box2", "name": "my second box", "url": "http://192.168.1.x:4288", "token": "<ese-host-su-MT3K_TOKEN>" }
   ]
 }
