@@ -78,6 +78,26 @@ function logEvent(line) {
   appendFileSync(join(LOGS, `${day}.md`), `- ${new Date().toTimeString().slice(0, 8)} — ${line}\n`);
 }
 
+// uploaded screenshots are transient — the agent reads them within minutes of upload.
+// Keep 7 days (re-reads, debugging), then sweep: on boot and every 12h, so the folder
+// never accumulates old captures of the owner's screens on any host.
+const UPLOADS_DIR = join(ROOT, "data", "uploads");
+const UPLOAD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+function sweepUploads() {
+  if (!existsSync(UPLOADS_DIR)) return;
+  let removed = 0;
+  for (const f of readdirSync(UPLOADS_DIR)) {
+    const p = join(UPLOADS_DIR, f);
+    try {
+      const st = statSync(p);
+      if (st.isFile() && Date.now() - st.mtimeMs > UPLOAD_TTL_MS) { unlinkSync(p); removed++; }
+    } catch { /* deleted underneath us — fine */ }
+  }
+  if (removed) logEvent(`uploads-sweep · ${removed} screenshot${removed === 1 ? "" : "s"} borrado${removed === 1 ? "" : "s"} (>7d)`);
+}
+sweepUploads();
+setInterval(sweepUploads, 12 * 60 * 60 * 1000).unref();
+
 // --- skills cache ---
 let _skills = null;
 function readSkills() {
@@ -430,11 +450,10 @@ async function api(req, res, path) {
     if (!buf.length) return sendJSON(res, 400, { ok: false, err: "imagen vacía" });
     if (buf.length > 15 * 1024 * 1024) return sendJSON(res, 400, { ok: false, err: "imagen demasiado grande (máx 15MB)" });
     const EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif" };
-    const dir = join(ROOT, "data", "uploads");
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(UPLOADS_DIR, { recursive: true });
     // sanitized original name (for humans) + ms timestamp (uniqueness) — never trust the client's filename
     const base = (typeof name === "string" ? basename(name) : "").replace(/\.[^.]*$/, "").replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 40) || "screenshot";
-    const file = join(dir, `${Date.now()}-${base}${EXT[m[1]]}`);
+    const file = join(UPLOADS_DIR, `${Date.now()}-${base}${EXT[m[1]]}`);
     writeFileSync(file, buf);
     logEvent(`upload · ${basename(file)} · ${Math.round(buf.length / 1024)}KB`);
     return sendJSON(res, 200, { ok: true, path: file });
