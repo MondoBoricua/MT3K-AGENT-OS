@@ -6,6 +6,7 @@
  *   POST /api/query    { projectId, q }  → runs `graphify query` in that repo (traversal, $0)
  *   POST /api/refresh  { projectId }      → `graphify update` + re-ingest, appends an activity log
  *   POST /api/send     { paneId, text, enter? } → types text into an agent's tmux pane (LAN-only)
+ *   POST /api/upload   { name, data }       → saves a base64 image to data/uploads/, returns its path
  *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered)
  *   GET  /api/logs                        → data/logs/*.md (Memory / Activity pages)
  *   GET  /api/skills                      → reads ~/.agents/skills SKILL.md frontmatter (Skills page)
@@ -416,6 +417,29 @@ async function api(req, res, path) {
     return sendJSON(res, 200, { ok: true, paneId });
   }
 
+  // receive an image from the panel (screenshot from the phone/desktop), save it under
+  // data/uploads/ (gitignored), and return the absolute path — agent CLIs read images by path,
+  // so the panel then pastes that path into the pane. ?host= proxies this to a federated host,
+  // which saves the file on ITS disk (where its agents can actually read it).
+  if (path === "/api/upload" && req.method === "POST") {
+    const { name, data } = await body(req);
+    if (typeof data !== "string" || !data) return sendJSON(res, 400, { ok: false, err: "imagen vacía" });
+    const m = data.match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/);
+    if (!m) return sendJSON(res, 400, { ok: false, err: "formato no soportado (png/jpeg/webp/gif)" });
+    const buf = Buffer.from(m[2], "base64");
+    if (!buf.length) return sendJSON(res, 400, { ok: false, err: "imagen vacía" });
+    if (buf.length > 15 * 1024 * 1024) return sendJSON(res, 400, { ok: false, err: "imagen demasiado grande (máx 15MB)" });
+    const EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif" };
+    const dir = join(ROOT, "data", "uploads");
+    mkdirSync(dir, { recursive: true });
+    // sanitized original name (for humans) + ms timestamp (uniqueness) — never trust the client's filename
+    const base = (typeof name === "string" ? basename(name) : "").replace(/\.[^.]*$/, "").replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 40) || "screenshot";
+    const file = join(dir, `${Date.now()}-${base}${EXT[m[1]]}`);
+    writeFileSync(file, buf);
+    logEvent(`upload · ${basename(file)} · ${Math.round(buf.length / 1024)}KB`);
+    return sendJSON(res, 200, { ok: true, path: file });
+  }
+
   // one message → every live agent pane on this host (and, unless flat=1, on federated hosts too)
   if (path === "/api/broadcast" && req.method === "POST") {
     const { text } = await body(req);
@@ -684,8 +708,28 @@ function serveStatic(res, path) {
 // optional auth: set MT3K_TOKEN in the env to require `Authorization: Bearer <token>` on /api/*.
 // Unset → open (trusted homelab LAN). SSE can't send headers, so ?t=<token> is also accepted.
 const TOKEN = process.env.MT3K_TOKEN || null;
+
+// trusted subnets: MT3K_TRUST_CIDR="10.10.10.0/24[,…]" skips the token for clients inside those
+// ranges — made for the WireGuard mesh, where the tunnel already authenticated the peer.
+// Spoofing is impractical: the TCP handshake's replies route back through wg0, so an outside
+// host faking a mesh source never completes the connection. Unset → token required as always.
+const TRUST_CIDRS = (process.env.MT3K_TRUST_CIDR || "").split(",").map((s) => s.trim()).filter(Boolean);
+const ipInCidr = (ip, cidr) => {
+  const mapped = ip?.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/); // Node reports v4 clients as ::ffff:a.b.c.d
+  if (mapped) ip = mapped[1];
+  const [base, bitsRaw = "32"] = cidr.split("/");
+  const bits = Number(bitsRaw);
+  const v4 = /^\d+\.\d+\.\d+\.\d+$/;
+  if (!v4.test(ip || "") || !v4.test(base) || !(bits >= 0 && bits <= 32)) return false;
+  const toInt = (s) => s.split(".").reduce((a, o) => a * 256 + Number(o), 0);
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return ((toInt(ip) & mask) >>> 0) === ((toInt(base) & mask) >>> 0);
+};
+const fromTrustedNet = (req) => TRUST_CIDRS.some((c) => ipInCidr(req.socket?.remoteAddress, c));
+
 const authorized = (req) => {
   if (!TOKEN) return true;
+  if (fromTrustedNet(req)) return true;
   if (req.headers.authorization === `Bearer ${TOKEN}`) return true;
   return new URL(req.url, "http://x").searchParams.get("t") === TOKEN;
 };

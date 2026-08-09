@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, agentKey } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, uploadImage, agentKey } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import AgentLogo from "./AgentLogo";
 
@@ -31,7 +31,11 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const [killed, setKilled] = useState<string[]>([]); // panes we killed but the status poll hasn't dropped yet
   const [firstPrompt, setFirstPrompt] = useState(""); // optional first message pasted once the CLI boots
   const [macros, setMacros] = useState<string[]>([]); // one-tap quick prompts for the compose bar
+  const [uploading, setUploading] = useState(false); // screenshot upload in flight
+  const fileRef = useRef<HTMLInputElement>(null); // hidden file input behind the 📎 button
   const termRef = useRef<HTMLPreElement>(null);
+  const stickToBottom = useRef(true); // auto-scroll only while the user is at the bottom — scrolling up must not fight the live feed
+  const [scrolledUp, setScrolledUp] = useState(false); // mirrors stickToBottom for the "↓ al final" pill
   const host = agent?.host; // set → this agent lives on a federated host; every tmux call is proxied there
 
   useEffect(() => { getMacros().then((r) => { if (r?.macros) setMacros(r.macros); }); }, []);
@@ -91,8 +95,29 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
     return () => { document.body.style.overflow = prev; };
   }, [fullscreen]);
 
-  // keep the terminal scrolled to the latest output
-  useEffect(() => { const el = termRef.current; if (el) el.scrollTop = el.scrollHeight; }, [term]);
+  // keep the terminal scrolled to the latest output — but only if the user hasn't scrolled up to read
+  useEffect(() => {
+    const el = termRef.current;
+    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+  }, [term]);
+
+  // re-stick whenever a different pane opens in fullscreen
+  useEffect(() => { stickToBottom.current = true; setScrolledUp(false); }, [paneToWatch, fullscreen]);
+
+  const onTermScroll = () => {
+    const el = termRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48; // px tolerance for momentum/subpixel
+    stickToBottom.current = atBottom;
+    setScrolledUp((s) => (s === !atBottom ? s : !atBottom));
+  };
+
+  const jumpToBottom = () => {
+    const el = termRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    stickToBottom.current = true;
+    setScrolledUp(false);
+  };
 
   const send = async () => {
     if (!activePane || !text.trim() || sending) return;
@@ -110,6 +135,34 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
     const r = await sendToPane(activePane.paneId, m, true, host);
     setSending(false);
     if (!r?.ok) onToast?.(r?.err ? `error: ${r.err}` : "no se pudo enviar", false);
+  };
+
+  // attach a screenshot: upload → the host saves it to data/uploads/ → its absolute path lands
+  // in the compose box, ready to send (agent CLIs read images by path). Works for federated
+  // hosts too — ?host= makes the remote panel save the file where ITS agents can read it.
+  const attachImage = (file: File) => {
+    if (!file.type.startsWith("image/") || uploading) return;
+    setUploading(true);
+    const reader = new FileReader();
+    reader.onerror = () => { setUploading(false); onToast?.("no se pudo leer la imagen", false); };
+    reader.onload = async () => {
+      const r = await uploadImage(file.name || "screenshot", String(reader.result), host);
+      setUploading(false);
+      if (r?.ok && r.path) {
+        setText((t) => (t.trim() ? `${t.trimEnd()}\n${r.path}` : `Mira este screenshot: ${r.path}`));
+        onToast?.(`imagen lista — envía el mensaje para que ${agent?.name} la lea`, true);
+      } else {
+        onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir la imagen", false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // desktop nicety: pasting a screenshot (⌘V) into the compose box attaches it
+  const onComposePaste = (e: React.ClipboardEvent) => {
+    const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/"));
+    const f = item?.getAsFile();
+    if (f) { e.preventDefault(); attachImage(f); }
   };
 
   // tap a named key into the pane (arrow-key nav in TUI menus: Codex/Claude pickers, etc.)
@@ -199,9 +252,18 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
         </header>
 
         {/* sanitized HTML: ansiToHtml escapes all text; spans carry only numeric-derived colors */}
-        <pre ref={termRef}
-          className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono text-[11px] leading-snug text-white/90"
-          dangerouslySetInnerHTML={{ __html: term ? ansiToHtml(term) : "<span style=\"opacity:.4\">cargando terminal…</span>" }} />
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <pre ref={termRef} onScroll={onTermScroll}
+            className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono text-[11px] leading-snug text-white/90"
+            dangerouslySetInnerHTML={{ __html: term ? ansiToHtml(term) : "<span style=\"opacity:.4\">cargando terminal…</span>" }} />
+          {/* the live feed keeps growing while you read scrollback — one tap re-engages auto-scroll */}
+          {scrolledUp && (
+            <button onClick={jumpToBottom}
+              className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-ink-line bg-ink-900/90 px-3 py-1.5 font-mono text-[11px] text-white/70 shadow-lg backdrop-blur transition hover:border-accent/50 hover:text-accent">
+              ↓ al final
+            </button>
+          )}
+        </div>
 
         <div className="border-t border-ink-line bg-ink-900/95 p-3"
           style={{ paddingLeft: "calc(0.75rem + env(safe-area-inset-left))", paddingRight: "calc(0.75rem + env(safe-area-inset-right))" }}>
@@ -229,18 +291,28 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
+            onPaste={onComposePaste}
             onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); } }}
             rows={2}
-            placeholder={`escríbele a ${agent.name}…  (⌘/Ctrl+Enter para enviar)`}
+            placeholder={`escríbele a ${agent.name}…  (⌘/Ctrl+Enter para enviar · pega un screenshot)`}
             className="w-full resize-none rounded-lg border border-ink-line bg-ink-850/60 px-3 py-2 text-base text-white placeholder:text-white/30 focus:border-accent/50 focus:outline-none sm:text-sm" />
+          {/* hidden file input behind 📎 — accept="image/*" opens galería/cámara on the phone */}
+          <input ref={fileRef} type="file" accept="image/*" className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) attachImage(f); e.target.value = ""; }} />
           <div className="mt-2 flex items-center justify-between gap-3">
-            <label className="flex cursor-pointer items-center gap-2 font-mono text-[11px] text-white/55">
-              <input type="checkbox" checked={enterOnSend} onChange={(e) => setEnterOnSend(e.target.checked)} className="accent-[oklch(62%_0.23_25)]" />
-              ↵ enviar (Enter en la terminal)
-            </label>
-            <button onClick={send} disabled={!text.trim() || sending}
+            <div className="flex items-center gap-2.5">
+              <button onClick={() => fileRef.current?.click()} disabled={uploading} title="adjuntar screenshot/imagen"
+                className="rounded-lg border border-ink-line px-2.5 py-1.5 font-mono text-sm text-white/70 transition hover:border-accent/50 hover:text-accent disabled:opacity-40">
+                {uploading ? "…" : "📎"}
+              </button>
+              <label className="flex cursor-pointer items-center gap-2 font-mono text-[11px] text-white/55">
+                <input type="checkbox" checked={enterOnSend} onChange={(e) => setEnterOnSend(e.target.checked)} className="accent-[oklch(62%_0.23_25)]" />
+                ↵ enviar (Enter en la terminal)
+              </label>
+            </div>
+            <button onClick={send} disabled={!text.trim() || sending || uploading}
               className="rounded-lg bg-accent/20 px-4 py-2 text-sm font-medium text-accent transition hover:bg-accent/30 disabled:opacity-40">
-              {sending ? "enviando…" : "enviar"}
+              {sending ? "enviando…" : uploading ? "subiendo…" : "enviar"}
             </button>
           </div>
         </div>

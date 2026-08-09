@@ -15,6 +15,7 @@ data/hosts.json
 data/notify.json
 data/macros.json
 data/logs/*.md
+data/uploads/
 graphify-out/
 
 # os / editor
