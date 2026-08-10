@@ -713,14 +713,17 @@ function serveStatic(res, path) {
   if (path.startsWith("/data/")) {
     const live = join(ROOT, "panel", "public", "data", path.slice(6));
     if (existsSync(live)) {
-      res.writeHead(200, { "content-type": MIME[extname(live)] || "application/octet-stream" });
+      res.writeHead(200, { "content-type": MIME[extname(live)] || "application/octet-stream", "cache-control": "no-cache" });
       return res.end(readFileSync(live));
     }
   }
   let file = join(DIST, path === "/" ? "index.html" : path.replace(/^\//, ""));
   if (!existsSync(file) || statSync(file).isDirectory()) file = join(DIST, "index.html"); // SPA fallback
   if (!existsSync(file)) { res.writeHead(404); return res.end("build the panel first: pnpm build"); }
-  res.writeHead(200, { "content-type": MIME[extname(file)] || "application/octet-stream" });
+  // Vite assets carry a content hash → cache forever. Everything else (index.html, icons) must
+  // NOT be heuristically cached: a stale index.html keeps pointing at a pre-deploy bundle.
+  const cache = path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache";
+  res.writeHead(200, { "content-type": MIME[extname(file)] || "application/octet-stream", "cache-control": cache });
   res.end(readFileSync(file));
 }
 
