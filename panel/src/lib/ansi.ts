@@ -51,6 +51,31 @@ function applyCodes(prev: Style, codes: number[]): Style {
 }
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const escAttr = (s: string) => esc(s).replace(/"/g, "&quot;");
+
+// capture-pane passes through more than SGR colors: OSC 8 hyperlinks (Claude Code emits
+// these), title sets, cursor/erase CSI codes… anything we don't render must be stripped
+// or it shows up as literal "]8;id=…" garbage in the viewer. Visible text is kept.
+const stripNonSgr = (s: string) =>
+  s
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "") // OSC …(BEL|ST): hyperlinks, titles
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, (seq) => (seq.endsWith("m") ? seq : "")) // CSI other than SGR
+    .replace(/\x1b[=>78]|\x1b\([0AB]/g, ""); // keypad modes, cursor save/restore, charset selects
+
+// bare http(s) URLs become tappable links — the scheme is anchored by the regex itself
+// and the href is attribute-escaped, so no other scheme can ever reach the DOM.
+const URL_RE = /https?:\/\/[^\s<>"']+/g;
+function linkify(raw: string): string {
+  let html = "";
+  let i = 0;
+  for (const m of raw.matchAll(URL_RE)) {
+    const url = m[0].replace(/[.,;:!?)\]]+$/, ""); // trailing prose punctuation isn't part of the URL
+    html += esc(raw.slice(i, m.index));
+    html += `<a href="${escAttr(url)}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline">${esc(url)}</a>`;
+    i = (m.index ?? 0) + url.length;
+  }
+  return html + esc(raw.slice(i));
+}
 
 function styleAttr(s: Style): string {
   let fg = s.fg, bg = s.bg;
@@ -65,15 +90,17 @@ function styleAttr(s: Style): string {
   return css.join(";");
 }
 
-// Returns sanitized HTML: all text is escaped; spans only carry numeric-derived colors.
+// Returns sanitized HTML: all text is escaped; spans only carry numeric-derived colors;
+// the only other element is <a> with an http(s)-anchored, attribute-escaped href.
 export function ansiToHtml(input: string): string {
+  input = stripNonSgr(input);
   let st: Style = {};
   let out = "";
   let open = false;
   const flush = (t: string) => {
     if (!t) return;
     if (!open) { out += `<span style="${styleAttr(st)}">`; open = true; }
-    out += esc(t);
+    out += linkify(t);
   };
   const closeSpan = () => { if (open) { out += "</span>"; open = false; } };
 
