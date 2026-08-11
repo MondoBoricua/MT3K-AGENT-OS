@@ -18,6 +18,9 @@ data/logs/*.md
 data/uploads/
 graphify-out/
 
+# per-machine agent config — lives with the owner, never in the public repo
+.claude/
+
 # os / editor
 .DS_Store
 *.log
