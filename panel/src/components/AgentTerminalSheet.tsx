@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, uploadImage, agentKey } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, uploadFile, agentKey } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import AgentLogo from "./AgentLogo";
 
@@ -137,22 +137,23 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
     if (!r?.ok) onToast?.(r?.err ? `error: ${r.err}` : "no se pudo enviar", false);
   };
 
-  // attach a screenshot: upload → the host saves it to data/uploads/ → its absolute path lands
-  // in the compose box, ready to send (agent CLIs read images by path). Works for federated
-  // hosts too — ?host= makes the remote panel save the file where ITS agents can read it.
-  const attachImage = (file: File) => {
-    if (!file.type.startsWith("image/") || uploading) return;
+  // attach a screenshot or PDF: upload → the host saves it to data/uploads/ → its absolute path
+  // lands in the compose box, ready to send (agent CLIs read images/PDFs by path). Works for
+  // federated hosts too — ?host= makes the remote panel save the file where ITS agents read it.
+  const attachFile = (file: File) => {
+    const isPdf = file.type === "application/pdf";
+    if ((!file.type.startsWith("image/") && !isPdf) || uploading) return;
     setUploading(true);
     const reader = new FileReader();
-    reader.onerror = () => { setUploading(false); onToast?.("no se pudo leer la imagen", false); };
+    reader.onerror = () => { setUploading(false); onToast?.("no se pudo leer el archivo", false); };
     reader.onload = async () => {
-      const r = await uploadImage(file.name || "screenshot", String(reader.result), host);
+      const r = await uploadFile(file.name || (isPdf ? "documento" : "screenshot"), String(reader.result), host);
       setUploading(false);
       if (r?.ok && r.path) {
-        setText((t) => (t.trim() ? `${t.trimEnd()}\n${r.path}` : `Mira este screenshot: ${r.path}`));
-        onToast?.(`imagen lista — envía el mensaje para que ${agent?.name} la lea`, true);
+        setText((t) => (t.trim() ? `${t.trimEnd()}\n${r.path}` : `${isPdf ? "Lee este PDF" : "Mira este screenshot"}: ${r.path}`));
+        onToast?.(`${isPdf ? "PDF listo" : "imagen lista"} — envía el mensaje para que ${agent?.name} lo lea`, true);
       } else {
-        onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir la imagen", false);
+        onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir el archivo", false);
       }
     };
     reader.readAsDataURL(file);
@@ -160,9 +161,9 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
 
   // desktop nicety: pasting a screenshot (⌘V) into the compose box attaches it
   const onComposePaste = (e: React.ClipboardEvent) => {
-    const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/"));
+    const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/") || i.type === "application/pdf");
     const f = item?.getAsFile();
-    if (f) { e.preventDefault(); attachImage(f); }
+    if (f) { e.preventDefault(); attachFile(f); }
   };
 
   // tap a named key into the pane (arrow-key nav in TUI menus: Codex/Claude pickers, etc.)
@@ -296,12 +297,12 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
             rows={2}
             placeholder={`escríbele a ${agent.name}…  (⌘/Ctrl+Enter para enviar · pega un screenshot)`}
             className="w-full resize-none rounded-lg border border-ink-line bg-ink-850/60 px-3 py-2 text-base text-white placeholder:text-white/30 focus:border-accent/50 focus:outline-none sm:text-sm" />
-          {/* hidden file input behind 📎 — accept="image/*" opens galería/cámara on the phone */}
-          <input ref={fileRef} type="file" accept="image/*" className="hidden"
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) attachImage(f); e.target.value = ""; }} />
+          {/* hidden file input behind 📎 — image/* opens galería/cámara on the phone, .pdf adds Archivos */}
+          <input ref={fileRef} type="file" accept="image/*,application/pdf,.pdf" className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) attachFile(f); e.target.value = ""; }} />
           <div className="mt-2 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">
-              <button onClick={() => fileRef.current?.click()} disabled={uploading} title="adjuntar screenshot/imagen"
+              <button onClick={() => fileRef.current?.click()} disabled={uploading} title="adjuntar screenshot o PDF"
                 className="rounded-lg border border-ink-line px-2.5 py-1.5 font-mono text-sm text-white/70 transition hover:border-accent/50 hover:text-accent disabled:opacity-40">
                 {uploading ? "…" : "📎"}
               </button>

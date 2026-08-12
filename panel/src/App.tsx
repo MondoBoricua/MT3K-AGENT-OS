@@ -301,8 +301,10 @@ export default function App() {
         </div>
       )}
 
-      {/* agent notifications */}
-      <div className="pointer-events-none fixed bottom-4 right-4 z-[70] flex flex-col gap-2">
+      {/* agent notifications — top-right: bottom-right sat on top of the terminal sheet's
+          compose bar (z-60) and covered the send button right when you needed it */}
+      <div className="pointer-events-none fixed right-4 z-[70] flex flex-col gap-2"
+        style={{ top: "calc(1rem + env(safe-area-inset-top))" }}>
         {toasts.map((t) => (
           <div key={t.id} className={`pointer-events-auto flex items-center gap-2 rounded-xl border px-3 py-2 text-sm shadow-2xl backdrop-blur ${t.live ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200" : "border-ink-line bg-ink-800/90 text-white/70"}`}>
             <span className={`h-1.5 w-1.5 rounded-full ${t.live ? "animate-pulse bg-emerald-400" : "bg-white/30"}`} /> {t.text}

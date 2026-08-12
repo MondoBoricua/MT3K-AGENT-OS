@@ -45,9 +45,9 @@ export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: s
   return jpost<{ ok: boolean; paneId?: string; label?: string; session?: string; cwd?: string; err?: string; missingDir?: boolean }>(`/api/launch${hostQ(host)}`, { agentId, ...rest });
 };
 export const broadcast = (text: string) => jpost<{ ok: boolean; sent?: number; err?: string }>("/api/broadcast", { text });
-// upload a screenshot/image → the target host saves it under data/uploads/ and returns the
+// upload a screenshot/image/PDF → the target host saves it under data/uploads/ and returns the
 // absolute path, which agent CLIs (claude/codex/…) can read when the path is pasted to them
-export const uploadImage = (name: string, dataUrl: string, host?: string) =>
+export const uploadFile = (name: string, dataUrl: string, host?: string) =>
   jpost<{ ok: boolean; path?: string; err?: string }>(`/api/upload${hostQ(host)}`, { name, data: dataUrl });
 export const getMacros = () => jget<{ macros: string[] }>("/api/macros");
 
