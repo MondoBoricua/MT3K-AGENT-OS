@@ -142,16 +142,19 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   // federated hosts too — ?host= makes the remote panel save the file where ITS agents read it.
   const attachFile = (file: File) => {
     const isPdf = file.type === "application/pdf";
-    if ((!file.type.startsWith("image/") && !isPdf) || uploading) return;
+    const isAudio = file.type.startsWith("audio/");
+    if ((!file.type.startsWith("image/") && !isPdf && !isAudio) || uploading) return;
     setUploading(true);
     const reader = new FileReader();
     reader.onerror = () => { setUploading(false); onToast?.("no se pudo leer el archivo", false); };
     reader.onload = async () => {
-      const r = await uploadFile(file.name || (isPdf ? "documento" : "screenshot"), String(reader.result), host);
+      const r = await uploadFile(file.name || (isPdf ? "documento" : isAudio ? "audio" : "screenshot"), String(reader.result), host);
       setUploading(false);
       if (r?.ok && r.path) {
-        setText((t) => (t.trim() ? `${t.trimEnd()}\n${r.path}` : `${isPdf ? "Lee este PDF" : "Mira este screenshot"}: ${r.path}`));
-        onToast?.(`${isPdf ? "PDF listo" : "imagen lista"} — envía el mensaje para que ${agent?.name} lo lea`, true);
+        const intro = isPdf ? "Lee este PDF" : isAudio ? "Aquí tienes un audio" : "Mira este screenshot";
+        const ready = isPdf ? "PDF listo" : isAudio ? "audio listo" : "imagen lista";
+        setText((t) => (t.trim() ? `${t.trimEnd()}\n${r.path}` : `${intro}: ${r.path}`));
+        onToast?.(`${ready} — envía el mensaje para que ${agent?.name} lo lea`, true);
       } else {
         onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir el archivo", false);
       }
@@ -297,12 +300,12 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
             rows={2}
             placeholder={`escríbele a ${agent.name}…  (⌘/Ctrl+Enter para enviar · pega un screenshot)`}
             className="w-full resize-none rounded-lg border border-ink-line bg-ink-850/60 px-3 py-2 text-base text-white placeholder:text-white/30 focus:border-accent/50 focus:outline-none sm:text-sm" />
-          {/* hidden file input behind 📎 — image/* opens galería/cámara on the phone, .pdf adds Archivos */}
-          <input ref={fileRef} type="file" accept="image/*,application/pdf,.pdf" className="hidden"
+          {/* hidden file input behind 📎 — image/* opens galería/cámara on the phone; pdf/audio add Archivos */}
+          <input ref={fileRef} type="file" accept="image/*,application/pdf,.pdf,audio/*,.mp3,.m4a,.wav" className="hidden"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) attachFile(f); e.target.value = ""; }} />
           <div className="mt-2 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">
-              <button onClick={() => fileRef.current?.click()} disabled={uploading} title="adjuntar screenshot o PDF"
+              <button onClick={() => fileRef.current?.click()} disabled={uploading} title="adjuntar screenshot, PDF o audio"
                 className="rounded-lg border border-ink-line px-2.5 py-1.5 font-mono text-sm text-white/70 transition hover:border-accent/50 hover:text-accent disabled:opacity-40">
                 {uploading ? "…" : "📎"}
               </button>

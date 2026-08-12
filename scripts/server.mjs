@@ -443,19 +443,25 @@ async function api(req, res, path) {
     return sendJSON(res, 200, { ok: true, paneId });
   }
 
-  // receive an image or PDF from the panel (screenshot/doc from the phone/desktop), save it under
+  // receive an image, PDF, or audio file from the panel (from the phone/desktop), save it under
   // data/uploads/ (gitignored), and return the absolute path — agent CLIs read images by path,
   // so the panel then pastes that path into the pane. ?host= proxies this to a federated host,
   // which saves the file on ITS disk (where its agents can actually read it).
   if (path === "/api/upload" && req.method === "POST") {
     const { name, data } = await body(req);
     if (typeof data !== "string" || !data) return sendJSON(res, 400, { ok: false, err: "imagen vacía" });
-    const m = data.match(/^data:(image\/(?:png|jpeg|webp|gif)|application\/pdf);base64,([A-Za-z0-9+/=]+)$/);
-    if (!m) return sendJSON(res, 400, { ok: false, err: "formato no soportado (png/jpeg/webp/gif/pdf)" });
+    const m = data.match(/^data:(image\/(?:png|jpeg|webp|gif)|application\/pdf|audio\/(?:mpeg|mp3|mp4|x-m4a|wav|x-wav|ogg|webm|aac|flac));base64,([A-Za-z0-9+/=]+)$/);
+    if (!m) return sendJSON(res, 400, { ok: false, err: "formato no soportado (png/jpeg/webp/gif/pdf/audio)" });
     const buf = Buffer.from(m[2], "base64");
     if (!buf.length) return sendJSON(res, 400, { ok: false, err: "archivo vacío" });
     if (buf.length > 25 * 1024 * 1024) return sendJSON(res, 400, { ok: false, err: "archivo demasiado grande (máx 25MB)" });
-    const EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "application/pdf": ".pdf" };
+    const EXT = {
+      "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif",
+      "application/pdf": ".pdf",
+      "audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/mp4": ".m4a", "audio/x-m4a": ".m4a",
+      "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/ogg": ".ogg", "audio/webm": ".webm",
+      "audio/aac": ".aac", "audio/flac": ".flac",
+    };
     mkdirSync(UPLOADS_DIR, { recursive: true });
     // sanitized original name (for humans) + ms timestamp (uniqueness) — never trust the client's filename
     const base = (typeof name === "string" ? basename(name) : "").replace(/\.[^.]*$/, "").replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 40) || "screenshot";
