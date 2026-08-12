@@ -422,8 +422,9 @@ async function api(req, res, path) {
     if (!/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
     const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
-    // -e keeps colors, -p prints to stdout, -S -200 includes a little scrollback (keep on-screen line breaks → less reflow)
-    const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-S", "-200"], ROOT, 5000);
+    // -e keeps colors, -p prints to stdout, -S -1000 ships real scrollback — 200 felt like
+    // "no history" on long agent sessions (keep on-screen line breaks → less reflow)
+    const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-S", "-1000"], ROOT, 5000);
     return sendJSON(res, 200, { ok: r.ok, content: r.out });
   }
 
@@ -648,7 +649,7 @@ async function api(req, res, path) {
     let last = null, closed = false;
     const tick = async () => {
       if (closed) return;
-      const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-S", "-200"], ROOT, 5000);
+      const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-S", "-1000"], ROOT, 5000);
       if (!r.ok) { res.write(`event: gone\ndata: {}\n\n`); return end(); }
       if (r.out !== last) { last = r.out; res.write(`data: ${JSON.stringify(r.out)}\n\n`); }
     };
