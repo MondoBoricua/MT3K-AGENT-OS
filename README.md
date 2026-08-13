@@ -118,7 +118,10 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
 
 - **✎ write** — if it's already running in a tmux pane, open its live terminal (SSE-streamed) and type
   into it, with an arrow-key pad for TUI menus, one-tap **quick prompts** (`data/macros.json`), and
-  **⏻ kill** to end a session. **＋ nueva** spawns parallel sessions of the same agent.
+  **⏻ kill** to end a session. **＋ nueva** spawns parallel sessions of the same agent. The **📎**
+  button (or pasting into the compose box) attaches a screenshot, PDF, or audio file: it's saved under
+  `data/uploads/` on the host where the agent lives (federation included) and its path is composed
+  into the message so the CLI reads it directly. Max 25MB; files are swept after 7 days.
 - **▶ open** — if it's installed but has no session, spawn a fresh tmux session running that CLI in a
   directory you pick (a tracked project or any path like `~` — created on demand if missing), with an
   optional **first message** that is pasted once the CLI finishes booting.
@@ -127,6 +130,19 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
 - **📣 broadcast** — the wall HUD sends one message to every live session on every federated host.
 
 All tmux control is **LAN-only** and goes through `tmux` directly (no shell) — see the API table.
+
+### Terminal scrollback
+
+The live terminal ships up to **1,000 lines** of tmux scrollback and only auto-follows the feed while
+you're at the bottom, so you can scroll up to read while the agent keeps working. Two host-side
+requirements for that history to exist at all:
+
+- **tmux must keep history** — set a generous limit in `~/.tmux.conf`: `set -g history-limit 50000`.
+- **The agent CLI must render inline, not on the alternate screen.** Claude Code with
+  `"tui": "fullscreen"` in `~/.claude/settings.json` draws on the terminal's alternate screen, where
+  tmux keeps **zero** scrollback — the viewer then shows only the current frame and scrolling up hits
+  a wall. Remove that setting on hosts the panel watches — Claude Code hot-reloads its settings, so
+  even already-running sessions drop out of fullscreen and start accumulating history right away.
 
 ### Federation (multi-host wall)
 
