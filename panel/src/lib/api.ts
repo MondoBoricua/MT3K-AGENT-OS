@@ -78,3 +78,27 @@ export const reingest = () => jpost<{ ok: boolean }>("/api/reingest", {});
 
 export interface SearchHit { project: string; projectName: string; id: string; label: string; community: number }
 export const searchNodes = (q: string) => jget<{ results: SearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}`);
+
+// --- file browser / viewer / editor (paths are absolute on the target host; `~` expands there) ---
+export interface FsEntry { name: string; dir: boolean; size: number; mtime: number }
+export interface FsQuick { name: string; path: string }
+export interface FsListing { ok: boolean; path: string; parent: string; home: string; quick: FsQuick[]; entries: FsEntry[]; err?: string }
+export interface FsFile { ok: boolean; path: string; kind: "text" | "binary"; mime: string; content?: string; size: number; mtime: number; tooBig?: boolean; err?: string }
+const hostAmp = (host?: string) => (host ? `&host=${encodeURIComponent(host)}` : "");
+// fs endpoints answer 4xx WITH a JSON `err` worth showing ("esa carpeta no existe") — keep the body
+async function jgetLoose<T>(url: string): Promise<T | null> {
+  try {
+    const r = await fetch(url, { headers: authHeaders() });
+    if (!r.ok) notifyUnauthorized(r);
+    return (await r.json()) as T;
+  } catch {
+    return null;
+  }
+}
+export const fsList = (path: string, host?: string) => jgetLoose<FsListing>(`/api/fs/list?path=${encodeURIComponent(path)}${hostAmp(host)}`);
+export const fsRead = (path: string, host?: string) => jgetLoose<FsFile>(`/api/fs/read?path=${encodeURIComponent(path)}${hostAmp(host)}`);
+export const fsWrite = (path: string, content: string, expectMtime?: number, host?: string) =>
+  jpost<{ ok: boolean; mtime?: number; conflict?: boolean; err?: string }>(`/api/fs/write${hostQ(host)}`, { path, content, expectMtime });
+// <img>/<iframe>/<audio> can't send headers → the token rides the query string (same as SSE)
+export const fsRawUrl = (path: string, host?: string) =>
+  `/api/fs/raw?path=${encodeURIComponent(path)}${hostAmp(host)}${getToken() ? `&t=${encodeURIComponent(getToken())}` : ""}`;

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Manifest, ProjectData } from "./types";
 import { refreshProject, getStatus, getToken, setToken, agentKey, type AgentRow, type SearchHit } from "./lib/api";
 import CommandPalette from "./components/CommandPalette";
-import { HomeIcon, SkillsIcon, MemoryIcon, GraphIcon, ActivityIcon, SettingsIcon, MenuIcon, CloseIcon, GitHubIcon, XIcon, LinkedInIcon, TikTokIcon, YouTubeIcon, MailIcon, AgentsViewIcon } from "./components/icons";
+import { HomeIcon, SkillsIcon, MemoryIcon, GraphIcon, ActivityIcon, SettingsIcon, MenuIcon, CloseIcon, GitHubIcon, XIcon, LinkedInIcon, TikTokIcon, YouTubeIcon, MailIcon, AgentsViewIcon, FilesIcon } from "./components/icons";
 import KnowledgeGraph from "./pages/KnowledgeGraph";
 import Skills from "./pages/Skills";
 import Memory from "./pages/Memory";
@@ -10,6 +10,7 @@ import Activity from "./pages/Activity";
 import Home from "./pages/Home";
 import Settings from "./pages/Settings";
 import AgentsView from "./pages/AgentsView";
+import Files from "./pages/Files";
 import AgentTerminalSheet from "./components/AgentTerminalSheet";
 import AgentLogo from "./components/AgentLogo";
 
@@ -20,6 +21,7 @@ const NAV = [
   { name: "Memory", Icon: MemoryIcon },
   { name: "Knowledge Graph", Icon: GraphIcon },
   { name: "Agents View", Icon: AgentsViewIcon },
+  { name: "Files", Icon: FilesIcon },
   { name: "Activity", Icon: ActivityIcon },
 ] as const;
 type Page = (typeof NAV)[number]["name"] | "Settings";
@@ -269,6 +271,7 @@ export default function App() {
         {page === "Skills" && <Skills />}
         {page === "Memory" && <Memory />}
         {page === "Activity" && <Activity />}
+        {page === "Files" && <Files onToast={pushToast} />}
         {page === "Agents View" && <AgentsView agents={agents} onOpen={openAgent} onToast={pushToast} />}
         {page === "Settings" && <Settings manifest={manifest} onChanged={() => loadManifest(`?t=${Date.now()}`)} />}
       </main>

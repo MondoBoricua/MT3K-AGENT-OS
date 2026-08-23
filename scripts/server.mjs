@@ -7,6 +7,7 @@
  *   POST /api/refresh  { projectId }      → `graphify update` + re-ingest, appends an activity log
  *   POST /api/send     { paneId, text, enter? } → types text into an agent's tmux pane (LAN-only)
  *   POST /api/upload   { name, data }       → saves a base64 image to data/uploads/, returns its path
+ *   GET  /api/fs/list|read|raw ?path=  +  POST /api/fs/write → file browser / viewer / editor
  *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered)
  *   GET  /api/logs                        → data/logs/*.md (Memory / Activity pages)
  *   GET  /api/skills                      → reads ~/.agents/skills SKILL.md frontmatter (Skills page)
@@ -16,8 +17,8 @@
  * Dev:  pnpm dev  (vite :5273 proxies /api → :4288)  +  node scripts/server.mjs
  */
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync } from "node:fs";
-import { join, dirname, extname, basename } from "node:path";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync } from "node:fs";
+import { join, dirname, extname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, networkInterfaces } from "node:os";
 import { spawn } from "node:child_process";
@@ -97,6 +98,27 @@ function sweepUploads() {
 }
 sweepUploads();
 setInterval(sweepUploads, 12 * 60 * 60 * 1000).unref();
+
+// file browser helpers: `~` expansion + absolute-only paths, text size cap, preview MIMEs
+const FS_TEXT_MAX = 2 * 1024 * 1024;
+const fsPath = (p) => {
+  if (typeof p !== "string" || !p.trim()) return null;
+  const abs = resolve(expand(p.trim()));
+  return abs.startsWith("/") ? abs : null;
+};
+const FS_MIME = {
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".ico": "image/x-icon",
+  ".pdf": "application/pdf",
+  ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".wav": "audio/wav", ".ogg": "audio/ogg", ".aac": "audio/aac", ".flac": "audio/flac",
+  ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+  ".json": "application/json", ".md": "text/markdown", ".txt": "text/plain", ".csv": "text/csv",
+  // active content → plain text on purpose (see /api/fs/raw)
+  ".html": "text/plain", ".htm": "text/plain", ".svg": "text/plain", ".js": "text/plain", ".mjs": "text/plain", ".xml": "text/plain",
+};
+const fsMime = (file) => {
+  const m = FS_MIME[extname(file).toLowerCase()] || "application/octet-stream";
+  return /^(image|video|audio|application\/(pdf|octet-stream))/.test(m) ? m : `${m}; charset=utf-8`;
+};
 
 // --- skills cache ---
 let _skills = null;
@@ -687,6 +709,75 @@ async function api(req, res, path) {
     logEvent(`refresh · ${projectId || "all"} · ${ingest.ok ? "ok" : "failed"}`);
     return sendJSON(res, 200, { ok: ingest.ok, log: ingest.out });
   }
+  // --- file browser / viewer / editor (same trust boundary as typing into agent panes:
+  // anyone who can reach /api/* can already run commands through an agent). Paths are
+  // absolute on THIS host; ?host= proxies the whole thing to a federated panel, so the
+  // browser walks that host's disk. `~` expands to the server user's home.
+  if (path === "/api/fs/list") {
+    const dir = fsPath(new URL(req.url, "http://x").searchParams.get("path") || "~");
+    if (!dir) return sendJSON(res, 400, { ok: false, err: "ruta inválida" });
+    let st; try { st = statSync(dir); } catch { return sendJSON(res, 404, { ok: false, err: "esa carpeta no existe" }); }
+    if (!st.isDirectory()) return sendJSON(res, 400, { ok: false, err: "no es una carpeta" });
+    let names; try { names = readdirSync(dir, { withFileTypes: true }); } catch (e) { return sendJSON(res, 403, { ok: false, err: `sin acceso: ${e.code || e}` }); }
+    const entries = names.flatMap((d) => {
+      try {
+        const full = join(dir, d.name);
+        const isDir = d.isSymbolicLink() ? statSync(full).isDirectory() : d.isDirectory();
+        const s2 = statSync(full);
+        return [{ name: d.name, dir: isDir, size: isDir ? 0 : s2.size, mtime: s2.mtimeMs }];
+      } catch { return []; } // dangling symlink / vanished mid-list
+    });
+    // one-tap destinations: home, every tracked project, the panel's own uploads
+    const quick = [{ name: "~", path: homedir() }, ...projects().map((pr) => ({ name: pr.name || pr.id, path: expand(pr.path) })), { name: "uploads", path: UPLOADS_DIR }];
+    return sendJSON(res, 200, { ok: true, path: dir, parent: dirname(dir), home: homedir(), quick, entries });
+  }
+
+  if (path === "/api/fs/read") {
+    const file = fsPath(new URL(req.url, "http://x").searchParams.get("path") || "");
+    if (!file) return sendJSON(res, 400, { ok: false, err: "ruta inválida" });
+    let st; try { st = statSync(file); } catch { return sendJSON(res, 404, { ok: false, err: "ese archivo no existe" }); }
+    if (!st.isFile()) return sendJSON(res, 400, { ok: false, err: "no es un archivo" });
+    const mime = fsMime(file);
+    if (st.size > FS_TEXT_MAX) return sendJSON(res, 200, { ok: true, path: file, kind: "binary", mime, size: st.size, mtime: st.mtimeMs, tooBig: true });
+    const buf = readFileSync(file);
+    // NUL byte in the first 8KB → treat as binary; everything else is editable text
+    if (buf.subarray(0, 8192).includes(0)) return sendJSON(res, 200, { ok: true, path: file, kind: "binary", mime, size: st.size, mtime: st.mtimeMs });
+    return sendJSON(res, 200, { ok: true, path: file, kind: "text", mime, content: buf.toString("utf8"), size: st.size, mtime: st.mtimeMs });
+  }
+
+  // atomic write (tmp + rename) with an optional optimistic lock: expectMtime = the mtime the
+  // editor loaded → if the file changed underneath (an agent edited it), refuse with conflict
+  if (path === "/api/fs/write" && req.method === "POST") {
+    const { path: p, content, expectMtime } = await body(req);
+    const file = fsPath(typeof p === "string" ? p : "");
+    if (!file) return sendJSON(res, 400, { ok: false, err: "ruta inválida" });
+    if (typeof content !== "string") return sendJSON(res, 400, { ok: false, err: "contenido inválido" });
+    if (Buffer.byteLength(content) > FS_TEXT_MAX) return sendJSON(res, 400, { ok: false, err: "archivo demasiado grande (máx 2MB)" });
+    if (!existsSync(dirname(file))) return sendJSON(res, 400, { ok: false, err: "la carpeta no existe" });
+    if (existsSync(file)) {
+      const st = statSync(file);
+      if (!st.isFile()) return sendJSON(res, 400, { ok: false, err: "no es un archivo" });
+      if (typeof expectMtime === "number" && Math.abs(st.mtimeMs - expectMtime) > 1) return sendJSON(res, 409, { ok: false, conflict: true, err: "el archivo cambió en disco desde que lo abriste" });
+    }
+    const tmp = `${file}.mt3k-tmp-${process.pid}`;
+    try { writeFileSync(tmp, content); renameSync(tmp, file); } catch (e) { try { unlinkSync(tmp); } catch { /* none */ } return sendJSON(res, 500, { ok: false, err: `no se pudo guardar: ${e.code || e}` }); }
+    logEvent(`fs-write · ${file} · ${Buffer.byteLength(content)}B`);
+    return sendJSON(res, 200, { ok: true, path: file, mtime: statSync(file).mtimeMs });
+  }
+
+  // raw bytes for previews (<img>/<iframe>/<audio>). ?t= carries the token since tags can't
+  // send headers. Active content (html/svg/js) is served as text/plain: a file on disk must never
+  // be able to run script on the panel's origin.
+  if (path === "/api/fs/raw") {
+    const file = fsPath(new URL(req.url, "http://x").searchParams.get("path") || "");
+    if (!file) return sendJSON(res, 400, { ok: false, err: "ruta inválida" });
+    let st; try { st = statSync(file); } catch { return sendJSON(res, 404, { ok: false, err: "ese archivo no existe" }); }
+    if (!st.isFile()) return sendJSON(res, 400, { ok: false, err: "no es un archivo" });
+    const mime = fsMime(file);
+    res.writeHead(200, { "content-type": mime, "content-length": st.size, "cache-control": "no-store", "x-content-type-options": "nosniff", "access-control-allow-origin": "*" });
+    return res.end(readFileSync(file));
+  }
+
   return sendJSON(res, 404, { ok: false, err: "no route" });
 }
 
@@ -715,9 +806,10 @@ async function proxyToHost(req, res, path, hostId) {
     try { for (;;) { const { done, value } = await reader.read(); if (done) break; res.write(value); } } catch { /* stream dropped */ }
     return res.end();
   }
-  const text = await r.text();
-  res.writeHead(r.status, { "content-type": "application/json", "access-control-allow-origin": "*" });
-  res.end(text);
+  // bytes through untouched — /api/fs/raw previews are binary, not JSON
+  const bytes = Buffer.from(await r.arrayBuffer());
+  res.writeHead(r.status, { "content-type": r.headers.get("content-type") || "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff", "access-control-allow-origin": "*" });
+  res.end(bytes);
 }
 
 function serveStatic(res, path) {

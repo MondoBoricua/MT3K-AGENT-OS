@@ -193,6 +193,21 @@ sudo systemctl daemon-reload && sudo systemctl restart mt3k-agent-os
   that browser's `localStorage` (`mt3k.token`) — you paste it once per device. To change the
   token: update the override, restart the service, and the panel will prompt again.
 
+## Files
+
+The **Files** page is a file browser + viewer/editor for the host's disk (and, via the host picker,
+for every reachable federated host — the panel proxies the bytes, so you walk *that* machine's
+filesystem). Breadcrumbs, a free-form path input, and one-tap quick picks (home, every tracked
+project, `data/uploads/`). Text files open in an editor (⌘/Ctrl+S or **guardar**); images, PDFs,
+audio and video get an inline preview; anything else offers a download. **＋ archivo nuevo aquí**
+creates a file in the current folder.
+
+Saves are atomic (tmp + rename) with an optimistic lock: if an agent rewrote the file since you
+opened it, the panel asks before overwriting. Active content (html/svg/js) is always served as plain
+text so a file on disk can never run script on the panel's origin. Same trust boundary as the
+terminal: anyone who can reach `/api/*` can already act through an agent, so the same token /
+trusted-subnet gate applies. No delete/rename yet — on purpose.
+
 ## Deploying to another host
 
 A fresh `git clone` is clean by design: everything private (`data/projects.json`, `data/launch.json`,
@@ -227,6 +242,7 @@ Graph a repo (`graphify .` inside it), then either:
 | `GET /api/discover` | graphed repos not yet tracked |
 | `GET /api/agents` | detects installed agent CLIs (Claude Code, Codex, OpenCode, Gemini, Grok, Antigravity `agy`, Cursor `cursor-agent`), their live tmux panes, and whether each is `launchable` |
 | `POST /api/launch` | spawns a fresh detached tmux session running an agent's CLI (`{ agentId, projectId? \| cwd? }`) and returns the new `paneId` — binary comes from an allowlist, cwd is a tracked project or a real path like `~` |
+| `GET /api/fs/list\|read\|raw?path=` · `POST /api/fs/write` | file browser / viewer / editor (`?host=` proxies to a federated host) |
 | `POST /api/send` | types text into an agent's tmux pane (`{ paneId, text, enter? }`) — LAN-only, used by Agents View |
 | `POST /api/key` | sends a single allowlisted key to a pane (`{ paneId, key }`: `Up`/`Down`/`Enter`/`Escape`/`Tab`…) for navigating TUI menus |
 | `GET /api/pane?id=%N` | live capture of an agent's tmux pane (rendered screen + ANSI colors) for the terminal viewer |

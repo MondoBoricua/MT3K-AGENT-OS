@@ -30,6 +30,7 @@ export const MenuIcon = (p: P) => (<S {...p}><path d="M4 6h16M4 12h16M4 18h16" /
 export const CloseIcon = (p: P) => (<S {...p}><path d="M6 6l12 12M18 6 6 18" /></S>);
 export const MailIcon = (p: P) => (<S {...p}><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" /></S>);
 export const SearchIcon = (p: P) => (<S {...p}><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></S>);
+export const FilesIcon = (p: P) => (<S {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M3 11h18" /></S>);
 export const AgentsViewIcon = (p: P) => (<S {...p}><rect x="4" y="8" width="16" height="11" rx="2" /><path d="M12 8V5M9.5 3h5M9 13h.01M15 13h.01" /></S>);
 
 // brand glyphs (filled, simple-icons paths)
