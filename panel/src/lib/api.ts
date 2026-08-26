@@ -102,3 +102,7 @@ export const fsWrite = (path: string, content: string, expectMtime?: number, hos
 // <img>/<iframe>/<audio> can't send headers → the token rides the query string (same as SSE)
 export const fsRawUrl = (path: string, host?: string) =>
   `/api/fs/raw?path=${encodeURIComponent(path)}${hostAmp(host)}${getToken() ? `&t=${encodeURIComponent(getToken())}` : ""}`;
+export const fsUpload = (dir: string, name: string, dataUrl: string, overwrite = false, host?: string) =>
+  jpost<{ ok: boolean; path?: string; exists?: boolean; err?: string }>(`/api/fs/upload${hostQ(host)}`, { dir, name, data: dataUrl, overwrite });
+export const fsMove = (from: string, to: string, overwrite = false, host?: string) =>
+  jpost<{ ok: boolean; path?: string; exists?: boolean; err?: string }>(`/api/fs/move${hostQ(host)}`, { from, to, overwrite });

@@ -128,6 +128,9 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
 - **⏳ waiting** — a pane whose screen goes still (10s on a prompt, 45s otherwise) is flagged amber
   everywhere; add `data/notify.json` with an [ntfy](https://ntfy.sh) topic to get a push on your phone.
 - **📣 broadcast** — the wall HUD sends one message to every live session on every federated host.
+- **Terminal** — a pseudo-agent that opens a **plain tmux shell** (your login shell, rc + aliases
+  applied — no AI). Same flow as any agent: pick a directory, type from the panel, kill when done.
+  Its sessions are the ones named `mt3k-shell-*`.
 
 All tmux control is **LAN-only** and goes through `tmux` directly (no shell) — see the API table.
 
@@ -199,14 +202,17 @@ The **Files** page is a file browser + viewer/editor for the host's disk (and, v
 for every reachable federated host — the panel proxies the bytes, so you walk *that* machine's
 filesystem). Breadcrumbs, a free-form path input, and one-tap quick picks (home, every tracked
 project, `data/uploads/`). Text files open in an editor (⌘/Ctrl+S or **guardar**); images, PDFs,
-audio and video get an inline preview; anything else offers a download. **＋ archivo nuevo aquí**
-creates a file in the current folder.
+audio and video get an inline preview; anything else offers a download. **＋ nuevo** creates a file in
+the current folder, **⬆ subir aquí** drops a file from your device into it (any type, 25MB), and the
+**✎** on any row (or on the open file) moves/renames it — a prompt prefilled with the path covers
+both, and moving into an existing folder keeps the name.
 
 Saves are atomic (tmp + rename) with an optimistic lock: if an agent rewrote the file since you
 opened it, the panel asks before overwriting. Active content (html/svg/js) is always served as plain
-text so a file on disk can never run script on the panel's origin. Same trust boundary as the
-terminal: anyone who can reach `/api/*` can already act through an agent, so the same token /
-trusted-subnet gate applies. No delete/rename yet — on purpose.
+text so a file on disk can never run script on the panel's origin. Uploads and moves refuse to
+clobber an existing file unless you confirm the overwrite. Same trust boundary as the terminal:
+anyone who can reach `/api/*` can already act through an agent, so the same token / trusted-subnet
+gate applies. No delete — on purpose.
 
 ## Deploying to another host
 
@@ -242,7 +248,7 @@ Graph a repo (`graphify .` inside it), then either:
 | `GET /api/discover` | graphed repos not yet tracked |
 | `GET /api/agents` | detects installed agent CLIs (Claude Code, Codex, OpenCode, Gemini, Grok, Antigravity `agy`, Cursor `cursor-agent`), their live tmux panes, and whether each is `launchable` |
 | `POST /api/launch` | spawns a fresh detached tmux session running an agent's CLI (`{ agentId, projectId? \| cwd? }`) and returns the new `paneId` — binary comes from an allowlist, cwd is a tracked project or a real path like `~` |
-| `GET /api/fs/list\|read\|raw?path=` · `POST /api/fs/write` | file browser / viewer / editor (`?host=` proxies to a federated host) |
+| `GET /api/fs/list\|read\|raw?path=` · `POST /api/fs/write\|upload\|move` | file browser / manager (`?host=` proxies to a federated host) |
 | `POST /api/send` | types text into an agent's tmux pane (`{ paneId, text, enter? }`) — LAN-only, used by Agents View |
 | `POST /api/key` | sends a single allowlisted key to a pane (`{ paneId, key }`: `Up`/`Down`/`Enter`/`Escape`/`Tab`…) for navigating TUI menus |
 | `GET /api/pane?id=%N` | live capture of an agent's tmux pane (rendered screen + ANSI colors) for the terminal viewer |

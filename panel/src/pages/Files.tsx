@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { fsList, fsRead, fsWrite, fsRawUrl, getHosts, type FsEntry, type FsListing, type FsFile, type FedHost } from "../lib/api";
+import { useEffect, useRef, useState } from "react";
+import { fsList, fsRead, fsWrite, fsUpload, fsMove, fsRawUrl, getHosts, type FsEntry, type FsListing, type FsFile, type FedHost } from "../lib/api";
 
 type Props = { onToast?: (text: string, live: boolean) => void };
 
@@ -24,6 +24,8 @@ export default function Files({ onToast }: Props) {
   const [draft, setDraft] = useState(""); // editor buffer
   const [saving, setSaving] = useState(false);
   const [opening, setOpening] = useState("");
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const uploadRef = useRef<HTMLInputElement>(null); // hidden input behind "subir"
   const dirty = !!file && file.kind === "text" && draft !== (file.content ?? "");
   const hq = host || undefined;
   const memKey = `mt3k.files.${host || "local"}`;
@@ -85,6 +87,40 @@ export default function Files({ onToast }: Props) {
   };
 
   const closeFile = () => { if (confirmDiscard()) { setFile(null); setDraft(""); } };
+
+  // drop a file from the device into the current folder — any type, 25MB cap
+  const uploadHere = (f: File) => {
+    if (!listing || uploadBusy) return;
+    if (f.size > 25 * 1024 * 1024) { onToast?.("archivo demasiado grande (máx 25MB)", false); return; }
+    setUploadBusy(true);
+    const reader = new FileReader();
+    reader.onerror = () => { setUploadBusy(false); onToast?.("no se pudo leer el archivo", false); };
+    reader.onload = async () => {
+      const send = async (overwrite: boolean) => fsUpload(listing.path, f.name, String(reader.result), overwrite, hq);
+      let r = await send(false);
+      if (r?.exists && window.confirm(`Ya existe «${f.name}» aquí. ¿Sobrescribirlo?`)) r = await send(true);
+      setUploadBusy(false);
+      if (r?.ok) { onToast?.(`subido · ${f.name}`, true); load(listing.path); }
+      else if (!r?.exists) onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir", false);
+    };
+    reader.readAsDataURL(f);
+  };
+
+  // move/rename via a prompt prefilled with the current path — one primitive covers both
+  const movePath = async (from: string) => {
+    if (!listing) return;
+    const to = window.prompt("Mover / renombrar a:", from)?.trim();
+    if (!to || to === from) return;
+    let r = await fsMove(from, to, false, hq);
+    if (r?.exists && window.confirm("Ya existe algo en el destino. ¿Sobrescribirlo?")) r = await fsMove(from, to, true, hq);
+    if (r?.ok && r.path) {
+      onToast?.(`movido → ${r.path}`, true);
+      if (file?.path === from) setFile({ ...file, path: r.path });
+      load(listing.path);
+    } else if (!r?.exists) {
+      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo mover", false);
+    }
+  };
   const copyPath = () => { if (file) navigator.clipboard.writeText(file.path).then(() => onToast?.("ruta copiada", true), () => onToast?.("no se pudo copiar", false)); };
 
   const entries = (listing?.entries ?? [])
@@ -153,12 +189,16 @@ export default function Files({ onToast }: Props) {
                 const active = file?.path === full;
                 return (
                   <li key={e.name}>
-                    <button onClick={() => (e.dir ? load(full) : open(full))} disabled={opening === full}
-                      className={`flex w-full items-center gap-2 px-3 py-2 text-left transition hover:bg-white/5 ${active ? "bg-accent/10" : ""}`}>
-                      <span className="w-5 shrink-0 text-center text-sm">{icon(e)}</span>
-                      <span className={`min-w-0 flex-1 truncate font-mono text-xs ${e.dir ? "text-white" : "text-white/80"}`}>{e.name}{e.dir ? "/" : ""}</span>
-                      <span className="shrink-0 font-mono text-[10px] text-white/35">{e.dir ? "" : human(e.size)}</span>
-                    </button>
+                    <div className={`flex items-center transition hover:bg-white/5 ${active ? "bg-accent/10" : ""}`}>
+                      <button onClick={() => (e.dir ? load(full) : open(full))} disabled={opening === full}
+                        className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left">
+                        <span className="w-5 shrink-0 text-center text-sm">{icon(e)}</span>
+                        <span className={`min-w-0 flex-1 truncate font-mono text-xs ${e.dir ? "text-white" : "text-white/80"}`}>{e.name}{e.dir ? "/" : ""}</span>
+                        <span className="shrink-0 font-mono text-[10px] text-white/35">{e.dir ? "" : human(e.size)}</span>
+                      </button>
+                      <button onClick={() => movePath(full)} title="mover / renombrar"
+                        className="shrink-0 px-2 py-2 font-mono text-[11px] text-white/25 transition hover:text-accent">✎</button>
+                    </div>
                   </li>
                 );
               })}
@@ -166,8 +206,14 @@ export default function Files({ onToast }: Props) {
             </ul>
           )}
           {listing && (
-            <div className="sticky bottom-0 border-t border-ink-line bg-ink-900/95 p-2 backdrop-blur">
-              <button onClick={newFile} className="w-full rounded-lg border border-dashed border-ink-line px-3 py-1.5 font-mono text-[11px] text-white/50 transition hover:border-accent/50 hover:text-accent">＋ archivo nuevo aquí</button>
+            <div className="sticky bottom-0 flex gap-2 border-t border-ink-line bg-ink-900/95 p-2 backdrop-blur">
+              <input ref={uploadRef} type="file" className="hidden"
+                onChange={(ev) => { const f = ev.target.files?.[0]; if (f) uploadHere(f); ev.target.value = ""; }} />
+              <button onClick={newFile} className="flex-1 rounded-lg border border-dashed border-ink-line px-3 py-1.5 font-mono text-[11px] text-white/50 transition hover:border-accent/50 hover:text-accent">＋ nuevo</button>
+              <button onClick={() => uploadRef.current?.click()} disabled={uploadBusy}
+                className="flex-1 rounded-lg border border-dashed border-ink-line px-3 py-1.5 font-mono text-[11px] text-white/50 transition hover:border-accent/50 hover:text-accent disabled:opacity-40">
+                {uploadBusy ? "subiendo…" : "⬆ subir aquí"}
+              </button>
             </div>
           )}
         </div>
@@ -186,6 +232,7 @@ export default function Files({ onToast }: Props) {
                   <div className="truncate font-mono text-[10px] text-white/40">{human(file.size)} · {when(file.mtime)} · {file.mime.split(";")[0]}</div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
+                  <button onClick={() => movePath(file.path)} title="mover / renombrar" className="rounded-lg border border-ink-line px-2 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent">✎</button>
                   <button onClick={copyPath} title="copiar ruta" className="rounded-lg border border-ink-line px-2 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent">⧉ ruta</button>
                   {file.kind === "text" && (
                     <button onClick={save} disabled={saving || (!dirty && !!file.mtime)}

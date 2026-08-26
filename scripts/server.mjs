@@ -7,7 +7,7 @@
  *   POST /api/refresh  { projectId }      → `graphify update` + re-ingest, appends an activity log
  *   POST /api/send     { paneId, text, enter? } → types text into an agent's tmux pane (LAN-only)
  *   POST /api/upload   { name, data }       → saves a base64 image to data/uploads/, returns its path
- *   GET  /api/fs/list|read|raw ?path=  +  POST /api/fs/write → file browser / viewer / editor
+ *   GET  /api/fs/list|read|raw ?path=  +  POST /api/fs/write|upload|move → file browser / manager
  *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered)
  *   GET  /api/logs                        → data/logs/*.md (Memory / Activity pages)
  *   GET  /api/skills                      → reads ~/.agents/skills SKILL.md frontmatter (Skills page)
@@ -160,6 +160,9 @@ const AGENT_DEFS = [
   { id: "antigravity", name: "Antigravity", bins: ["agy", "antigravity"], paths: ["~/.antigravity", "/Applications/Antigravity.app"], proc: ["agy", "antigravity"] },
   // Cursor's agentic CLI (`cursor-agent`), not the `cursor` GUI launcher → real TUI, launchable in tmux
   { id: "cursor", name: "Cursor", bins: ["cursor-agent"], paths: ["~/.cursor"], proc: ["cursor-agent"] },
+  // plain tmux shell — no AI. Launch runs the user's default shell (rc + aliases apply).
+  // Its panes are matched by session-name prefix, not by process (every pane has a shell).
+  { id: "shell", name: "Terminal", bins: [], paths: [], proc: [] },
 ];
 const base = (c) => (c || "").split("/").pop();
 const tildify = (p) => (p && p.startsWith(homedir()) ? "~" + p.slice(homedir().length) : p);
@@ -218,6 +221,11 @@ async function detectAgents() {
   const { running, descendants } = await procTree();
   const panes = await discoverPanes(descendants);
   const rows = AGENT_DEFS.map((a) => {
+    if (a.id === "shell") {
+      const shellPanes = panes.filter((pn) => pn.label.startsWith("mt3k-shell-"))
+        .map((pn) => ({ paneId: pn.paneId, label: pn.label, window: pn.window, cwd: pn.cwd }));
+      return { id: a.id, name: a.name, online: true, running: shellPanes.length > 0, launchable: true, panes: shellPanes };
+    }
     const installed = a.bins.some(onPath) || a.paths.some((p) => existsSync(expand(p)));
     const proc = a.proc || [];
     const isRunning = installed && proc.some((name) => running.has(name));
@@ -598,9 +606,10 @@ async function api(req, res, path) {
   if (path === "/api/launch" && req.method === "POST") {
     const { agentId, projectId, cwd: cwdIn, create, firstPrompt } = await body(req);
     const def = AGENT_DEFS.find((a) => a.id === agentId);
-    if (!def || !(def.proc && def.proc.length)) return sendJSON(res, 400, { ok: false, err: "agente no lanzable" });
-    const bin = def.bins.map(absBin).find(Boolean);
-    if (!bin) return sendJSON(res, 400, { ok: false, err: `${def.name} no está instalado` });
+    const isShell = agentId === "shell";
+    if (!def || (!isShell && !(def.proc && def.proc.length))) return sendJSON(res, 400, { ok: false, err: "agente no lanzable" });
+    const bin = isShell ? null : def.bins.map(absBin).find(Boolean);
+    if (!isShell && !bin) return sendJSON(res, 400, { ok: false, err: `${def.name} no está instalado` });
     // resolve working directory: a tracked project wins; else a free-form path (defaults to home)
     let cwd = homedir();
     if (projectId) {
@@ -623,9 +632,10 @@ async function api(req, res, path) {
     // optional host-local launch flags (data/launch.json, gitignored) — shell aliases don't apply
     // here because we spawn the raw binary, so per-host env/args live in data instead:
     //   { "claude": { "env": { "IS_SANDBOX": "1" }, "args": ["--dangerously-skip-permissions"] } }
-    let cmd = [bin];
+    // shell → NO command: tmux spawns the user's default shell, so rc files and aliases apply
+    let cmd = isShell ? [] : [bin];
     try {
-      const lc = readJSON(join(ROOT, "data", "launch.json"))[agentId];
+      const lc = isShell ? null : readJSON(join(ROOT, "data", "launch.json"))[agentId];
       if (lc) {
         const envPairs = Object.entries(lc.env || {}).filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === "string").map(([k, v]) => `${k}=${v}`);
         const args = (Array.isArray(lc.args) ? lc.args : []).filter((a) => typeof a === "string");
@@ -633,6 +643,9 @@ async function api(req, res, path) {
         else cmd = [bin, ...args];
       }
     } catch { /* no launch.json → plain binary */ }
+    // a tmux server first started from inside a Claude session carries CLAUDE_CODE_CHILD_SESSION —
+    // any claude launched there thinks it's a subagent and stops saving transcripts. Scrub it.
+    await run("tmux", ["set-environment", "-gr", "CLAUDE_CODE_CHILD_SESSION"], ROOT, 3000);
     // -d detached · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
     const r = await run("tmux", ["new-session", "-d", "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "tmux new-session falló (¿tmux instalado?)" });
@@ -763,6 +776,57 @@ async function api(req, res, path) {
     try { writeFileSync(tmp, content); renameSync(tmp, file); } catch (e) { try { unlinkSync(tmp); } catch { /* none */ } return sendJSON(res, 500, { ok: false, err: `no se pudo guardar: ${e.code || e}` }); }
     logEvent(`fs-write · ${file} · ${Buffer.byteLength(content)}B`);
     return sendJSON(res, 200, { ok: true, path: file, mtime: statSync(file).mtimeMs });
+  }
+
+  // drop a file from the device into the current folder (any type — this is a file manager,
+  // not the agent-attach flow). Refuses to clobber silently: existing name -> 409 unless overwrite.
+  if (path === "/api/fs/upload" && req.method === "POST") {
+    const { dir, name, data, overwrite } = await body(req);
+    const target = fsPath(typeof dir === "string" ? dir : "");
+    if (!target) return sendJSON(res, 400, { ok: false, err: "carpeta inválida" });
+    let st; try { st = statSync(target); } catch { return sendJSON(res, 404, { ok: false, err: "esa carpeta no existe" }); }
+    if (!st.isDirectory()) return sendJSON(res, 400, { ok: false, err: "no es una carpeta" });
+    // keep the original name minus path separators and control bytes — never trust the client
+    const rawName = typeof name === "string" ? basename(name) : "";
+    const clean = Array.from(rawName).filter((c) => c.charCodeAt(0) > 31 && c !== "/" && c !== "\\").join("").trim();
+    if (!clean || clean === "." || clean === "..") return sendJSON(res, 400, { ok: false, err: "nombre inválido" });
+    const m = typeof data === "string" ? data.match(/^data:[^;,]*;base64,([A-Za-z0-9+\/=]+)$/) : null;
+    if (!m) return sendJSON(res, 400, { ok: false, err: "archivo vacío o mal codificado" });
+    const buf = Buffer.from(m[1], "base64");
+    if (buf.length > 25 * 1024 * 1024) return sendJSON(res, 400, { ok: false, err: "archivo demasiado grande (máx 25MB)" });
+    const file = join(target, clean);
+    if (existsSync(file) && !overwrite) return sendJSON(res, 409, { ok: false, exists: true, err: "ya existe un archivo con ese nombre" });
+    const tmp = `${file}.mt3k-tmp-${process.pid}`;
+    try { writeFileSync(tmp, buf); renameSync(tmp, file); } catch (e) { try { unlinkSync(tmp); } catch { /* none */ } return sendJSON(res, 500, { ok: false, err: `no se pudo subir: ${e.code || e}` }); }
+    logEvent(`fs-upload · ${file} · ${Math.round(buf.length / 1024)}KB`);
+    return sendJSON(res, 200, { ok: true, path: file });
+  }
+
+  // move/rename a file or folder. `to` may be a target directory (moves inside, keeps the name)
+  // or a full destination path (rename). Never clobbers without overwrite.
+  if (path === "/api/fs/move" && req.method === "POST") {
+    const { from, to, overwrite } = await body(req);
+    const src = fsPath(typeof from === "string" ? from : "");
+    let dst = fsPath(typeof to === "string" ? to : "");
+    if (!src || !dst) return sendJSON(res, 400, { ok: false, err: "ruta inválida" });
+    let st; try { st = statSync(src); } catch { return sendJSON(res, 404, { ok: false, err: "el origen no existe" }); }
+    try { if (statSync(dst).isDirectory()) dst = join(dst, basename(src)); } catch { /* full destination path */ }
+    if (src === dst) return sendJSON(res, 200, { ok: true, path: dst });
+    if (dst.startsWith(src + "/")) return sendJSON(res, 400, { ok: false, err: "no puedes mover una carpeta dentro de sí misma" });
+    if (existsSync(dst) && !overwrite) return sendJSON(res, 409, { ok: false, exists: true, err: "ya existe algo en el destino" });
+    if (!existsSync(dirname(dst))) return sendJSON(res, 400, { ok: false, err: "la carpeta destino no existe" });
+    try {
+      renameSync(src, dst);
+    } catch (e) {
+      // EXDEV = destination on another filesystem — copy+delete works for files, not dirs
+      if (e.code === "EXDEV" && st.isFile()) {
+        try { writeFileSync(dst, readFileSync(src)); unlinkSync(src); } catch (e2) { return sendJSON(res, 500, { ok: false, err: `no se pudo mover: ${e2.code || e2}` }); }
+      } else {
+        return sendJSON(res, 500, { ok: false, err: `no se pudo mover: ${e.code || e}` });
+      }
+    }
+    logEvent(`fs-move · ${src} -> ${dst}`);
+    return sendJSON(res, 200, { ok: true, path: dst });
   }
 
   // raw bytes for previews (<img>/<iframe>/<audio>). ?t= carries the token since tags can't
