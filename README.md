@@ -205,14 +205,16 @@ project, `data/uploads/`). Text files open in an editor (⌘/Ctrl+S or **guardar
 audio and video get an inline preview; anything else offers a download. **＋ nuevo** creates a file in
 the current folder, **⬆ subir aquí** drops a file from your device into it (any type, 25MB), and the
 **✎** on any row (or on the open file) moves/renames it — a prompt prefilled with the path covers
-both, and moving into an existing folder keeps the name.
+both, and moving into an existing folder keeps the name. **🗑** deletes after a confirmation that
+shows the full path — files only, plus **empty** folders (recursive delete is deliberately not
+offered, and `/` and the home directory are never deletable).
 
 Saves are atomic (tmp + rename) with an optimistic lock: if an agent rewrote the file since you
 opened it, the panel asks before overwriting. Active content (html/svg/js) is always served as plain
 text so a file on disk can never run script on the panel's origin. Uploads and moves refuse to
 clobber an existing file unless you confirm the overwrite. Same trust boundary as the terminal:
 anyone who can reach `/api/*` can already act through an agent, so the same token / trusted-subnet
-gate applies. No delete — on purpose.
+gate applies.
 
 ## Deploying to another host
 
@@ -248,7 +250,7 @@ Graph a repo (`graphify .` inside it), then either:
 | `GET /api/discover` | graphed repos not yet tracked |
 | `GET /api/agents` | detects installed agent CLIs (Claude Code, Codex, OpenCode, Gemini, Grok, Antigravity `agy`, Cursor `cursor-agent`), their live tmux panes, and whether each is `launchable` |
 | `POST /api/launch` | spawns a fresh detached tmux session running an agent's CLI (`{ agentId, projectId? \| cwd? }`) and returns the new `paneId` — binary comes from an allowlist, cwd is a tracked project or a real path like `~` |
-| `GET /api/fs/list\|read\|raw?path=` · `POST /api/fs/write\|upload\|move` | file browser / manager (`?host=` proxies to a federated host) |
+| `GET /api/fs/list\|read\|raw?path=` · `POST /api/fs/write\|upload\|move\|delete` | file browser / manager (`?host=` proxies to a federated host) |
 | `POST /api/send` | types text into an agent's tmux pane (`{ paneId, text, enter? }`) — LAN-only, used by Agents View |
 | `POST /api/key` | sends a single allowlisted key to a pane (`{ paneId, key }`: `Up`/`Down`/`Enter`/`Escape`/`Tab`…) for navigating TUI menus |
 | `GET /api/pane?id=%N` | live capture of an agent's tmux pane (rendered screen + ANSI colors) for the terminal viewer |

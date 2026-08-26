@@ -7,7 +7,7 @@
  *   POST /api/refresh  { projectId }      → `graphify update` + re-ingest, appends an activity log
  *   POST /api/send     { paneId, text, enter? } → types text into an agent's tmux pane (LAN-only)
  *   POST /api/upload   { name, data }       → saves a base64 image to data/uploads/, returns its path
- *   GET  /api/fs/list|read|raw ?path=  +  POST /api/fs/write|upload|move → file browser / manager
+ *   GET  /api/fs/list|read|raw ?path=  +  POST /api/fs/write|upload|move|delete → file browser / manager
  *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered)
  *   GET  /api/logs                        → data/logs/*.md (Memory / Activity pages)
  *   GET  /api/skills                      → reads ~/.agents/skills SKILL.md frontmatter (Skills page)
@@ -17,7 +17,7 @@
  * Dev:  pnpm dev  (vite :5273 proxies /api → :4288)  +  node scripts/server.mjs
  */
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync } from "node:fs";
 import { join, dirname, extname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, networkInterfaces } from "node:os";
@@ -827,6 +827,25 @@ async function api(req, res, path) {
     }
     logEvent(`fs-move · ${src} -> ${dst}`);
     return sendJSON(res, 200, { ok: true, path: dst });
+  }
+
+  // delete a file or an EMPTY folder. The client confirms first; recursive folder delete stays
+  // out on purpose — from a phone that is a one-tap disaster. Root and home are never deletable.
+  if (path === "/api/fs/delete" && req.method === "POST") {
+    const { path: p } = await body(req);
+    const target = fsPath(typeof p === "string" ? p : "");
+    if (!target) return sendJSON(res, 400, { ok: false, err: "ruta inválida" });
+    if (target === "/" || target === homedir()) return sendJSON(res, 400, { ok: false, err: "esa ruta no se puede borrar" });
+    let st; try { st = statSync(target); } catch { return sendJSON(res, 404, { ok: false, err: "eso ya no existe" }); }
+    try {
+      if (st.isDirectory()) rmdirSync(target); // ENOTEMPTY if it still has content
+      else unlinkSync(target);
+    } catch (e) {
+      if (e.code === "ENOTEMPTY") return sendJSON(res, 400, { ok: false, err: "la carpeta no está vacía — borra su contenido primero" });
+      return sendJSON(res, 500, { ok: false, err: `no se pudo borrar: ${e.code || e}` });
+    }
+    logEvent(`fs-delete · ${target}`);
+    return sendJSON(res, 200, { ok: true });
   }
 
   // raw bytes for previews (<img>/<iframe>/<audio>). ?t= carries the token since tags can't

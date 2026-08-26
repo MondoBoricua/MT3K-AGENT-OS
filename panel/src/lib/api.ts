@@ -106,3 +106,5 @@ export const fsUpload = (dir: string, name: string, dataUrl: string, overwrite =
   jpost<{ ok: boolean; path?: string; exists?: boolean; err?: string }>(`/api/fs/upload${hostQ(host)}`, { dir, name, data: dataUrl, overwrite });
 export const fsMove = (from: string, to: string, overwrite = false, host?: string) =>
   jpost<{ ok: boolean; path?: string; exists?: boolean; err?: string }>(`/api/fs/move${hostQ(host)}`, { from, to, overwrite });
+export const fsDelete = (path: string, host?: string) =>
+  jpost<{ ok: boolean; err?: string }>(`/api/fs/delete${hostQ(host)}`, { path });

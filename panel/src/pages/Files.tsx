@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { fsList, fsRead, fsWrite, fsUpload, fsMove, fsRawUrl, getHosts, type FsEntry, type FsListing, type FsFile, type FedHost } from "../lib/api";
+import { fsList, fsRead, fsWrite, fsUpload, fsMove, fsDelete, fsRawUrl, getHosts, type FsEntry, type FsListing, type FsFile, type FedHost } from "../lib/api";
 
 type Props = { onToast?: (text: string, live: boolean) => void };
 
@@ -106,6 +106,20 @@ export default function Files({ onToast }: Props) {
     reader.readAsDataURL(f);
   };
 
+  // delete = always a typed-out confirm with the full path visible — never a silent tap
+  const removePath = async (target: string, isDir: boolean) => {
+    if (!listing) return;
+    if (!window.confirm(`¿Borrar ${isDir ? "la carpeta (solo si está vacía)" : "el archivo"}?\n${target}`)) return;
+    const r = await fsDelete(target, hq);
+    if (r?.ok) {
+      onToast?.(`borrado · ${base(target)}`, true);
+      if (file?.path === target) { setFile(null); setDraft(""); }
+      load(listing.path);
+    } else {
+      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo borrar", false);
+    }
+  };
+
   // move/rename via a prompt prefilled with the current path — one primitive covers both
   const movePath = async (from: string) => {
     if (!listing) return;
@@ -198,6 +212,8 @@ export default function Files({ onToast }: Props) {
                       </button>
                       <button onClick={() => movePath(full)} title="mover / renombrar"
                         className="shrink-0 px-2 py-2 font-mono text-[11px] text-white/25 transition hover:text-accent">✎</button>
+                      <button onClick={() => removePath(full, e.dir)} title="borrar"
+                        className="shrink-0 px-2 py-2 font-mono text-[11px] text-white/25 transition hover:text-red-300">🗑</button>
                     </div>
                   </li>
                 );
@@ -233,6 +249,7 @@ export default function Files({ onToast }: Props) {
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                   <button onClick={() => movePath(file.path)} title="mover / renombrar" className="rounded-lg border border-ink-line px-2 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent">✎</button>
+                  <button onClick={() => removePath(file.path, false)} title="borrar" className="rounded-lg border border-red-400/25 px-2 py-1 font-mono text-[10px] text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10">🗑</button>
                   <button onClick={copyPath} title="copiar ruta" className="rounded-lg border border-ink-line px-2 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent">⧉ ruta</button>
                   {file.kind === "text" && (
                     <button onClick={save} disabled={saving || (!dirty && !!file.mtime)}
