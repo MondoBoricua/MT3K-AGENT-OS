@@ -158,3 +158,15 @@ body {
   -webkit-mask-image: linear-gradient(to top, #000 30%, transparent 94%);
           mask-image: linear-gradient(to top, #000 30%, transparent 94%);
 }
+
+/* Agents View on phones: the pixel-art stations are sized for desktop — scale the WHOLE
+   unit (sprite + desk + name plate) and reclaim the untransformed layout box with negative
+   margins, so many more agents fit on screen without redrawing any sprite art. */
+@media (max-width: 639px) {
+  .station {
+    transform: scale(0.58);
+    transform-origin: bottom center;
+    margin-left: -26px;
+    margin-right: -26px;
+  }
+}

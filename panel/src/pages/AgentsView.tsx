@@ -65,7 +65,7 @@ export default function AgentsView({ agents, onOpen, onToast }: Props) {
             </span>
           </div>
           {/* live tmux sessions as tappable chips (amber = waiting for your input) */}
-          <div className="mt-2 flex flex-wrap gap-1.5">
+          <div className="mt-2 flex max-h-[72px] flex-wrap gap-1.5 overflow-y-auto sm:max-h-none">
             {sessions.map(({ agent: a, pane: p }) => (
               <button key={`${agentKey(a)}-${p.paneId}`} onClick={() => onOpen(a)}
                 className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] transition ${
@@ -102,7 +102,7 @@ export default function AgentsView({ agents, onOpen, onToast }: Props) {
 
         {/* scroll starts at the first agent on mobile (mx-auto centers it only when it fits) */}
         <div className="absolute inset-0 z-10 flex snap-x items-end justify-start overflow-x-auto pb-[6%] sm:justify-center">
-          <div className="mx-auto flex items-end gap-3 px-5 sm:gap-8 sm:px-8">
+          <div className="mx-auto flex items-end gap-0 px-3 sm:gap-8 sm:px-8">
             {agents.map((a, i) => {
               const hue = (i * 53) % 360;
               const offline = !a.online;
@@ -114,7 +114,7 @@ export default function AgentsView({ agents, onOpen, onToast }: Props) {
                   role={openable ? "button" : undefined}
                   tabIndex={openable ? 0 : undefined}
                   onKeyDown={openable ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(a); } } : undefined}
-                  className={`flex shrink-0 snap-center flex-col items-center rounded-xl outline-none transition ${openable ? "cursor-pointer hover:bg-white/[0.03] focus-visible:ring-2 focus-visible:ring-accent/60" : ""}`}>
+                  className={`station flex shrink-0 snap-center flex-col items-center rounded-xl outline-none transition ${openable ? "cursor-pointer hover:bg-white/[0.03] focus-visible:ring-2 focus-visible:ring-accent/60" : ""}`}>
                   {/* monitor */}
                   <div className={`monitor ${a.running ? "live" : ""}`}>
                     {CODE_W.map((w, k) => (
