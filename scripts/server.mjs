@@ -17,6 +17,7 @@
  * Dev:  pnpm dev  (vite :5273 proxies /api → :4288)  +  node scripts/server.mjs
  */
 import { createServer, request as httpRequest } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { connect as netConnect } from "node:net";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync } from "node:fs";
 import { join, dirname, extname, basename, resolve } from "node:path";
@@ -252,7 +253,7 @@ async function detectAgents() {
       : [];
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)
     const web = a.web && webUp.has(a.id) ? a.web : undefined;
-    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: installed && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web } : {}) };
+    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: installed && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : {}) };
   });
   await updateWaiting(rows.flatMap((r) => r.panes.map((p) => ({ ...p, agentName: r.name }))));
   for (const r of rows) {
@@ -977,73 +978,92 @@ createServer(async (req, res) => {
 // --- web-app proxy: expose a localhost-only tool (e.g. DeepSeek's `dsh web`) through the
 // panel's OWN auth gate on a dedicated port, so its absolute asset paths keep working and it
 // becomes reachable wherever the panel is (LAN, WireGuard) without the tool itself opening up.
+// Served over HTTPS with a self-signed cert: browsers only expose crypto.subtle / OPFS /
+// service workers in SECURE contexts, and tools like dsh need them ("settings are unavailable
+// in this browser" over plain http). Accept the cert warning once per device and you're set.
 // Host/Origin are rewritten to the target so the tool's browser-trust fence stays satisfied,
 // and a first visit with ?t=<token> mints a cookie so every follow-up asset/XHR/WS is authed.
-// crypto.randomUUID exists only in secure contexts (https / localhost). Through the proxy the
-// app is reached over plain http on a LAN/WG IP, so the browser hides it and the tool breaks
-// ("crypto.randomUUID is not a function"). getRandomValues DOES work in insecure contexts →
-// inject a spec-compliant UUIDv4 polyfill into every proxied HTML page.
+let PROXY_HTTPS = false; // detectAgents reports it so the panel builds the right scheme
+// crypto.randomUUID also needs a secure context; keep the polyfill for the http fallback
 const PROXY_POLYFILL = `<script>if(!crypto.randomUUID){crypto.randomUUID=()=>{const b=crypto.getRandomValues(new Uint8Array(16));b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;const h=Array.from(b,x=>x.toString(16).padStart(2,"0")).join("");return h.slice(0,8)+"-"+h.slice(8,12)+"-"+h.slice(12,16)+"-"+h.slice(16,20)+"-"+h.slice(20)}}</script>`;
 const proxyCookieOk = (req) => {
   if (!TOKEN) return false;
   const m = (req.headers.cookie || "").match(/(?:^|;\s*)mt3k_t=([^;]+)/);
   return !!m && decodeURIComponent(m[1]) === TOKEN;
 };
-for (const def of AGENT_DEFS.filter((d) => d.web && d.webProxy)) {
-  const rewrite = (headers) => {
-    const h = { ...headers, host: `127.0.0.1:${def.web}` };
-    if (h.origin) h.origin = `http://127.0.0.1:${def.web}`;
-    if (h.referer) h.referer = `http://127.0.0.1:${def.web}/`;
-    delete h.cookie; // our auth cookie is not the tool's business
-    return h;
-  };
-  const cleanPath = (url) => {
-    const u = new URL(url, "http://x");
-    const hadToken = u.searchParams.has("t");
-    u.searchParams.delete("t"); // never forward the panel token into the tool
-    return { path: u.pathname + (u.searchParams.size ? `?${u.searchParams}` : ""), hadToken };
-  };
-  const srv = createServer((req, res) => {
-    if (!(authorized(req) || proxyCookieOk(req))) { res.writeHead(401, { "content-type": "text/plain" }); return res.end("token requerido — abre desde el panel"); }
-    const { path: fwdPath, hadToken } = cleanPath(req.url);
-    const fh = rewrite(req.headers);
-    const wantsHtml = (req.headers.accept || "").includes("text/html");
-    if (wantsHtml) delete fh["accept-encoding"]; // HTML gets edited below → force identity encoding
-    const p = httpRequest({ host: "127.0.0.1", port: def.web, method: req.method, path: fwdPath, headers: fh }, (pr) => {
-      const extra = {};
-      if (TOKEN && hadToken) extra["set-cookie"] = `mt3k_t=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax`;
-      const isHtml = (pr.headers["content-type"] || "").includes("text/html");
-      if (isHtml && !pr.headers["content-encoding"]) {
-        // buffer (HTML is small), inject the polyfill at the top of <head>, fix content-length
-        const chunks = [];
-        pr.on("data", (c) => chunks.push(c));
-        pr.on("end", () => {
-          const html = Buffer.concat(chunks).toString("utf8");
-          const body = Buffer.from(html.includes("<head>") ? html.replace("<head>", "<head>" + PROXY_POLYFILL) : PROXY_POLYFILL + html);
-          res.writeHead(pr.statusCode || 200, { ...pr.headers, ...extra, "content-length": body.length });
-          res.end(body);
-        });
-        return;
-      }
-      res.writeHead(pr.statusCode || 502, { ...pr.headers, ...extra });
-      pr.pipe(res); // streamed, not buffered — the tool may use SSE
-    });
-    p.on("error", () => { if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" }); res.end(`${def.name} no responde en 127.0.0.1:${def.web} — ¿está corriendo?`); });
-    req.pipe(p);
-  });
-  // WebSocket passthrough: replay the upgrade against the target, then pipe both ways
-  srv.on("upgrade", (req, socket, head) => {
-    if (!(authorized(req) || proxyCookieOk(req))) return socket.destroy();
-    const up = netConnect(def.web, "127.0.0.1", () => {
-      const h = rewrite(req.headers);
-      let raw = `${req.method} ${cleanPath(req.url).path} HTTP/1.1\r\n`;
-      for (const [k, v] of Object.entries(h)) raw += `${k}: ${Array.isArray(v) ? v.join(", ") : v}\r\n`;
-      up.write(raw + "\r\n");
-      if (head?.length) up.write(head);
-      socket.pipe(up); up.pipe(socket);
-    });
-    up.on("error", () => socket.destroy());
-    socket.on("error", () => up.destroy());
-  });
-  srv.listen(def.webProxy, () => console.log(`  ${def.name} web UI proxied → :${def.webProxy} → 127.0.0.1:${def.web}`));
+async function proxyTlsOptions() {
+  const dir = join(ROOT, "data", "tls");
+  const key = join(dir, "proxy.key"), crt = join(dir, "proxy.crt");
+  if (!existsSync(key) || !existsSync(crt)) {
+    mkdirSync(dir, { recursive: true });
+    const r = await run("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-keyout", key, "-out", crt,
+      "-days", "3650", "-nodes", "-subj", "/CN=MT3K Panel Proxy", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"], ROOT, 20000);
+    if (!r.ok) { console.log("  ⚠ openssl falló — el proxy de apps queda en http (algunas apps no funcionarán):", r.err.slice(0, 120)); return null; }
+  }
+  try { return { key: readFileSync(key), cert: readFileSync(crt) }; } catch { return null; }
 }
+(async () => {
+  const defs = AGENT_DEFS.filter((d) => d.web && d.webProxy);
+  if (!defs.length) return;
+  const tls = await proxyTlsOptions();
+  PROXY_HTTPS = !!tls;
+  for (const def of defs) {
+    const rewrite = (headers) => {
+      const h = { ...headers, host: `127.0.0.1:${def.web}` };
+      if (h.origin) h.origin = `http://127.0.0.1:${def.web}`;
+      if (h.referer) h.referer = `http://127.0.0.1:${def.web}/`;
+      delete h.cookie; // our auth cookie is not the tool's business
+      return h;
+    };
+    const cleanPath = (url) => {
+      const u = new URL(url, "http://x");
+      const hadToken = u.searchParams.has("t");
+      u.searchParams.delete("t"); // never forward the panel token into the tool
+      return { path: u.pathname + (u.searchParams.size ? `?${u.searchParams}` : ""), hadToken };
+    };
+    const handler = (req, res) => {
+      if (!(authorized(req) || proxyCookieOk(req))) { res.writeHead(401, { "content-type": "text/plain" }); return res.end("token requerido — abre desde el panel"); }
+      const { path: fwdPath, hadToken } = cleanPath(req.url);
+      const fh = rewrite(req.headers);
+      const wantsHtml = (req.headers.accept || "").includes("text/html");
+      if (wantsHtml && !tls) delete fh["accept-encoding"]; // http fallback edits HTML → identity encoding
+      const p = httpRequest({ host: "127.0.0.1", port: def.web, method: req.method, path: fwdPath, headers: fh }, (pr) => {
+        const extra = {};
+        if (TOKEN && hadToken) extra["set-cookie"] = `mt3k_t=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax${tls ? "; Secure" : ""}`;
+        const isHtml = (pr.headers["content-type"] || "").includes("text/html");
+        if (isHtml && !tls && !pr.headers["content-encoding"]) {
+          // http fallback: inject the randomUUID polyfill (https doesn't need it)
+          const chunks = [];
+          pr.on("data", (c) => chunks.push(c));
+          pr.on("end", () => {
+            const html = Buffer.concat(chunks).toString("utf8");
+            const body = Buffer.from(html.includes("<head>") ? html.replace("<head>", "<head>" + PROXY_POLYFILL) : PROXY_POLYFILL + html);
+            res.writeHead(pr.statusCode || 200, { ...pr.headers, ...extra, "content-length": body.length });
+            res.end(body);
+          });
+          return;
+        }
+        res.writeHead(pr.statusCode || 502, { ...pr.headers, ...extra });
+        pr.pipe(res); // streamed, not buffered — the tool may use SSE
+      });
+      p.on("error", () => { if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" }); res.end(`${def.name} no responde en 127.0.0.1:${def.web} — ¿está corriendo?`); });
+      req.pipe(p);
+    };
+    const srv = tls ? createHttpsServer(tls, handler) : createServer(handler);
+    // WebSocket passthrough: replay the upgrade against the target, then pipe both ways
+    srv.on("upgrade", (req, socket, head) => {
+      if (!(authorized(req) || proxyCookieOk(req))) return socket.destroy();
+      const up = netConnect(def.web, "127.0.0.1", () => {
+        const h = rewrite(req.headers);
+        let raw = `${req.method} ${cleanPath(req.url).path} HTTP/1.1\r\n`;
+        for (const [k, v] of Object.entries(h)) raw += `${k}: ${Array.isArray(v) ? v.join(", ") : v}\r\n`;
+        up.write(raw + "\r\n");
+        if (head?.length) up.write(head);
+        socket.pipe(up); up.pipe(socket);
+      });
+      up.on("error", () => socket.destroy());
+      socket.on("error", () => up.destroy());
+    });
+    srv.listen(def.webProxy, () => console.log(`  ${def.name} web UI proxied → ${tls ? "https" : "http"}://:${def.webProxy} → 127.0.0.1:${def.web}`));
+  }
+})();

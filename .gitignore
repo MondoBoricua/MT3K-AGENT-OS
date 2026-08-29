@@ -35,3 +35,4 @@ graphify-out/
 
 # host-specific deploy notes — keep local (contains homelab IPs/hosts)
 DEPLOY.md
+data/tls/
