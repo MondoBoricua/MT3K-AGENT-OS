@@ -326,7 +326,7 @@ export default function App() {
       )}
 
       {/* shared terminal/compose sheet — opened from Agents View or the sidebar quick-access list */}
-      <AgentTerminalSheet agent={sheetAgent} projects={manifest?.projects ?? []} focusProjectId={focus?.id} onClose={() => setSheetAgentId(null)} onToast={pushToast} />
+      <AgentTerminalSheet agent={sheetAgent} projects={manifest?.projects ?? []} focusProjectId={focus?.id} focusPath={focus?.path} onClose={() => setSheetAgentId(null)} onToast={pushToast} />
 
       {/* Focus picker — mobile first-visit asks here; the header chip reopens it anywhere */}
       {focusPickerOpen && (

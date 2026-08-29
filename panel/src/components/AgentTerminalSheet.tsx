@@ -8,6 +8,7 @@ type Props = {
   agent: AgentRow | null; // the agent whose terminal/compose sheet is open (null = closed)
   projects?: { id: string; name: string }[]; // tracked repos, offered as launch targets
   focusProjectId?: string; // Focus mode: preselect this project when opening a new session
+  focusPath?: string; // Focus mode: scope the visible sessions to this path and auto-launch into it
   onClose: () => void;
   onToast?: (text: string, live: boolean) => void;
 };
@@ -15,7 +16,7 @@ type Props = {
 // Shared sheet: session picker → fullscreen terminal (live view + docked compose).
 // Used from both Agents View (the room) and the sidebar quick-access list.
 // One session → opens straight into fullscreen; many → pick one, then fullscreen.
-export default function AgentTerminalSheet({ agent, projects = [], focusProjectId, onClose, onToast }: Props) {
+export default function AgentTerminalSheet({ agent, projects = [], focusProjectId, focusPath, onClose, onToast }: Props) {
   const [paneId, setPaneId] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [enterOnSend, setEnterOnSend] = useState(true);
@@ -46,8 +47,10 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     getHosts().then((r) => { if (r?.hosts) setFedHosts(r.hosts); });
   }, []);
 
-  // a just-launched pane isn't in agent.panes until the next status poll — merge it in meanwhile
-  const basePanes: PaneRef[] = (agent?.panes ?? []).filter((p) => !killed.includes(p.paneId));
+  // a just-launched pane isn't in agent.panes until the next status poll — merge it in meanwhile.
+  // Under Focus the sheet only surfaces this project's sessions (same rule as the wall).
+  const inFocusCwd = (cwd: string) => !focusPath || cwd === focusPath || cwd.startsWith(focusPath + "/");
+  const basePanes: PaneRef[] = (agent?.panes ?? []).filter((p) => !killed.includes(p.paneId) && inFocusCwd(p.cwd));
   const panes: PaneRef[] = launched && !basePanes.some((p) => p.paneId === launched.paneId) ? [...basePanes, launched] : basePanes;
   const activePane = panes.find((p) => p.paneId === paneId) ?? (panes.length === 1 ? panes[0] : null);
   const paneToWatch = activePane?.paneId;
@@ -186,17 +189,18 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
 
   // spin up a fresh tmux session for this agent, then jump straight into its terminal.
   // create=true mkdir -p's a missing free-form path first.
-  const launch = async (create = false) => {
+  const launch = async (create = false, projOverride?: string) => {
     if (!agent || launching) return;
     setLaunching(true);
+    const proj = projOverride ?? launchProject;
     const fp = firstPrompt.trim() ? { firstPrompt: firstPrompt.trim() } : {};
-    const opts = launchProject ? { projectId: launchProject, create, host, ...fp } : { cwd: launchCwd.trim() || "~", create, host, ...fp };
+    const opts = proj ? { projectId: proj, create, host, ...fp } : { cwd: launchCwd.trim() || "~", create, host, ...fp };
     const r = await launchAgent(agent.id, opts);
     setLaunching(false);
     if (r?.ok && r.paneId) {
       const pane: PaneRef = { paneId: r.paneId, label: r.label ?? r.session ?? "", window: r.session ?? "", cwd: r.cwd ?? "" };
       setLaunched(pane); setPaneId(r.paneId); setFullscreen(true); setMissingDir(false); setShowLaunch(false); setFirstPrompt("");
-      try { localStorage.setItem(`mt3k.launch.${agentKey(agent)}`, JSON.stringify(launchProject ? { projectId: launchProject } : { cwd: launchCwd.trim() || "~" })); } catch { /* private mode */ }
+      try { localStorage.setItem(`mt3k.launch.${agentKey(agent)}`, JSON.stringify(proj ? { projectId: proj } : { cwd: launchCwd.trim() || "~" })); } catch { /* private mode */ }
       onToast?.(`${agent.name} abierto · ${pane.cwd}`, true);
     } else if (r?.missingDir) {
       setMissingDir(true); // show the "create & open" affordance inline instead of a dead-end error
@@ -205,6 +209,18 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
       onToast?.(r?.err ? `error: ${r.err}` : `no se pudo abrir ${agent.name}`, false);
     }
   };
+
+  // Focus mode fast-path: tapping an agent with NO session in the focused project just opens
+  // one there — no launch form. One shot per agent-open (the ref), so a kill doesn't relaunch.
+  const autoLaunchedFor = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!agent || agent.host || !focusProjectId || !focusPath) return;
+    if (autoLaunchedFor.current === aKey) return;
+    if (panes.length === 0 && agent.launchable && !launching && projects.some((p) => p.id === focusProjectId)) {
+      autoLaunchedFor.current = aKey;
+      launch(false, focusProjectId);
+    }
+  }, [aKey, agent, panes.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // kill a tmux session from the panel (confirm first — it takes the agent down with it)
   const kill = async (pid: string) => {
