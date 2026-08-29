@@ -136,7 +136,8 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
                     title={h.disabled ? "apagado" : h.reachable ? "conectado" : "no responde"} />
                   <div className="min-w-0">
                     <span className="text-sm font-medium">{h.name}</span>
-                    <span className="ml-2 font-mono text-[11px] text-white/40">{h.url}</span>
+                    <a href={h.url} target="_blank" rel="noopener noreferrer" title={`abrir el panel de ${h.name}`}
+                      className="ml-2 font-mono text-[11px] text-white/40 underline decoration-white/20 underline-offset-2 transition hover:text-accent hover:decoration-accent/60">{h.url} ↗</a>
                     {h.disabled && <span className="ml-2 font-mono text-[10px] text-white/45">apagado</span>}
                     {!h.hasToken && <span className="ml-2 font-mono text-[10px] text-amber-300/80">sin token</span>}
                   </div>
