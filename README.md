@@ -132,7 +132,10 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
   `dsh web`) are detected by a port probe and offered as an **abrir UI web ↗** link instead of a
   terminal. The panel reverse-proxies the tool (HTTP + WebSockets) on its own port behind the same
   token / trusted-subnet gate, rewriting Host/Origin so localhost-only tools work — so the link is
-  reachable wherever the panel is (LAN, WireGuard) without the tool opening up its own bind.
+  reachable wherever the panel is (LAN, WireGuard) without the tool opening up its own bind. Plain
+  http by default (a `crypto.randomUUID` polyfill is injected — that API is secure-context-only);
+  set `MT3K_PROXY_HTTPS=1` to serve it over an auto-generated self-signed cert instead, when a
+  proxied tool needs full secure-context APIs and you don't mind one cert warning per device.
 - **Terminal** — a pseudo-agent that opens a **plain tmux shell** (your login shell, rc + aliases
   applied — no AI). Same flow as any agent: pick a directory, type from the panel, kill when done.
   Its sessions are the ones named `mt3k-shell-*`.

@@ -978,9 +978,12 @@ createServer(async (req, res) => {
 // --- web-app proxy: expose a localhost-only tool (e.g. DeepSeek's `dsh web`) through the
 // panel's OWN auth gate on a dedicated port, so its absolute asset paths keep working and it
 // becomes reachable wherever the panel is (LAN, WireGuard) without the tool itself opening up.
-// Served over HTTPS with a self-signed cert: browsers only expose crypto.subtle / OPFS /
-// service workers in SECURE contexts, and tools like dsh need them ("settings are unavailable
-// in this browser" over plain http). Accept the cert warning once per device and you're set.
+// Plain http by default (with a crypto.randomUUID polyfill injected into HTML — that API is
+// secure-context-only). Set MT3K_PROXY_HTTPS=1 to serve the proxy over https with an
+// auto-generated self-signed cert instead: gives proxied tools a full secure context
+// (crypto.subtle / OPFS), at the cost of a cert warning once per device — annoying on phones,
+// which is why it's opt-in. Note: dsh's Settings page fails remotely on BOTH schemes (it
+// restricts settings to localhost browsers by design) — edit ~/.dsh/settings.yaml instead.
 // Host/Origin are rewritten to the target so the tool's browser-trust fence stays satisfied,
 // and a first visit with ?t=<token> mints a cookie so every follow-up asset/XHR/WS is authed.
 let PROXY_HTTPS = false; // detectAgents reports it so the panel builds the right scheme
@@ -1005,7 +1008,8 @@ async function proxyTlsOptions() {
 (async () => {
   const defs = AGENT_DEFS.filter((d) => d.web && d.webProxy);
   if (!defs.length) return;
-  const tls = await proxyTlsOptions();
+  const wantTls = /^(1|true|yes)$/i.test(process.env.MT3K_PROXY_HTTPS || "");
+  const tls = wantTls ? await proxyTlsOptions() : null;
   PROXY_HTTPS = !!tls;
   for (const def of defs) {
     const rewrite = (headers) => {
