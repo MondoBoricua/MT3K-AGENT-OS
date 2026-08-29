@@ -7,6 +7,7 @@ import AgentLogo from "./AgentLogo";
 type Props = {
   agent: AgentRow | null; // the agent whose terminal/compose sheet is open (null = closed)
   projects?: { id: string; name: string }[]; // tracked repos, offered as launch targets
+  focusProjectId?: string; // Focus mode: preselect this project when opening a new session
   onClose: () => void;
   onToast?: (text: string, live: boolean) => void;
 };
@@ -14,7 +15,7 @@ type Props = {
 // Shared sheet: session picker → fullscreen terminal (live view + docked compose).
 // Used from both Agents View (the room) and the sidebar quick-access list.
 // One session → opens straight into fullscreen; many → pick one, then fullscreen.
-export default function AgentTerminalSheet({ agent, projects = [], onClose, onToast }: Props) {
+export default function AgentTerminalSheet({ agent, projects = [], focusProjectId, onClose, onToast }: Props) {
   const [paneId, setPaneId] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [enterOnSend, setEnterOnSend] = useState(true);
@@ -65,6 +66,8 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
       if (!agent?.host && saved.projectId && projects.some((p) => p.id === saved.projectId)) proj = saved.projectId;
       else if (saved.cwd) cwd = saved.cwd;
     } catch { /* corrupt/absent → defaults */ }
+    // Focus mode wins over the remembered target: new sessions land in the focused project
+    if (!agent?.host && focusProjectId && projects.some((p) => p.id === focusProjectId)) proj = focusProjectId;
     setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false); setShowLaunch(false); setKilled([]); setFirstPrompt("");
   }, [aKey]); // eslint-disable-line react-hooks/exhaustive-deps
 

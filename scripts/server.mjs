@@ -422,6 +422,8 @@ async function api(req, res, path) {
       graphify: await graphifyVersion(),
       skills: readSkills().length,
       projects: projects().length,
+      // live (never baked): id+name+path of tracked repos — the Focus mode filters by these
+      projectList: projects().map((pr) => ({ id: pr.id, name: pr.name || pr.id, path: tildify(expand(pr.path)) })),
       lastIngest: existsSync(mf) ? statSync(mf).mtime.toISOString() : null,
       port: PORT,
       lan: `${lanIP()}:${PORT}`,

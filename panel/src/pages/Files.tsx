@@ -5,7 +5,7 @@ import { fsList, fsRead, fsWrite, fsRawUrl, getHosts, type FsEntry, type FsListi
 // downloaded only when a text file is opened
 const CodeEditor = lazy(() => import("../components/CodeEditor"));
 
-type Props = { onToast?: (text: string, live: boolean) => void };
+type Props = { onToast?: (text: string, live: boolean) => void; focusPath?: string };
 
 const human = (n: number) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 const when = (ms: number) => (ms ? new Date(ms).toLocaleString("es-PR", { dateStyle: "short", timeStyle: "short" }) : "nuevo");
@@ -51,7 +51,7 @@ const FileTile = ({ entry }: { entry: FsEntry }) => (
 // VS Code-style file browser (collapsible tree, lazy-loaded per folder) + viewer/editor.
 // Every call rides ?host= so picking a federated host walks THAT machine's disk. Text edits
 // save atomically with an optimistic lock — a conflicting agent write asks before clobbering.
-export default function Files({ onToast }: Props) {
+export default function Files({ onToast, focusPath }: Props) {
   const [hosts, setHosts] = useState<FedHost[]>([]);
   const [host, setHost] = useState(""); // "" = this machine
   const [listing, setListing] = useState<FsListing | null>(null); // tree ROOT
@@ -86,9 +86,10 @@ export default function Files({ onToast }: Props) {
   useEffect(() => {
     let start = "~";
     try { start = localStorage.getItem(memKey) || "~"; } catch { /* defaults */ }
+    if (!host && focusPath) start = focusPath; // Focus mode: land in the project (local host only)
     setFile(null); setDraft("");
     load(start);
-  }, [host]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [host, focusPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // expand/collapse a folder in place; children fetch once and cache for the session
   const toggleDir = async (p: string) => {

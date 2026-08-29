@@ -68,8 +68,10 @@ export interface DiscoverRepo { name: string; path: string; files: number }
 export const discoverRepos = () => jget<{ repos: DiscoverRepo[] }>("/api/discover");
 export const addProject = (path: string, name?: string) => jpost<{ ok: boolean; id: string }>("/api/add-project", { path, name });
 
+export interface FocusProject { id: string; name: string; path: string }
 export interface SystemStatus {
   agents: AgentRow[];
+  projectList?: FocusProject[];
   uptimeMs: number;
   graphify: string;
   skills: number;

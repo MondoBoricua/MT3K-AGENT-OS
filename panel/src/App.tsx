@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Manifest, ProjectData } from "./types";
-import { refreshProject, getStatus, getToken, setToken, agentKey, type AgentRow, type SearchHit } from "./lib/api";
+import { refreshProject, getStatus, getToken, setToken, agentKey, type AgentRow, type SearchHit, type FocusProject } from "./lib/api";
 import CommandPalette from "./components/CommandPalette";
 import { HomeIcon, SkillsIcon, MemoryIcon, GraphIcon, ActivityIcon, SettingsIcon, MenuIcon, CloseIcon, GitHubIcon, XIcon, LinkedInIcon, TikTokIcon, YouTubeIcon, MailIcon, AgentsViewIcon, FilesIcon } from "./components/icons";
 import KnowledgeGraph from "./pages/KnowledgeGraph";
@@ -51,6 +51,21 @@ export default function App() {
   const [tokenDraft, setTokenDraft] = useState("");
   const prevAgents = useRef<Record<string, boolean>>({});
   const firstPoll = useRef(true);
+  // Focus mode: scope the panel to ONE tracked project (per device, localStorage). null = todo.
+  // On phones the first visit asks "¿en qué vas a trabajar?" — on desktop it never interrupts.
+  const [projectList, setProjectList] = useState<FocusProject[]>([]);
+  const [focus, setFocus] = useState<FocusProject | null>(() => {
+    try { const raw = localStorage.getItem("mt3k.focus"); return raw ? (JSON.parse(raw) as FocusProject) : null; } catch { return null; }
+  });
+  const [focusPickerOpen, setFocusPickerOpen] = useState(false);
+  const focusAsked = useRef<boolean>(typeof localStorage !== "undefined" && localStorage.getItem("mt3k.focus") !== null);
+  const pickFocus = (f: FocusProject | null) => {
+    setFocus(f);
+    try { localStorage.setItem("mt3k.focus", f ? JSON.stringify(f) : ""); } catch { /* private mode */ }
+    focusAsked.current = true;
+    setFocusPickerOpen(false);
+    if (f) { setSelected(f.id); } // Knowledge Graph follows the focus
+  };
 
   // server runs with MT3K_TOKEN and ours is missing/wrong → ask once, store in localStorage
   useEffect(() => {
@@ -77,6 +92,11 @@ export default function App() {
     const tick = () => getStatus().then((s) => {
       if (!s) return;
       setAgents(s.agents);
+      if (s.projectList) {
+        setProjectList(s.projectList);
+        // phone + never asked + there are projects → ask once
+        if (!focusAsked.current && s.projectList.length > 0 && window.innerWidth < 1024) { focusAsked.current = true; setFocusPickerOpen(true); }
+      }
       if (!firstPoll.current) {
         for (const a of s.agents) {
           const tag = a.host ? `${a.name} @${a.host}` : a.name;
@@ -123,6 +143,13 @@ export default function App() {
 
   useEffect(() => { loadManifest(); }, [loadManifest]);
 
+  // on first manifest load, a device with focus lands on ITS project (manual browsing after that wins)
+  const didInitSelect = useRef(false);
+  useEffect(() => {
+    if (didInitSelect.current || !manifest || !focus) return;
+    if (manifest.projects.some((pr) => pr.id === focus.id)) { setSelected(focus.id); didInitSelect.current = true; }
+  }, [manifest, focus]);
+
   useEffect(() => {
     if (!selected) return;
     setData(null);
@@ -140,6 +167,15 @@ export default function App() {
   };
 
   const goProject = (id: string) => { setSelected(id); setPage("Knowledge Graph"); };
+  // display filter under focus: keep panes whose cwd lives inside the project; keep agents that
+  // can still act there (launchable → open a session in the project; web-UI agents are transversal)
+  const inFocus = (cwd: string) => !!focus && (cwd === focus.path || cwd.startsWith(focus.path + "/"));
+  const viewAgents = !focus ? agents : agents
+    .map((a) => ({ ...a, panes: (a.panes ?? []).filter((pn) => inFocus(pn.cwd)) }))
+    // matching sessions always show (any host — a clone of the project elsewhere matches by cwd);
+    // otherwise only LOCAL agents that can act here (launch into the project / web UIs)
+    .filter((a) => (a.panes && a.panes.length > 0) || (!a.host && (a.launchable || !!a.webPort || !!a.webOff)))
+    .map((a) => ({ ...a, running: (a.panes && a.panes.length > 0) || !!a.webPort ? a.running : false }));
   const onlineCount = agents.filter((a) => a.online).length;
   const runningCount = agents.filter((a) => a.running).length;
   // open the shared terminal sheet (from the room or the sidebar). We key by host:id so the sheet
@@ -184,7 +220,7 @@ export default function App() {
           <span className="font-mono text-[10px] text-emerald-300/70">{runningCount} live</span>
         </div>
         <div className="flex flex-col gap-1.5 overflow-y-auto">
-          {agents.map((a) => {
+          {viewAgents.map((a) => {
             const sendable = (a.panes?.length ?? 0) > 0;
             const openable = sendable || !!a.launchable || !!a.webPort || !!a.webOff; // launchable → spawn; webPort → open its web UI; webOff → the sheet offers to start it
             const cls = `flex items-center gap-2.5 rounded-lg border px-3 py-1.5 text-left font-mono text-xs transition ${
@@ -250,6 +286,12 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
+            {projectList.length > 0 && (
+              <button onClick={() => setFocusPickerOpen(true)} title="enfocar el panel en un proyecto"
+                className={`shrink-0 rounded-full border px-3 py-1 font-mono text-xs transition ${focus ? "border-accent/50 bg-accent/15 text-accent" : "border-ink-line text-white/50 hover:text-white"}`}>
+                ◎ {focus ? focus.name : "todo"}
+              </button>
+            )}
             {page === "Knowledge Graph" && (
               <button onClick={onRefresh} disabled={refreshing}
                 className="shrink-0 rounded-lg border border-ink-line px-3 py-1.5 text-xs text-white/70 transition hover:border-accent/50 hover:text-white disabled:opacity-40">
@@ -271,8 +313,8 @@ export default function App() {
         {page === "Skills" && <Skills />}
         {page === "Memory" && <Memory />}
         {page === "Activity" && <Activity />}
-        {page === "Files" && <Files onToast={pushToast} />}
-        {page === "Agents View" && <AgentsView agents={agents} onOpen={openAgent} onToast={pushToast} />}
+        {page === "Files" && <Files onToast={pushToast} focusPath={focus?.path} />}
+        {page === "Agents View" && <AgentsView agents={viewAgents} onOpen={openAgent} onToast={pushToast} />}
         {page === "Settings" && <Settings manifest={manifest} onChanged={() => loadManifest(`?t=${Date.now()}`)} />}
       </main>
 
@@ -284,7 +326,33 @@ export default function App() {
       )}
 
       {/* shared terminal/compose sheet — opened from Agents View or the sidebar quick-access list */}
-      <AgentTerminalSheet agent={sheetAgent} projects={manifest?.projects ?? []} onClose={() => setSheetAgentId(null)} onToast={pushToast} />
+      <AgentTerminalSheet agent={sheetAgent} projects={manifest?.projects ?? []} focusProjectId={focus?.id} onClose={() => setSheetAgentId(null)} onToast={pushToast} />
+
+      {/* Focus picker — mobile first-visit asks here; the header chip reopens it anywhere */}
+      {focusPickerOpen && (
+        <>
+          <div className="fixed inset-0 z-[75] bg-black/60 backdrop-blur-sm" onClick={() => { focusAsked.current = true; try { if (localStorage.getItem("mt3k.focus") === null) localStorage.setItem("mt3k.focus", ""); } catch { /* private */ } setFocusPickerOpen(false); }} />
+          <div className="fixed inset-x-0 bottom-0 z-[80] mx-auto w-full max-w-md rounded-t-2xl border border-ink-line bg-ink-900/95 p-4 shadow-2xl backdrop-blur-xl sm:bottom-auto sm:top-1/3 sm:rounded-2xl"
+            style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom))" }}>
+            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-white/20 sm:hidden" />
+            <h2 className="mb-1 text-sm font-semibold">¿En qué vas a trabajar?</h2>
+            <p className="mb-3 font-mono text-[11px] text-white/45">enfoca agentes, files y el grafo en un proyecto — se recuerda en este dispositivo</p>
+            <div className="flex max-h-[60vh] flex-col gap-1.5 overflow-y-auto pr-0.5">
+              <button onClick={() => pickFocus(null)}
+                className={`rounded-xl border px-3 py-2.5 text-left font-mono text-xs transition ${!focus ? "border-accent/60 bg-accent/15 text-white" : "border-ink-line bg-ink-850/50 text-white/70 hover:border-accent/40"}`}>
+                🌐 Todo — la sala de control completa
+              </button>
+              {projectList.map((pr) => (
+                <button key={pr.id} onClick={() => pickFocus(pr)}
+                  className={`rounded-xl border px-3 py-2.5 text-left transition ${focus?.id === pr.id ? "border-accent/60 bg-accent/15" : "border-ink-line bg-ink-850/50 hover:border-accent/40"}`}>
+                  <span className="block font-mono text-xs text-white">{pr.name}</span>
+                  <span className="block truncate font-mono text-[10px] text-white/35">{pr.path}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* token gate — shows when the server requires MT3K_TOKEN and ours is missing/wrong */}
       {authNeeded && (
