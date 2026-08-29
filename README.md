@@ -130,8 +130,9 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
 - **📣 broadcast** — the wall HUD sends one message to every live session on every federated host.
 - **web-UI agents** — tools whose interactive surface is a local web app (e.g. DeepSeek Harness's
   `dsh web`) are detected by a port probe and offered as an **abrir UI web ↗** link instead of a
-  terminal. The link uses the hostname you reached the panel with, so it works remotely only if
-  that tool's server binds beyond `127.0.0.1`.
+  terminal. The panel reverse-proxies the tool (HTTP + WebSockets) on its own port behind the same
+  token / trusted-subnet gate, rewriting Host/Origin so localhost-only tools work — so the link is
+  reachable wherever the panel is (LAN, WireGuard) without the tool opening up its own bind.
 - **Terminal** — a pseudo-agent that opens a **plain tmux shell** (your login shell, rc + aliases
   applied — no AI). Same flow as any agent: pick a directory, type from the panel, kill when done.
   Its sessions are the ones named `mt3k-shell-*`.

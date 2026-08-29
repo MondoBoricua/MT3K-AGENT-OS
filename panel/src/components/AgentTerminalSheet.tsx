@@ -419,7 +419,8 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
             // — as long as that tool's server binds beyond 127.0.0.1.
             <div className="flex flex-col items-center gap-3 py-6">
               <p className="text-center font-mono text-xs text-white/40">Este agente vive en su propia UI web (puerto {agent.webPort}).</p>
-              <a href={`http://${window.location.hostname}:${agent.webPort}/`} target="_blank" rel="noopener noreferrer"
+              {/* webPort is the panel's authed proxy — ?t= mints the cookie that auths every follow-up request */}
+              <a href={`http://${window.location.hostname}:${agent.webPort}/${getToken() ? `?t=${encodeURIComponent(getToken())}` : ""}`} target="_blank" rel="noopener noreferrer"
                 className="rounded-full border border-accent/40 bg-gradient-to-b from-accent/40 to-accent/20 px-5 py-2 font-mono text-sm font-medium text-white shadow-[0_0_20px_-8px] shadow-accent transition hover:from-accent/50 active:scale-95">
                 abrir UI web ↗
               </a>

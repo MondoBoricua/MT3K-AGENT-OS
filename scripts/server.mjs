@@ -16,7 +16,8 @@
  * Run:  node scripts/server.mjs        (serves dist + api on :4288)
  * Dev:  pnpm dev  (vite :5273 proxies /api → :4288)  +  node scripts/server.mjs
  */
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
+import { connect as netConnect } from "node:net";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync } from "node:fs";
 import { join, dirname, extname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -166,7 +167,7 @@ const AGENT_DEFS = [
   // DeepSeek Harness (dsh): no TUI profile — its interactive surface is `dsh web` on a local
   // port. `web` marks it as a web-UI agent: a port probe drives "running" and the panel offers
   // an "abrir UI web" link instead of a tmux terminal.
-  { id: "deepseek", name: "DeepSeek", bins: ["dsh"], paths: ["~/.dsh"], proc: [], web: 3080 },
+  { id: "deepseek", name: "DeepSeek", bins: ["dsh"], paths: ["~/.dsh"], proc: [], web: 3080, webProxy: 4290 },
   // plain tmux shell — no AI. Launch runs the user's default shell (rc + aliases apply).
   // Its panes are matched by session-name prefix, not by process (every pane has a shell).
   { id: "shell", name: "Terminal", bins: [], paths: [], proc: [] },
@@ -251,7 +252,7 @@ async function detectAgents() {
       : [];
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)
     const web = a.web && webUp.has(a.id) ? a.web : undefined;
-    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: installed && proc.length > 0, panes: agentPanes, ...(web ? { webPort: web } : {}) };
+    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: installed && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web } : {}) };
   });
   await updateWaiting(rows.flatMap((r) => r.panes.map((p) => ({ ...p, agentName: r.name }))));
   for (const r of rows) {
@@ -972,3 +973,56 @@ createServer(async (req, res) => {
     sendJSON(res, 500, { ok: false, err: String(e) });
   }
 }).listen(PORT, () => console.log(`MT3K Agent OS server → http://localhost:${PORT}`));
+
+// --- web-app proxy: expose a localhost-only tool (e.g. DeepSeek's `dsh web`) through the
+// panel's OWN auth gate on a dedicated port, so its absolute asset paths keep working and it
+// becomes reachable wherever the panel is (LAN, WireGuard) without the tool itself opening up.
+// Host/Origin are rewritten to the target so the tool's browser-trust fence stays satisfied,
+// and a first visit with ?t=<token> mints a cookie so every follow-up asset/XHR/WS is authed.
+const proxyCookieOk = (req) => {
+  if (!TOKEN) return false;
+  const m = (req.headers.cookie || "").match(/(?:^|;\s*)mt3k_t=([^;]+)/);
+  return !!m && decodeURIComponent(m[1]) === TOKEN;
+};
+for (const def of AGENT_DEFS.filter((d) => d.web && d.webProxy)) {
+  const rewrite = (headers) => {
+    const h = { ...headers, host: `127.0.0.1:${def.web}` };
+    if (h.origin) h.origin = `http://127.0.0.1:${def.web}`;
+    if (h.referer) h.referer = `http://127.0.0.1:${def.web}/`;
+    delete h.cookie; // our auth cookie is not the tool's business
+    return h;
+  };
+  const cleanPath = (url) => {
+    const u = new URL(url, "http://x");
+    const hadToken = u.searchParams.has("t");
+    u.searchParams.delete("t"); // never forward the panel token into the tool
+    return { path: u.pathname + (u.searchParams.size ? `?${u.searchParams}` : ""), hadToken };
+  };
+  const srv = createServer((req, res) => {
+    if (!(authorized(req) || proxyCookieOk(req))) { res.writeHead(401, { "content-type": "text/plain" }); return res.end("token requerido — abre desde el panel"); }
+    const { path: fwdPath, hadToken } = cleanPath(req.url);
+    const p = httpRequest({ host: "127.0.0.1", port: def.web, method: req.method, path: fwdPath, headers: rewrite(req.headers) }, (pr) => {
+      const extra = {};
+      if (TOKEN && hadToken) extra["set-cookie"] = `mt3k_t=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax`;
+      res.writeHead(pr.statusCode || 502, { ...pr.headers, ...extra });
+      pr.pipe(res); // streamed, not buffered — the tool may use SSE
+    });
+    p.on("error", () => { if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" }); res.end(`${def.name} no responde en 127.0.0.1:${def.web} — ¿está corriendo?`); });
+    req.pipe(p);
+  });
+  // WebSocket passthrough: replay the upgrade against the target, then pipe both ways
+  srv.on("upgrade", (req, socket, head) => {
+    if (!(authorized(req) || proxyCookieOk(req))) return socket.destroy();
+    const up = netConnect(def.web, "127.0.0.1", () => {
+      const h = rewrite(req.headers);
+      let raw = `${req.method} ${cleanPath(req.url).path} HTTP/1.1\r\n`;
+      for (const [k, v] of Object.entries(h)) raw += `${k}: ${Array.isArray(v) ? v.join(", ") : v}\r\n`;
+      up.write(raw + "\r\n");
+      if (head?.length) up.write(head);
+      socket.pipe(up); up.pipe(socket);
+    });
+    up.on("error", () => socket.destroy());
+    socket.on("error", () => up.destroy());
+  });
+  srv.listen(def.webProxy, () => console.log(`  ${def.name} web UI proxied → :${def.webProxy} → 127.0.0.1:${def.web}`));
+}
