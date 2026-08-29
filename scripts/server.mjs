@@ -989,6 +989,16 @@ createServer(async (req, res) => {
 let PROXY_HTTPS = false; // detectAgents reports it so the panel builds the right scheme
 // crypto.randomUUID also needs a secure context; keep the polyfill for the http fallback
 const PROXY_POLYFILL = `<script>if(!crypto.randomUUID){crypto.randomUUID=()=>{const b=crypto.getRandomValues(new Uint8Array(16));b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;const h=Array.from(b,x=>x.toString(16).padStart(2,"0")).join("");return h.slice(0,8)+"-"+h.slice(8,12)+"-"+h.slice(12,16)+"-"+h.slice(16,20)+"-"+h.slice(20)}}</script>`;
+// dsh hard-codes its Settings UI to loopback browsers (client-side isLoopbackHostname on
+// window.location — --trusted-host feeds only the server fence, not this). Behind OUR authed
+// proxy the remote browser IS the owner, so patch that single gate in flight. Exact-match on
+// the unminified bundle: if a future dsh changes the line, the patch silently no-ops and
+// Settings just stays localhost-only — nothing else breaks.
+const PROXY_JS_PATCHES = [{
+  path: "/plugins/@deepseek-ai/dsh-client-connection/client.js",
+  find: "isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname)",
+  replace: "isLoopback: true",
+}];
 const proxyCookieOk = (req) => {
   if (!TOKEN) return false;
   const m = (req.headers.cookie || "").match(/(?:^|;\s*)mt3k_t=([^;]+)/);
@@ -1023,25 +1033,28 @@ async function proxyTlsOptions() {
       const u = new URL(url, "http://x");
       const hadToken = u.searchParams.has("t");
       u.searchParams.delete("t"); // never forward the panel token into the tool
-      return { path: u.pathname + (u.searchParams.size ? `?${u.searchParams}` : ""), hadToken };
+      return { path: u.pathname + (u.searchParams.size ? `?${u.searchParams}` : ""), pathname: u.pathname, hadToken };
     };
     const handler = (req, res) => {
       if (!(authorized(req) || proxyCookieOk(req))) { res.writeHead(401, { "content-type": "text/plain" }); return res.end("token requerido — abre desde el panel"); }
-      const { path: fwdPath, hadToken } = cleanPath(req.url);
+      const { path: fwdPath, pathname, hadToken } = cleanPath(req.url);
       const fh = rewrite(req.headers);
       const wantsHtml = (req.headers.accept || "").includes("text/html");
-      if (wantsHtml && !tls) delete fh["accept-encoding"]; // http fallback edits HTML → identity encoding
+      const jsPatch = PROXY_JS_PATCHES.find((x) => x.path === pathname);
+      if ((wantsHtml && !tls) || jsPatch) delete fh["accept-encoding"]; // we edit these bodies → identity encoding
       const p = httpRequest({ host: "127.0.0.1", port: def.web, method: req.method, path: fwdPath, headers: fh }, (pr) => {
         const extra = {};
         if (TOKEN && hadToken) extra["set-cookie"] = `mt3k_t=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax${tls ? "; Secure" : ""}`;
         const isHtml = (pr.headers["content-type"] || "").includes("text/html");
-        if (isHtml && !tls && !pr.headers["content-encoding"]) {
-          // http fallback: inject the randomUUID polyfill (https doesn't need it)
+        const editHtml = isHtml && !tls; // http fallback: inject the randomUUID polyfill (https doesn't need it)
+        if ((editHtml || jsPatch) && !pr.headers["content-encoding"]) {
           const chunks = [];
           pr.on("data", (c) => chunks.push(c));
           pr.on("end", () => {
-            const html = Buffer.concat(chunks).toString("utf8");
-            const body = Buffer.from(html.includes("<head>") ? html.replace("<head>", "<head>" + PROXY_POLYFILL) : PROXY_POLYFILL + html);
+            let text = Buffer.concat(chunks).toString("utf8");
+            if (editHtml) text = text.includes("<head>") ? text.replace("<head>", "<head>" + PROXY_POLYFILL) : PROXY_POLYFILL + text;
+            if (jsPatch) text = text.replace(jsPatch.find, jsPatch.replace);
+            const body = Buffer.from(text);
             res.writeHead(pr.statusCode || 200, { ...pr.headers, ...extra, "content-length": body.length });
             res.end(body);
           });
