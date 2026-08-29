@@ -979,6 +979,11 @@ createServer(async (req, res) => {
 // becomes reachable wherever the panel is (LAN, WireGuard) without the tool itself opening up.
 // Host/Origin are rewritten to the target so the tool's browser-trust fence stays satisfied,
 // and a first visit with ?t=<token> mints a cookie so every follow-up asset/XHR/WS is authed.
+// crypto.randomUUID exists only in secure contexts (https / localhost). Through the proxy the
+// app is reached over plain http on a LAN/WG IP, so the browser hides it and the tool breaks
+// ("crypto.randomUUID is not a function"). getRandomValues DOES work in insecure contexts →
+// inject a spec-compliant UUIDv4 polyfill into every proxied HTML page.
+const PROXY_POLYFILL = `<script>if(!crypto.randomUUID){crypto.randomUUID=()=>{const b=crypto.getRandomValues(new Uint8Array(16));b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;const h=Array.from(b,x=>x.toString(16).padStart(2,"0")).join("");return h.slice(0,8)+"-"+h.slice(8,12)+"-"+h.slice(12,16)+"-"+h.slice(16,20)+"-"+h.slice(20)}}</script>`;
 const proxyCookieOk = (req) => {
   if (!TOKEN) return false;
   const m = (req.headers.cookie || "").match(/(?:^|;\s*)mt3k_t=([^;]+)/);
@@ -1001,9 +1006,25 @@ for (const def of AGENT_DEFS.filter((d) => d.web && d.webProxy)) {
   const srv = createServer((req, res) => {
     if (!(authorized(req) || proxyCookieOk(req))) { res.writeHead(401, { "content-type": "text/plain" }); return res.end("token requerido — abre desde el panel"); }
     const { path: fwdPath, hadToken } = cleanPath(req.url);
-    const p = httpRequest({ host: "127.0.0.1", port: def.web, method: req.method, path: fwdPath, headers: rewrite(req.headers) }, (pr) => {
+    const fh = rewrite(req.headers);
+    const wantsHtml = (req.headers.accept || "").includes("text/html");
+    if (wantsHtml) delete fh["accept-encoding"]; // HTML gets edited below → force identity encoding
+    const p = httpRequest({ host: "127.0.0.1", port: def.web, method: req.method, path: fwdPath, headers: fh }, (pr) => {
       const extra = {};
       if (TOKEN && hadToken) extra["set-cookie"] = `mt3k_t=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax`;
+      const isHtml = (pr.headers["content-type"] || "").includes("text/html");
+      if (isHtml && !pr.headers["content-encoding"]) {
+        // buffer (HTML is small), inject the polyfill at the top of <head>, fix content-length
+        const chunks = [];
+        pr.on("data", (c) => chunks.push(c));
+        pr.on("end", () => {
+          const html = Buffer.concat(chunks).toString("utf8");
+          const body = Buffer.from(html.includes("<head>") ? html.replace("<head>", "<head>" + PROXY_POLYFILL) : PROXY_POLYFILL + html);
+          res.writeHead(pr.statusCode || 200, { ...pr.headers, ...extra, "content-length": body.length });
+          res.end(body);
+        });
+        return;
+      }
       res.writeHead(pr.statusCode || 502, { ...pr.headers, ...extra });
       pr.pipe(res); // streamed, not buffered — the tool may use SSE
     });
