@@ -163,10 +163,19 @@ body {
    unit (sprite + desk + name plate) and reclaim the untransformed layout box with negative
    margins, so many more agents fit on screen without redrawing any sprite art. */
 @media (max-width: 639px) {
+  /* crowd layout: rows wrap and stack into the room's depth — later rows paint over the
+     previous ones (natural DOM order), so front agents partially cover the back row's feet
+     like a real crowd. The whole block stays anchored to the floor line. */
+  /* the HUD leaves the overlay and joins the flow on top, so the crowd never hides under it */
+  .room-body { display: flex; flex-direction: column; min-height: 0; }
+  .room-body .wallscreen { position: static; transform: none; width: auto; margin: 10px 10px 0; }
+  .room-scroll { position: static; flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+  .room-crowd { flex-wrap: wrap; justify-content: center; padding-top: 46px; }
   .station {
     transform: scale(0.58);
     transform-origin: bottom center;
-    margin-left: -26px;
-    margin-right: -26px;
+    margin: -58px -30px 0;
+    max-width: 132px; /* the name plate must not widen the station — fewer fit per row */
   }
+  .station .font-mono.font-semibold { max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }

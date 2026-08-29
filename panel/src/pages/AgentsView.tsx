@@ -51,7 +51,7 @@ export default function AgentsView({ agents, onOpen, onToast }: Props) {
         <p className="font-mono text-xs text-white/45">{live} codeando · {ready} listos · toca un agente para escribirle o abrirle una sesión en tmux</p>
       </div>
 
-      <div className="relative flex-1">
+      <div className="room-body relative flex-1">
         <div className="room-wall absolute inset-x-0 top-0 h-1/2" />
         <div className="room-floor absolute inset-x-0 bottom-0 h-[72%]" />
 
@@ -101,8 +101,8 @@ export default function AgentsView({ agents, onOpen, onToast }: Props) {
         </div>
 
         {/* scroll starts at the first agent on mobile (mx-auto centers it only when it fits) */}
-        <div className="absolute inset-0 z-10 flex snap-x items-end justify-start overflow-x-auto pb-[6%] sm:justify-center">
-          <div className="mx-auto flex items-end gap-0 px-3 sm:gap-8 sm:px-8">
+        <div className="room-scroll absolute inset-0 z-10 flex snap-x items-end justify-start overflow-x-auto pb-[6%] sm:justify-center">
+          <div className="room-crowd mx-auto flex items-end gap-0 px-3 sm:gap-8 sm:px-8">
             {agents.map((a, i) => {
               const hue = (i * 53) % 360;
               const offline = !a.online;
