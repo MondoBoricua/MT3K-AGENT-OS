@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Manifest } from "../types";
-import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, type SystemStatus, type FedHost } from "../lib/api";
+import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, moveHost, type SystemStatus, type FedHost } from "../lib/api";
 import { fmt } from "../lib/ui";
 
 const REFRESH_KEY = "mt3k.refreshMs";
@@ -43,6 +43,7 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
       loadHosts();
     } else setHMsg(r?.err ? `error: ${r.err}` : "no se pudo guardar");
   };
+  const doMoveHost = async (id: string, dir: -1 | 1) => { await moveHost(id, dir); loadHosts(); };
   const doToggleHost = async (h: FedHost) => {
     const r = await toggleHost(h.id, !h.disabled);
     if (!r?.ok) setHMsg(r?.err ?? "no se pudo cambiar el estado");
@@ -128,7 +129,7 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
             Necesitas la URL del panel remoto y su <span className="font-mono">MT3K_TOKEN</span>.
           </p>
           <div className="space-y-2">
-            {hosts.map((h) => (
+            {hosts.map((h, i) => (
               <div key={h.id} className={`flex items-center justify-between gap-3 rounded-lg border border-ink-line bg-ink-850/40 px-3 py-2 ${h.disabled ? "opacity-55" : ""}`}>
                 <div className="flex min-w-0 items-center gap-2.5">
                   <span className={`h-2 w-2 shrink-0 rounded-full ${h.disabled ? "bg-white/25" : h.reachable ? "bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400" : "bg-red-400/70"}`}
@@ -141,6 +142,11 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
                   </div>
                 </div>
                 <div className="flex shrink-0 gap-1.5">
+                  {/* reorder — hosts.json order is the wall order */}
+                  <button onClick={() => doMoveHost(h.id, -1)} disabled={!!busy || i === 0} title="subir"
+                    className="rounded-md border border-ink-line px-2 py-1 font-mono text-[11px] text-white/50 transition hover:border-accent/50 hover:text-accent disabled:opacity-25">▲</button>
+                  <button onClick={() => doMoveHost(h.id, 1)} disabled={!!busy || i === hosts.length - 1} title="bajar"
+                    className="rounded-md border border-ink-line px-2 py-1 font-mono text-[11px] text-white/50 transition hover:border-accent/50 hover:text-accent disabled:opacity-25">▼</button>
                   {/* on/off without deleting: url + token stay saved, the wall just stops aggregating it */}
                   <button onClick={() => doToggleHost(h)} disabled={!!busy}
                     className={`rounded-md border px-2.5 py-1 font-mono text-[11px] transition disabled:opacity-40 ${h.disabled ? "border-emerald-400/40 text-emerald-300/90 hover:bg-emerald-400/10" : "border-ink-line text-white/60 hover:border-amber-400/50 hover:text-amber-300"}`}>

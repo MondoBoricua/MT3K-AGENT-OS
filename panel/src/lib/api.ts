@@ -56,6 +56,7 @@ export const getHosts = () => jget<{ hosts: FedHost[] }>("/api/hosts");
 export const saveHost = (h: { id?: string; name?: string; url: string; token?: string }) =>
   jpost<{ ok: boolean; id?: string; reachable?: boolean; status?: number; err?: string }>("/api/save-host", h);
 export const removeHost = (id: string) => jpost<{ ok: boolean }>("/api/remove-host", { id });
+export const moveHost = (id: string, dir: -1 | 1) => jpost<{ ok: boolean; err?: string }>("/api/move-host", { id, dir });
 // flip a federated host on/off without deleting its config (url + token survive)
 export const toggleHost = (id: string, disabled: boolean) => jpost<{ ok: boolean; disabled?: boolean; err?: string }>("/api/toggle-host", { id, disabled });
 export const refreshProject = (projectId: string) => jpost<{ ok: boolean; log: string }>("/api/refresh", { projectId });

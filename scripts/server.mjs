@@ -566,6 +566,21 @@ async function api(req, res, path) {
     return sendJSON(res, 200, { hosts });
   }
 
+  // reorder federated hosts — hosts.json order IS the wall/sidebar order
+  if (path === "/api/move-host" && req.method === "POST") {
+    const { id, dir } = await body(req);
+    const hf = join(ROOT, "data", "hosts.json");
+    const cfg = existsSync(hf) ? readJSON(hf) : { hosts: [] };
+    const list = cfg.hosts || [];
+    const i = list.findIndex((h) => h.id === id);
+    const j = i + (dir === -1 ? -1 : 1);
+    if (i < 0 || j < 0 || j >= list.length) return sendJSON(res, 400, { ok: false, err: "no se puede mover" });
+    [list[i], list[j]] = [list[j], list[i]];
+    cfg.hosts = list;
+    writeFileSync(hf, JSON.stringify(cfg, null, 2) + "\n");
+    return sendJSON(res, 200, { ok: true });
+  }
+
   // flip a federated host on/off WITHOUT losing its config (url + token stay in hosts.json)
   if (path === "/api/toggle-host" && req.method === "POST") {
     const { id, disabled } = await body(req);
@@ -595,7 +610,8 @@ async function api(req, res, path) {
       token: typeof token === "string" && token.trim() ? token.trim() : prev?.token || "",
       ...(prev?.disabled ? { disabled: true } : {}), // editing never silently re-enables
     };
-    cfg.hosts = [...cfg.hosts.filter((h) => h.id !== id), entry];
+    const at = cfg.hosts.findIndex((h) => h.id === id);
+    if (at >= 0) cfg.hosts[at] = entry; else cfg.hosts.push(entry); // in place: editing keeps the wall order
     writeFileSync(hf, JSON.stringify(cfg, null, 2) + "\n");
     // reachability probe so Settings can show instant feedback
     let reachable = false, status = 0;
