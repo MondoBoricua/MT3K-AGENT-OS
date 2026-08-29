@@ -170,7 +170,7 @@ const AGENT_DEFS = [
   // DeepSeek Harness (dsh): no TUI profile — its interactive surface is `dsh web` on a local
   // port. `web` marks it as a web-UI agent: a port probe drives "running" and the panel offers
   // an "abrir UI web" link instead of a tmux terminal.
-  { id: "deepseek", name: "DeepSeek", bins: ["dsh"], paths: ["~/.dsh"], proc: [], web: 3080, webProxy: 4290, webCmd: ["dsh", "web", "--no-open"], webService: "dsh-web" },
+  { id: "deepseek", name: "DeepSeek", bins: ["dsh"], paths: ["~/.dsh"], proc: [], web: 3080, webProxy: 4290, webCmd: ["dsh", "web", "--no-open"], webService: "dsh-web", webTask: "DSH-Web" },
   // plain tmux shell — no AI. Launch runs the user's default shell (rc + aliases apply).
   // Its panes are matched by session-name prefix, not by process (every pane has a shell).
   { id: "shell", name: "Terminal", bins: [], paths: [], proc: [] },
@@ -582,6 +582,12 @@ async function api(req, res, path) {
     let started = false;
     if (process.platform !== "win32" && def.webService && existsSync(`/etc/systemd/system/${def.webService}.service`)) {
       started = (await run("systemctl", ["start", def.webService], ROOT, 10000)).ok;
+    }
+    // Windows: a naked detached spawn opens a console window (windowsHide is ignored with
+    // detached+shell) — the user closes it and kills the tool. A scheduled task launched via
+    // wscript runs truly hidden, so prefer it when the host has one registered.
+    if (!started && process.platform === "win32" && def.webTask) {
+      started = (await run("schtasks", ["/run", "/tn", def.webTask], ROOT, 10000)).ok;
     }
     if (!started) {
       const ch = spawn(bin, def.webCmd.slice(1), { detached: true, stdio: "ignore", windowsHide: true, shell: process.platform === "win32", env: process.env });
