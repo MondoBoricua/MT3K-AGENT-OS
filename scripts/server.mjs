@@ -112,6 +112,9 @@ const FS_MIME = {
   ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".wav": "audio/wav", ".ogg": "audio/ogg", ".aac": "audio/aac", ".flac": "audio/flac",
   ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
   ".json": "application/json", ".md": "text/markdown", ".txt": "text/plain", ".csv": "text/csv",
+  ".ts": "text/plain", ".tsx": "text/plain", ".jsx": "text/plain", ".py": "text/plain", ".go": "text/plain",
+  ".rs": "text/plain", ".swift": "text/plain", ".sh": "text/plain", ".yml": "text/plain", ".yaml": "text/plain",
+  ".toml": "text/plain", ".conf": "text/plain", ".log": "text/plain",
   // active content → plain text on purpose (see /api/fs/raw)
   ".html": "text/plain", ".htm": "text/plain", ".svg": "text/plain", ".js": "text/plain", ".mjs": "text/plain", ".xml": "text/plain",
 };
