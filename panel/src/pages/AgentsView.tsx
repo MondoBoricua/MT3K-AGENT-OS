@@ -107,7 +107,7 @@ export default function AgentsView({ agents, onOpen, onToast }: Props) {
               const hue = (i * 53) % 360;
               const offline = !a.online;
               const sendable = (a.panes?.length ?? 0) > 0;
-              const openable = sendable || !!a.launchable || !!a.webPort; // launchable → spawn a session; webPort → the sheet offers its web UI
+              const openable = sendable || !!a.launchable || !!a.webPort || !!a.webOff; // launchable → spawn; webPort → open its web UI; webOff → the sheet offers to start it
               return (
                 <div key={agentKey(a)}
                   onClick={() => openable && onOpen(a)}
