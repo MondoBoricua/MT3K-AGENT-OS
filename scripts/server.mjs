@@ -179,6 +179,8 @@ const base = (c) => (c || "").split("/").pop();
 const tildify = (p) => (p && p.startsWith(homedir()) ? "~" + p.slice(homedir().length) : p);
 // absolute path of a binary from our search dirs (so tmux launches it regardless of the server env's PATH)
 const absBin = (name) => { for (const d of PATH_DIRS) for (const e of BIN_EXTS) { if (d && existsSync(join(d, name + e))) return join(d, name + e); } return null; };
+// no tmux (Windows) → nothing is launchable-in-tmux; web-UI agents and Files still work
+const HAS_TMUX = !!absBin("tmux");
 
 // one ps snapshot → process tree (pid → ppid → comm). Used for both "is running" and pane discovery.
 async function procTree() {
@@ -240,7 +242,7 @@ async function detectAgents() {
     if (a.id === "shell") {
       const shellPanes = panes.filter((pn) => pn.label.startsWith("mt3k-shell-"))
         .map((pn) => ({ paneId: pn.paneId, label: pn.label, window: pn.window, cwd: pn.cwd }));
-      return { id: a.id, name: a.name, online: true, running: shellPanes.length > 0, launchable: true, panes: shellPanes };
+      return { id: a.id, name: a.name, online: true, running: shellPanes.length > 0, launchable: HAS_TMUX, panes: shellPanes };
     }
     const installed = a.bins.some(onPath) || a.paths.some((p) => existsSync(expand(p)));
     const proc = a.proc || [];
@@ -255,7 +257,7 @@ async function detectAgents() {
       : [];
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)
     const web = a.web && webUp.has(a.id) ? a.web : undefined;
-    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: installed && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : a.web && installed && a.webCmd ? { webOff: true } : {}) };
+    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: HAS_TMUX && installed && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : a.web && installed && a.webCmd ? { webOff: true } : {}) };
   });
   await updateWaiting(rows.flatMap((r) => r.panes.map((p) => ({ ...p, agentName: r.name }))));
   for (const r of rows) {
@@ -684,6 +686,7 @@ async function api(req, res, path) {
   // launch an agent CLI in a fresh detached tmux session (LAN-only). The binary comes from
   // AGENT_DEFS (allowlist) — never from the client; cwd is a tracked project or a real dir.
   if (path === "/api/launch" && req.method === "POST") {
+    if (!HAS_TMUX) return sendJSON(res, 400, { ok: false, err: "tmux no está instalado en este host" });
     const { agentId, projectId, cwd: cwdIn, create, firstPrompt } = await body(req);
     const def = AGENT_DEFS.find((a) => a.id === agentId);
     const isShell = agentId === "shell";
@@ -1101,7 +1104,7 @@ async function proxyTlsOptions() {
       return { path: u.pathname + (u.searchParams.size ? `?${u.searchParams}` : ""), pathname: u.pathname, hadToken };
     };
     const handler = (req, res) => {
-      if (!(authorized(req) || proxyCookieOk(req))) { res.writeHead(401, { "content-type": "text/plain" }); return res.end("token requerido — abre desde el panel"); }
+      if (!(authorized(req) || proxyCookieOk(req))) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); return res.end("token requerido — abre desde el panel"); }
       const { path: fwdPath, pathname, hadToken } = cleanPath(req.url);
       const fh = rewrite(req.headers);
       const wantsHtml = (req.headers.accept || "").includes("text/html");
@@ -1128,7 +1131,7 @@ async function proxyTlsOptions() {
         res.writeHead(pr.statusCode || 502, { ...pr.headers, ...extra });
         pr.pipe(res); // streamed, not buffered — the tool may use SSE
       });
-      p.on("error", () => { if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" }); res.end(`${def.name} no responde en 127.0.0.1:${def.web} — ¿está corriendo?`); });
+      p.on("error", () => { if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain; charset=utf-8" }); res.end(`${def.name} no responde en 127.0.0.1:${def.web} — ¿está corriendo?`); });
       req.pipe(p);
     };
     const srv = tls ? createHttpsServer(tls, handler) : createServer(handler);
