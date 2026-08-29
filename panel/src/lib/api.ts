@@ -52,6 +52,7 @@ export const uploadFile = (name: string, dataUrl: string, host?: string) =>
 export const getMacros = () => jget<{ macros: string[] }>("/api/macros");
 // start a web-UI agent's server on its host (federation-aware via ?host=)
 export const webStart = (agentId: string, host?: string) => jpost<{ ok: boolean; already?: boolean; err?: string }>(`/api/web-start${hostQ(host)}`, { agentId });
+export const webRestart = (agentId: string, host?: string) => jpost<{ ok: boolean; err?: string }>(`/api/web-restart${hostQ(host)}`, { agentId });
 
 export interface FedHost { id: string; name: string; url: string; hasToken: boolean; reachable: boolean; disabled?: boolean }
 export const getHosts = () => jget<{ hosts: FedHost[] }>("/api/hosts");

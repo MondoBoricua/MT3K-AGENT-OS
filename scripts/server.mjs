@@ -575,29 +575,19 @@ async function api(req, res, path) {
     const { agentId } = await body(req);
     const def = AGENT_DEFS.find((a) => a.id === agentId && a.web && a.webCmd);
     if (!def) return sendJSON(res, 400, { ok: false, err: "ese agente no tiene UI web arrancable" });
-    const probe = async () => { try { const r = await fetch(`http://127.0.0.1:${def.web}/`, { signal: AbortSignal.timeout(800) }); return r.ok; } catch { return false; } };
-    if (await probe()) return sendJSON(res, 200, { ok: true, already: true });
-    const bin = absBin(def.webCmd[0]);
-    if (!bin) return sendJSON(res, 400, { ok: false, err: `${def.webCmd[0]} no está instalado en este host` });
-    let started = false;
-    if (process.platform !== "win32" && def.webService && existsSync(`/etc/systemd/system/${def.webService}.service`)) {
-      started = (await run("systemctl", ["start", def.webService], ROOT, 10000)).ok;
-    }
-    // Windows: a naked detached spawn opens a console window (windowsHide is ignored with
-    // detached+shell) — the user closes it and kills the tool. A scheduled task launched via
-    // wscript runs truly hidden, so prefer it when the host has one registered.
-    if (!started && process.platform === "win32" && def.webTask) {
-      started = (await run("schtasks", ["/run", "/tn", def.webTask], ROOT, 10000)).ok;
-    }
-    if (!started) {
-      const ch = spawn(bin, def.webCmd.slice(1), { detached: true, stdio: "ignore", windowsHide: true, shell: process.platform === "win32", env: process.env });
-      ch.unref();
-    }
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      if (await probe()) { logEvent(`web-start · ${def.id}`); return sendJSON(res, 200, { ok: true }); }
-    }
-    return sendJSON(res, 500, { ok: false, err: `${def.name} no levantó en :${def.web} (~20s)` });
+    const r = await startWebTool(def);
+    return sendJSON(res, r.ok ? 200 : 500, r);
+  }
+
+  // stop + start — e.g. dsh requires a restart after installing a plugin
+  if (path === "/api/web-restart" && req.method === "POST") {
+    const { agentId } = await body(req);
+    const def = AGENT_DEFS.find((a) => a.id === agentId && a.web && a.webCmd);
+    if (!def) return sendJSON(res, 400, { ok: false, err: "ese agente no tiene UI web arrancable" });
+    await stopWebTool(def); // best effort — if it wasn't running we just start it
+    const r = await startWebTool(def);
+    if (r.ok) logEvent(`web-restart · ${def.id}`);
+    return sendJSON(res, r.ok ? 200 : 500, r);
   }
 
   // reorder federated hosts — hosts.json order IS the wall/sidebar order
@@ -1048,6 +1038,50 @@ createServer(async (req, res) => {
     sendJSON(res, 500, { ok: false, err: String(e) });
   }
 }).listen(PORT, () => console.log(`MT3K Agent OS server → http://localhost:${PORT}`));
+
+// start/stop a web-UI tool on THIS host. Start prefers the host's systemd unit, then a
+// Windows hidden scheduled task (a naked detached spawn opens a console window the user
+// closes — killing the tool), then a detached spawn as last resort.
+const webProbe = (def) => fetch(`http://127.0.0.1:${def.web}/`, { signal: AbortSignal.timeout(800) }).then((r) => r.ok, () => false);
+async function startWebTool(def) {
+  if (await webProbe(def)) return { ok: true, already: true };
+  const bin = absBin(def.webCmd[0]);
+  if (!bin) return { ok: false, err: `${def.webCmd[0]} no está instalado en este host` };
+  let started = false;
+  if (process.platform !== "win32" && def.webService && existsSync(`/etc/systemd/system/${def.webService}.service`)) {
+    started = (await run("systemctl", ["start", def.webService], ROOT, 10000)).ok;
+  }
+  if (!started && process.platform === "win32" && def.webTask) {
+    started = (await run("schtasks", ["/run", "/tn", def.webTask], ROOT, 10000)).ok;
+  }
+  if (!started) {
+    const ch = spawn(bin, def.webCmd.slice(1), { detached: true, stdio: "ignore", windowsHide: true, shell: process.platform === "win32", env: process.env });
+    ch.unref();
+  }
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (await webProbe(def)) { logEvent(`web-start · ${def.id}`); return { ok: true }; }
+  }
+  return { ok: false, err: `${def.name} no levantó en :${def.web} (~20s)` };
+}
+async function stopWebTool(def) {
+  if (process.platform !== "win32" && def.webService && existsSync(`/etc/systemd/system/${def.webService}.service`)) {
+    await run("systemctl", ["stop", def.webService], ROOT, 10000);
+  } else if (process.platform === "win32") {
+    const r = await run("powershell", ["-NoProfile", "-Command", `(Get-NetTCPConnection -LocalPort ${def.web} -State Listen | Select-Object -First 1).OwningProcess`], ROOT, 10000);
+    const pid = (r.out || "").trim();
+    if (/^\d+$/.test(pid)) await run("taskkill", ["/PID", pid, "/F"], ROOT, 10000);
+  } else {
+    const r = await run("lsof", ["-ti", `tcp:${def.web}`], ROOT, 5000);
+    const pid = (r.out || "").split("\n")[0].trim();
+    if (/^\d+$/.test(pid)) await run("kill", [pid], ROOT, 5000);
+  }
+  for (let i = 0; i < 10; i++) {
+    if (!(await webProbe(def))) return true; // port is dead → stopped
+    await new Promise((r) => setTimeout(r, 700));
+  }
+  return false;
+}
 
 // --- web-app proxy: expose a localhost-only tool (e.g. DeepSeek's `dsh web`) through the
 // panel's OWN auth gate on a dedicated port, so its absolute asset paths keep working and it

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, webStart, agentKey, type FedHost } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, webStart, webRestart, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import AgentLogo from "./AgentLogo";
 
@@ -228,6 +228,15 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
     if (r?.ok) onToast?.(`${agent.name} UI web ${r.already ? "ya estaba prendida" : "prendida"}`, true);
     else onToast?.(r?.err ? `error: ${r.err}` : "no se pudo prender la UI web", false);
   };
+  // stop+start on its host — dsh pide reinicio después de instalar un plugin
+  const restartWeb = async () => {
+    if (!agent || webStarting) return;
+    setWebStarting(true);
+    const r = await webRestart(agent.id, host);
+    setWebStarting(false);
+    if (r?.ok) onToast?.(`${agent.name} UI web reiniciada`, true);
+    else onToast?.(r?.err ? `error: ${r.err}` : "no se pudo reiniciar la UI web", false);
+  };
 
   const exitFullscreen = () => {
     if (panes.length > 1) { setFullscreen(false); setPaneId(null); setText(""); }
@@ -446,10 +455,16 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
             <div className="flex flex-col items-center gap-3 py-6">
               <p className="text-center font-mono text-xs text-white/40">Este agente vive en su propia UI web (puerto {agent.webPort}).{agent.webTls ? " Cert self-signed: acepta el aviso del navegador la primera vez." : ""}</p>
               {/* webPort is the panel's authed proxy — ?t= mints the cookie that auths every follow-up request */}
-              <a href={webUrl} target="_blank" rel="noopener noreferrer"
-                className="rounded-full border border-accent/40 bg-gradient-to-b from-accent/40 to-accent/20 px-5 py-2 font-mono text-sm font-medium text-white shadow-[0_0_20px_-8px] shadow-accent transition hover:from-accent/50 active:scale-95">
-                abrir UI web ↗
-              </a>
+              <div className="flex items-center gap-2">
+                <a href={webUrl} target="_blank" rel="noopener noreferrer"
+                  className="rounded-full border border-accent/40 bg-gradient-to-b from-accent/40 to-accent/20 px-5 py-2 font-mono text-sm font-medium text-white shadow-[0_0_20px_-8px] shadow-accent transition hover:from-accent/50 active:scale-95">
+                  abrir UI web ↗
+                </a>
+                <button onClick={restartWeb} disabled={webStarting} title="parar y volver a arrancar (ej. tras instalar un plugin de dsh)"
+                  className="rounded-full border border-ink-line bg-white/[0.06] px-4 py-2 font-mono text-sm text-white/70 transition hover:border-accent/50 hover:text-accent active:scale-95 disabled:opacity-50">
+                  {webStarting ? "reiniciando…" : "⟳ reiniciar"}
+                </button>
+              </div>
             </div>
           ) : (
           agent.webOff ? (
