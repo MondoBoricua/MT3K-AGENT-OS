@@ -1,6 +1,6 @@
 // Per-agent brand logo (real SVGs in /public/logos). Agents without a brand mark
 // fall back to a generic terminal glyph. Dimmed + desaturated when offline.
-const BRAND = new Set(["claude", "codex", "gemini", "grok", "cursor", "antigravity", "opencode"]);
+const BRAND = new Set(["claude", "codex", "gemini", "grok", "cursor", "antigravity", "opencode", "deepseek"]);
 const BASE = import.meta.env.BASE_URL;
 
 export default function AgentLogo({ id, online = true, className = "h-[18px] w-[18px]" }: { id: string; online?: boolean; className?: string }) {

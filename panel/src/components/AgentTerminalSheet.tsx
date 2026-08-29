@@ -338,7 +338,7 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
               <div className="font-mono text-sm font-semibold">{agent.name}</div>
               <div className="font-mono text-[11px] text-white/45">
                 {panes.length === 0
-                  ? agent.running ? "corriendo fuera de tmux — ábrele una sesión nueva" : "sin sesión activa en tmux"
+                  ? agent.webPort ? `UI web activa · puerto ${agent.webPort}` : agent.running ? "corriendo fuera de tmux — ábrele una sesión nueva" : "sin sesión activa en tmux"
                   : `${panes.length} ${panes.length === 1 ? "sesión" : "sesiones"} en tmux`}
               </div>
             </div>
@@ -413,9 +413,22 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
               </div>
             </div>
         ) : panes.length === 0 ? (
+          agent.webPort && !agent.host ? (
+            // web-UI agent (e.g. DeepSeek Harness): its interactive surface is a local web app.
+            // location.hostname keeps the link valid however you reached the panel (LAN, WG, localhost)
+            // — as long as that tool's server binds beyond 127.0.0.1.
+            <div className="flex flex-col items-center gap-3 py-6">
+              <p className="text-center font-mono text-xs text-white/40">Este agente vive en su propia UI web (puerto {agent.webPort}).</p>
+              <a href={`http://${window.location.hostname}:${agent.webPort}/`} target="_blank" rel="noopener noreferrer"
+                className="rounded-full border border-accent/40 bg-gradient-to-b from-accent/40 to-accent/20 px-5 py-2 font-mono text-sm font-medium text-white shadow-[0_0_20px_-8px] shadow-accent transition hover:from-accent/50 active:scale-95">
+                abrir UI web ↗
+              </a>
+            </div>
+          ) : (
           <p className="py-6 text-center font-mono text-xs text-white/40">
             {agent.online ? "Este agente es una app (GUI) y no se puede abrir en tmux." : "Agente offline."}
           </p>
+          )
         ) : (
           // session picker — pick which tmux pane to open in fullscreen
           <div className="flex flex-col gap-2">

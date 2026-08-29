@@ -163,6 +163,10 @@ const AGENT_DEFS = [
   { id: "antigravity", name: "Antigravity", bins: ["agy", "antigravity"], paths: ["~/.antigravity", "/Applications/Antigravity.app"], proc: ["agy", "antigravity"] },
   // Cursor's agentic CLI (`cursor-agent`), not the `cursor` GUI launcher → real TUI, launchable in tmux
   { id: "cursor", name: "Cursor", bins: ["cursor-agent"], paths: ["~/.cursor"], proc: ["cursor-agent"] },
+  // DeepSeek Harness (dsh): no TUI profile — its interactive surface is `dsh web` on a local
+  // port. `web` marks it as a web-UI agent: a port probe drives "running" and the panel offers
+  // an "abrir UI web" link instead of a tmux terminal.
+  { id: "deepseek", name: "DeepSeek", bins: ["dsh"], paths: ["~/.dsh"], proc: [], web: 3080 },
   // plain tmux shell — no AI. Launch runs the user's default shell (rc + aliases apply).
   // Its panes are matched by session-name prefix, not by process (every pane has a shell).
   { id: "shell", name: "Terminal", bins: [], paths: [], proc: [] },
@@ -223,6 +227,11 @@ async function discoverPanes(descendants) {
 async function detectAgents() {
   const { running, descendants } = await procTree();
   const panes = await discoverPanes(descendants);
+  // web-UI agents (def.web = local port): a quick probe tells us whether their server is up
+  const webUp = new Set();
+  await Promise.all(AGENT_DEFS.filter((a) => a.web).map(async (a) => {
+    try { const r = await fetch(`http://127.0.0.1:${a.web}/`, { signal: AbortSignal.timeout(800) }); if (r.ok) webUp.add(a.id); } catch { /* down */ }
+  }));
   const rows = AGENT_DEFS.map((a) => {
     if (a.id === "shell") {
       const shellPanes = panes.filter((pn) => pn.label.startsWith("mt3k-shell-"))
@@ -241,7 +250,8 @@ async function detectAgents() {
           .map((pn) => ({ paneId: pn.paneId, label: pn.label, window: pn.window, cwd: pn.cwd }))
       : [];
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)
-    return { id: a.id, name: a.name, online: installed, running: isRunning, launchable: installed && proc.length > 0, panes: agentPanes };
+    const web = a.web && webUp.has(a.id) ? a.web : undefined;
+    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: installed && proc.length > 0, panes: agentPanes, ...(web ? { webPort: web } : {}) };
   });
   await updateWaiting(rows.flatMap((r) => r.panes.map((p) => ({ ...p, agentName: r.name }))));
   for (const r of rows) {

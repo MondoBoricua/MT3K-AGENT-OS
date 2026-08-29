@@ -186,7 +186,7 @@ export default function App() {
         <div className="flex flex-col gap-1.5 overflow-y-auto">
           {agents.map((a) => {
             const sendable = (a.panes?.length ?? 0) > 0;
-            const openable = sendable || !!a.launchable; // launchable agents open the sheet to spawn a session
+            const openable = sendable || !!a.launchable || !!a.webPort; // launchable → spawn a session; webPort → the sheet offers its web UI
             const cls = `flex items-center gap-2.5 rounded-lg border px-3 py-1.5 text-left font-mono text-xs transition ${
               a.running ? "border-emerald-400/40 bg-emerald-400/10 font-semibold text-white/90" : a.online ? "border-ink-line text-white/55" : "border-ink-line text-white/30"
             } ${openable ? "cursor-pointer hover:border-accent/50 hover:bg-accent/10" : ""}`;
