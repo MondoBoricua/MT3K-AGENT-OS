@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { fsList, fsRead, fsWrite, fsUpload, fsMove, fsDelete, fsRawUrl, getHosts, type FsEntry, type FsListing, type FsFile, type FedHost } from "../lib/api";
+import { useEffect, useState, type ReactNode } from "react";
+import { fsList, fsRead, fsWrite, fsRawUrl, getHosts, type FsEntry, type FsListing, type FsFile, type FedHost } from "../lib/api";
 
 type Props = { onToast?: (text: string, live: boolean) => void };
 
@@ -8,7 +8,41 @@ const when = (ms: number) => (ms ? new Date(ms).toLocaleString("es-PR", { dateSt
 const base = (p: string) => p.split("/").pop() || p;
 const kindOf = (mime: string) =>
   mime.startsWith("image/") ? "image" : mime.startsWith("audio/") ? "audio" : mime.startsWith("video/") ? "video" : mime.startsWith("application/pdf") ? "pdf" : "other";
-const icon = (e: FsEntry) => (e.dir ? "📁" : /\.(png|jpe?g|gif|webp)$/i.test(e.name) ? "🖼️" : /\.pdf$/i.test(e.name) ? "📕" : /\.(mp3|m4a|wav|ogg|flac|aac)$/i.test(e.name) ? "🎵" : /\.(mp4|webm|mov)$/i.test(e.name) ? "🎬" : "📄");
+
+// frosted-glass building blocks (iOS-style): translucent gradient + blur + hairline highlight.
+// The ambient glows behind the page are what make the blur readable — glass over flat black is invisible.
+const glass = "rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.09] to-white/[0.035] backdrop-blur-2xl shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_18px_44px_-22px_rgba(0,0,0,0.85)]";
+const glassPill = "rounded-full border border-white/10 bg-white/[0.07] backdrop-blur-xl transition hover:bg-white/[0.13] active:scale-95";
+const glassField = "rounded-xl border border-white/10 bg-white/[0.06] backdrop-blur-xl placeholder:text-white/30 focus:border-accent/60 focus:bg-white/[0.09] focus:outline-none";
+
+// iOS-Files-style icon tiles: white glyph on a colored gradient squircle, picked by extension
+type Tile = { bg: string; glyph: ReactNode };
+const G = ({ d }: { d: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true"><path d={d} /></svg>
+);
+const TILES: Record<string, Tile> = {
+  folder: { bg: "from-sky-400 to-blue-600", glyph: <G d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /> },
+  image: { bg: "from-fuchsia-400 to-purple-600", glyph: <G d="M4 5h16v14H4zM4 15l4.5-4.5 3.5 3.5 3-3L20 16M9 9.5h.01" /> },
+  pdf: { bg: "from-red-400 to-rose-600", glyph: <G d="M7 3h7l4 4v14H7zM14 3v4h4M10 12h4M10 16h4" /> },
+  audio: { bg: "from-pink-400 to-rose-500", glyph: <G d="M9 18V6l10-2v12M9 18a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0zM19 16a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z" /> },
+  video: { bg: "from-amber-400 to-orange-600", glyph: <G d="M4 6h16v12H4zM4 9h16M8 6v12M16 6v12" /> },
+  code: { bg: "from-emerald-400 to-teal-600", glyph: <G d="m9 8-4 4 4 4M15 8l4 4-4 4" /> },
+  doc: { bg: "from-slate-400 to-slate-600", glyph: <G d="M7 3h7l4 4v14H7zM14 3v4h4M10 12h6M10 16h6" /> },
+};
+const tileFor = (e: FsEntry): Tile => {
+  if (e.dir) return TILES.folder;
+  if (/\.(png|jpe?g|gif|webp|svg|ico|heic)$/i.test(e.name)) return TILES.image;
+  if (/\.pdf$/i.test(e.name)) return TILES.pdf;
+  if (/\.(mp3|m4a|wav|ogg|flac|aac)$/i.test(e.name)) return TILES.audio;
+  if (/\.(mp4|webm|mov|mkv)$/i.test(e.name)) return TILES.video;
+  if (/\.(ts|tsx|js|jsx|mjs|py|go|rs|swift|sh|json|yml|yaml|toml|css|html)$/i.test(e.name)) return TILES.code;
+  return TILES.doc;
+};
+const FileTile = ({ entry }: { entry: FsEntry }) => (
+  <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-b ${tileFor(entry).bg} shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_6px_-2px_rgba(0,0,0,0.6)]`}>
+    {tileFor(entry).glyph}
+  </span>
+);
 
 // File browser + viewer/editor. Every call rides ?host= so picking a federated host walks
 // THAT machine's disk (the proxy forwards bytes untouched). Text edits save atomically with an
@@ -24,8 +58,6 @@ export default function Files({ onToast }: Props) {
   const [draft, setDraft] = useState(""); // editor buffer
   const [saving, setSaving] = useState(false);
   const [opening, setOpening] = useState("");
-  const [uploadBusy, setUploadBusy] = useState(false);
-  const uploadRef = useRef<HTMLInputElement>(null); // hidden input behind "subir"
   const dirty = !!file && file.kind === "text" && draft !== (file.content ?? "");
   const hq = host || undefined;
   const memKey = `mt3k.files.${host || "local"}`;
@@ -87,54 +119,6 @@ export default function Files({ onToast }: Props) {
   };
 
   const closeFile = () => { if (confirmDiscard()) { setFile(null); setDraft(""); } };
-
-  // drop a file from the device into the current folder — any type, 25MB cap
-  const uploadHere = (f: File) => {
-    if (!listing || uploadBusy) return;
-    if (f.size > 25 * 1024 * 1024) { onToast?.("archivo demasiado grande (máx 25MB)", false); return; }
-    setUploadBusy(true);
-    const reader = new FileReader();
-    reader.onerror = () => { setUploadBusy(false); onToast?.("no se pudo leer el archivo", false); };
-    reader.onload = async () => {
-      const send = async (overwrite: boolean) => fsUpload(listing.path, f.name, String(reader.result), overwrite, hq);
-      let r = await send(false);
-      if (r?.exists && window.confirm(`Ya existe «${f.name}» aquí. ¿Sobrescribirlo?`)) r = await send(true);
-      setUploadBusy(false);
-      if (r?.ok) { onToast?.(`subido · ${f.name}`, true); load(listing.path); }
-      else if (!r?.exists) onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir", false);
-    };
-    reader.readAsDataURL(f);
-  };
-
-  // delete = always a typed-out confirm with the full path visible — never a silent tap
-  const removePath = async (target: string, isDir: boolean) => {
-    if (!listing) return;
-    if (!window.confirm(`¿Borrar ${isDir ? "la carpeta (solo si está vacía)" : "el archivo"}?\n${target}`)) return;
-    const r = await fsDelete(target, hq);
-    if (r?.ok) {
-      onToast?.(`borrado · ${base(target)}`, true);
-      if (file?.path === target) { setFile(null); setDraft(""); }
-      load(listing.path);
-    } else {
-      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo borrar", false);
-    }
-  };
-
-  // move/rename via a prompt prefilled with the current path — one primitive covers both
-  const movePath = async (from: string) => {
-    if (!listing) return;
-    const to = window.prompt("Mover / renombrar a:", from)?.trim();
-    if (!to || to === from) return;
-    let r = await fsMove(from, to, false, hq);
-    if (r?.exists && window.confirm("Ya existe algo en el destino. ¿Sobrescribirlo?")) r = await fsMove(from, to, true, hq);
-    if (r?.ok && r.path) {
-      onToast?.(`movido → ${r.path}`, true);
-      if (file?.path === from) setFile({ ...file, path: r.path });
-      load(listing.path);
-    } else if (!r?.exists) {
-      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo mover", false);
-    }
-  };
   const copyPath = () => { if (file) navigator.clipboard.writeText(file.path).then(() => onToast?.("ruta copiada", true), () => onToast?.("no se pudo copiar", false)); };
 
   const entries = (listing?.entries ?? [])
@@ -145,138 +129,141 @@ export default function Files({ onToast }: Props) {
   const kind = file ? kindOf(file.mime) : "other";
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-6">
-      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden p-4 sm:p-6">
+      {/* ambient glows the frosted panels blur — this is what sells the glass */}
+      <div aria-hidden className="pointer-events-none absolute -top-32 right-[-8%] h-96 w-96 rounded-full bg-accent/25 blur-[120px]" />
+      <div aria-hidden className="pointer-events-none absolute bottom-[-25%] left-[-8%] h-[30rem] w-[30rem] rounded-full bg-sky-500/20 blur-[140px]" />
+      <div aria-hidden className="pointer-events-none absolute left-1/3 top-1/4 h-72 w-72 rounded-full bg-fuchsia-500/10 blur-[110px]" />
+
+      <div className="relative mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold">Files</h1>
+          <h1 className="text-xl font-semibold tracking-tight">Files</h1>
           <p className="font-mono text-xs text-white/45">explora, mira y edita archivos del host{hosts.length ? " — local o federado" : ""}</p>
         </div>
         <div className="flex items-center gap-2">
           {hosts.length > 0 && (
             <select value={host} onChange={(e) => { if (confirmDiscard()) setHost(e.target.value); }}
-              className="rounded-lg border border-ink-line bg-ink-850/60 px-2.5 py-1.5 font-mono text-xs text-white focus:border-accent/50 focus:outline-none">
+              className={`${glassField} appearance-none px-3 py-1.5 font-mono text-xs text-white`}>
               <option value="">local · esta máquina</option>
               {hosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
             </select>
           )}
-          <label className="flex cursor-pointer items-center gap-1.5 font-mono text-[11px] text-white/55">
+          <label className={`${glassPill} flex cursor-pointer items-center gap-1.5 px-3 py-1.5 font-mono text-[11px] text-white/60`}>
             <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} className="accent-[oklch(62%_0.23_25)]" /> ocultos
           </label>
         </div>
       </div>
 
-      {/* path bar: breadcrumbs to tap + free-form input for typing a path on desktop */}
-      <form onSubmit={(e) => { e.preventDefault(); load(pathInput.trim() || "~"); }} className="mb-2 flex gap-2">
+      {/* path bar: breadcrumb pills to tap + free-form input for typing a path on desktop */}
+      <form onSubmit={(e) => { e.preventDefault(); load(pathInput.trim() || "~"); }} className="relative mb-2 flex gap-2">
         <input value={pathInput} onChange={(e) => setPathInput(e.target.value)} spellCheck={false} autoCapitalize="off" placeholder="~"
-          className="min-w-0 flex-1 rounded-lg border border-ink-line bg-ink-850/60 px-3 py-1.5 font-mono text-sm text-white placeholder:text-white/30 focus:border-accent/50 focus:outline-none" />
-        <button type="submit" className="rounded-lg border border-ink-line px-3 py-1.5 font-mono text-xs text-white/70 transition hover:border-accent/50 hover:text-accent">ir</button>
+          className={`${glassField} min-w-0 flex-1 px-3.5 py-2 font-mono text-sm text-white`} />
+        <button type="submit" className={`${glassPill} px-4 py-2 font-mono text-xs text-white/70 hover:text-accent`}>ir</button>
       </form>
-      <div className="mb-3 flex flex-wrap items-center gap-1.5">
-        <button onClick={() => load("/")} className="rounded-full border border-ink-line bg-ink-850/50 px-2 py-0.5 font-mono text-[10px] text-white/50 transition hover:text-white">/</button>
+      <div className="relative mb-3 flex items-center gap-1.5 overflow-x-auto pb-1 md:flex-wrap md:overflow-visible md:pb-0 [&>button]:shrink-0">
+        <button onClick={() => load("/")} className={`${glassPill} px-2.5 py-1 font-mono text-[10px] text-white/55`}>/</button>
         {crumbs.map((c, i) => (
           <button key={i} onClick={() => load("/" + crumbs.slice(0, i + 1).join("/"))}
-            className={`rounded-full border px-2 py-0.5 font-mono text-[10px] transition ${i === crumbs.length - 1 ? "border-accent/60 bg-accent/15 text-accent" : "border-ink-line bg-ink-850/50 text-white/50 hover:text-white"}`}>
+            className={`rounded-full px-2.5 py-1 font-mono text-[10px] transition active:scale-95 ${i === crumbs.length - 1 ? "border border-accent/50 bg-accent/25 text-white shadow-[0_0_18px_-6px] shadow-accent backdrop-blur-xl" : `${glassPill} text-white/55`}`}>
             {c}
           </button>
         ))}
-        <span className="mx-1 text-white/20">·</span>
+        <span className="mx-1 text-white/15">·</span>
         {listing?.quick.map((q) => (
           <button key={q.path} onClick={() => load(q.path)} title={q.path}
-            className="rounded-full border border-dashed border-ink-line px-2 py-0.5 font-mono text-[10px] text-white/45 transition hover:border-accent/50 hover:text-accent">
+            className={`${glassPill} border-dashed px-2.5 py-1 font-mono text-[10px] text-white/45 hover:text-accent`}>
             {q.name}
           </button>
         ))}
       </div>
 
-      <div className="grid min-h-0 flex-1 gap-3 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+      <div className="relative grid min-h-0 flex-1 gap-4 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
         {/* listing — on the phone it yields the screen to the viewer while a file is open */}
-        <div className={`surface min-h-0 overflow-y-auto ${file ? "hidden md:block" : ""}`}>
+        <div className={`${glass} flex min-h-0 flex-col overflow-hidden ${file ? "hidden md:flex" : ""}`}>
           {listErr ? (
             <div className="p-6 text-center font-mono text-xs text-amber-300/80">{listErr}</div>
           ) : (
-            <ul className="divide-y divide-ink-line/60">
+            <ul className="min-h-0 flex-1 overflow-y-auto p-1.5">
               {listing && listing.path !== "/" && (
-                <li><button onClick={() => load(listing.parent)} className="flex w-full items-center gap-2 px-3 py-2 text-left font-mono text-xs text-white/50 transition hover:bg-white/5 hover:text-white">⬆ ..</button></li>
+                <li>
+                  <button onClick={() => load(listing.parent)}
+                    className="flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left font-mono text-xs text-white/50 transition hover:bg-white/[0.07] active:scale-[0.99]">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] border border-white/10 bg-white/[0.06]"><G d="m12 19-7-7 7-7M5 12h14" /></span>
+                    ..
+                  </button>
+                </li>
               )}
               {entries.map((e) => {
                 const full = `${listing!.path.replace(/\/$/, "")}/${e.name}`;
                 const active = file?.path === full;
                 return (
                   <li key={e.name}>
-                    <div className={`flex items-center transition hover:bg-white/5 ${active ? "bg-accent/10" : ""}`}>
-                      <button onClick={() => (e.dir ? load(full) : open(full))} disabled={opening === full}
-                        className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left">
-                        <span className="w-5 shrink-0 text-center text-sm">{icon(e)}</span>
-                        <span className={`min-w-0 flex-1 truncate font-mono text-xs ${e.dir ? "text-white" : "text-white/80"}`}>{e.name}{e.dir ? "/" : ""}</span>
-                        <span className="shrink-0 font-mono text-[10px] text-white/35">{e.dir ? "" : human(e.size)}</span>
-                      </button>
-                      <button onClick={() => movePath(full)} title="mover / renombrar"
-                        className="shrink-0 px-2 py-2 font-mono text-[11px] text-white/25 transition hover:text-accent">✎</button>
-                      <button onClick={() => removePath(full, e.dir)} title="borrar"
-                        className="shrink-0 px-2 py-2 font-mono text-[11px] text-white/25 transition hover:text-red-300">🗑</button>
-                    </div>
+                    <button onClick={() => (e.dir ? load(full) : open(full))} disabled={opening === full}
+                      className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition hover:bg-white/[0.07] active:scale-[0.99] ${active ? "bg-accent/15" : ""}`}>
+                      <FileTile entry={e} />
+                      <span className="min-w-0 flex-1">
+                        <span className={`block truncate text-[13px] ${e.dir ? "font-medium text-white" : "text-white/85"}`}>{e.name}</span>
+                        {!e.dir && <span className="block font-mono text-[10px] text-white/35">{human(e.size)}</span>}
+                      </span>
+                      {e.dir && <span className="shrink-0 text-base text-white/25">›</span>}
+                    </button>
                   </li>
                 );
               })}
-              {listing && entries.length === 0 && <li className="p-6 text-center font-mono text-xs text-white/35">carpeta vacía</li>}
+              {listing && entries.length === 0 && <li className="p-8 text-center font-mono text-xs text-white/35">carpeta vacía</li>}
             </ul>
           )}
           {listing && (
-            <div className="sticky bottom-0 flex gap-2 border-t border-ink-line bg-ink-900/95 p-2 backdrop-blur">
-              <input ref={uploadRef} type="file" className="hidden"
-                onChange={(ev) => { const f = ev.target.files?.[0]; if (f) uploadHere(f); ev.target.value = ""; }} />
-              <button onClick={newFile} className="flex-1 rounded-lg border border-dashed border-ink-line px-3 py-1.5 font-mono text-[11px] text-white/50 transition hover:border-accent/50 hover:text-accent">＋ nuevo</button>
-              <button onClick={() => uploadRef.current?.click()} disabled={uploadBusy}
-                className="flex-1 rounded-lg border border-dashed border-ink-line px-3 py-1.5 font-mono text-[11px] text-white/50 transition hover:border-accent/50 hover:text-accent disabled:opacity-40">
-                {uploadBusy ? "subiendo…" : "⬆ subir aquí"}
-              </button>
+            <div className="border-t border-white/[0.07] p-2">
+              <button onClick={newFile} className={`${glassPill} w-full border-dashed px-3 py-2 font-mono text-[11px] text-white/50 hover:text-accent`}>＋ archivo nuevo aquí</button>
             </div>
           )}
         </div>
 
         {/* viewer / editor */}
-        <div className={`surface flex min-h-0 flex-col ${file ? "" : "hidden md:flex"}`}>
+        <div className={`${glass} flex min-h-0 flex-col overflow-hidden ${file ? "" : "hidden md:flex"}`}>
           {!file ? (
             <div className="flex flex-1 items-center justify-center p-8 text-center">
-              <div><div className="mb-2 text-4xl opacity-30">📄</div><div className="font-mono text-xs text-white/40">elige un archivo para verlo o editarlo</div></div>
+              <div>
+                <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"><G d="M7 3h7l4 4v14H7zM14 3v4h4" /></div>
+                <div className="font-mono text-xs text-white/40">elige un archivo para verlo o editarlo</div>
+              </div>
             </div>
           ) : (
             <>
-              <header className="flex items-center justify-between gap-2 border-b border-ink-line px-3 py-2">
+              <header className="flex items-center justify-between gap-2 border-b border-white/[0.07] bg-white/[0.03] px-3.5 py-2.5 backdrop-blur-xl">
                 <div className="min-w-0">
-                  <div className="truncate font-mono text-xs font-semibold text-white">{base(file.path)}{dirty && <span className="ml-1 text-amber-300">●</span>}</div>
+                  <div className="truncate text-[13px] font-semibold text-white">{base(file.path)}{dirty && <span className="ml-1.5 text-amber-300">●</span>}</div>
                   <div className="truncate font-mono text-[10px] text-white/40">{human(file.size)} · {when(file.mtime)} · {file.mime.split(";")[0]}</div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
-                  <button onClick={() => movePath(file.path)} title="mover / renombrar" className="rounded-lg border border-ink-line px-2 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent">✎</button>
-                  <button onClick={() => removePath(file.path, false)} title="borrar" className="rounded-lg border border-red-400/25 px-2 py-1 font-mono text-[10px] text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10">🗑</button>
-                  <button onClick={copyPath} title="copiar ruta" className="rounded-lg border border-ink-line px-2 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent">⧉ ruta</button>
+                  <button onClick={copyPath} title="copiar ruta" className={`${glassPill} px-2.5 py-1.5 font-mono text-[10px] text-white/60`}>⧉ ruta</button>
                   {file.kind === "text" && (
                     <button onClick={save} disabled={saving || (!dirty && !!file.mtime)}
-                      className="rounded-lg bg-accent/20 px-3 py-1 font-mono text-[11px] font-medium text-accent transition hover:bg-accent/30 disabled:opacity-40">
+                      className="rounded-full border border-accent/40 bg-gradient-to-b from-accent/40 to-accent/20 px-3.5 py-1.5 font-mono text-[11px] font-medium text-white shadow-[0_0_20px_-8px] shadow-accent backdrop-blur-xl transition hover:from-accent/50 active:scale-95 disabled:opacity-35 disabled:shadow-none">
                       {saving ? "guardando…" : "guardar"}
                     </button>
                   )}
-                  <button onClick={closeFile} className="rounded-lg border border-ink-line px-2 py-1 font-mono text-[10px] text-white/55 transition hover:text-white">✕</button>
+                  <button onClick={closeFile} className={`${glassPill} px-2.5 py-1.5 font-mono text-[10px] text-white/60`}>✕</button>
                 </div>
               </header>
               <div className="min-h-0 flex-1 overflow-auto">
                 {file.kind === "text" ? (
                   <textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} autoCapitalize="off" autoCorrect="off"
                     onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); save(); } }}
-                    className="h-full min-h-[50vh] w-full resize-none bg-transparent p-3 font-mono text-xs leading-relaxed text-white/90 outline-none" />
+                    className="h-full min-h-[50vh] w-full resize-none bg-transparent p-3.5 font-mono text-xs leading-relaxed text-white/90 outline-none" />
                 ) : kind === "image" ? (
-                  <img src={raw} alt={base(file.path)} className="mx-auto max-h-full max-w-full object-contain p-2" />
+                  <img src={raw} alt={base(file.path)} className="mx-auto max-h-full max-w-full rounded-xl object-contain p-3" />
                 ) : kind === "pdf" ? (
                   <iframe src={raw} title={base(file.path)} className="h-full min-h-[70vh] w-full" />
                 ) : kind === "audio" ? (
                   <div className="p-6"><audio controls src={raw} className="w-full" /></div>
                 ) : kind === "video" ? (
-                  <video controls src={raw} className="max-h-full w-full" />
+                  <video controls src={raw} className="max-h-full w-full rounded-xl p-2" />
                 ) : (
                   <div className="p-8 text-center font-mono text-xs text-white/50">
                     {file.tooBig ? "demasiado grande para editar aquí (máx 2MB)" : "archivo binario — sin vista previa"}
-                    <div className="mt-3"><a href={raw} download={base(file.path)} className="rounded-lg border border-ink-line px-3 py-1.5 text-white/70 transition hover:border-accent/50 hover:text-accent">⬇ descargar</a></div>
+                    <div className="mt-3"><a href={raw} download={base(file.path)} className={`${glassPill} inline-block px-4 py-2 text-white/70 hover:text-accent`}>⬇ descargar</a></div>
                   </div>
                 )}
               </div>
