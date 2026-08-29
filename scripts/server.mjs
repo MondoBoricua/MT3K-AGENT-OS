@@ -20,7 +20,7 @@ import { createServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { connect as netConnect } from "node:net";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync } from "node:fs";
-import { join, dirname, extname, basename, resolve } from "node:path";
+import { join, dirname, extname, basename, resolve, isAbsolute, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, networkInterfaces } from "node:os";
 import { spawn } from "node:child_process";
@@ -106,7 +106,7 @@ const FS_TEXT_MAX = 2 * 1024 * 1024;
 const fsPath = (p) => {
   if (typeof p !== "string" || !p.trim()) return null;
   const abs = resolve(expand(p.trim()));
-  return abs.startsWith("/") ? abs : null;
+  return isAbsolute(abs) ? abs : null; // isAbsolute (not startsWith "/") so C:\ paths work on Windows
 };
 const FS_MIME = {
   ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".ico": "image/x-icon",
@@ -152,8 +152,10 @@ function readLogs() {
 }
 
 // --- agent detection: which CLIs / agents are actually installed on this machine ---
-const PATH_DIRS = [join(homedir(), ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", ...(process.env.PATH || "").split(":")];
-const onPath = (bin) => PATH_DIRS.some((d) => d && existsSync(join(d, bin)));
+const PATH_DIRS = [join(homedir(), ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", ...(process.env.PATH || "").split(delimiter)];
+// Windows binaries carry extensions (claude.cmd, dsh.ps1, ollama.exe) — probe those too
+const BIN_EXTS = process.platform === "win32" ? ["", ".exe", ".cmd", ".ps1", ".bat"] : [""];
+const onPath = (bin) => PATH_DIRS.some((d) => d && BIN_EXTS.some((e) => existsSync(join(d, bin + e))));
 // `proc` = exact process basenames (case-sensitive) that mean this agent is actively running.
 // CLI binaries are lowercase (claude/codex/…); same-named GUI apps are Capitalized → not matched.
 const AGENT_DEFS = [
@@ -176,7 +178,7 @@ const AGENT_DEFS = [
 const base = (c) => (c || "").split("/").pop();
 const tildify = (p) => (p && p.startsWith(homedir()) ? "~" + p.slice(homedir().length) : p);
 // absolute path of a binary from our search dirs (so tmux launches it regardless of the server env's PATH)
-const absBin = (name) => { for (const d of PATH_DIRS) { if (d && existsSync(join(d, name))) return join(d, name); } return null; };
+const absBin = (name) => { for (const d of PATH_DIRS) for (const e of BIN_EXTS) { if (d && existsSync(join(d, name + e))) return join(d, name + e); } return null; };
 
 // one ps snapshot → process tree (pid → ppid → comm). Used for both "is running" and pane discovery.
 async function procTree() {
