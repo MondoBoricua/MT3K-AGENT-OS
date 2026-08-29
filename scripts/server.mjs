@@ -152,7 +152,9 @@ function readLogs() {
 }
 
 // --- agent detection: which CLIs / agents are actually installed on this machine ---
-const PATH_DIRS = [join(homedir(), ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", ...(process.env.PATH || "").split(delimiter)];
+// dirname(process.execPath): wherever OUR node lives (nvm, brew, …), its npm-global siblings
+// (dsh, claude, …) live too — a launchd/systemd service PATH usually misses that dir
+const PATH_DIRS = [dirname(process.execPath), join(homedir(), ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", ...(process.env.PATH || "").split(delimiter)];
 // Windows binaries carry extensions (claude.cmd, dsh.ps1, ollama.exe) — probe those too
 const BIN_EXTS = process.platform === "win32" ? ["", ".exe", ".cmd", ".ps1", ".bat"] : [""];
 const onPath = (bin) => PATH_DIRS.some((d) => d && BIN_EXTS.some((e) => existsSync(join(d, bin + e))));
@@ -1013,7 +1015,17 @@ const ipInCidr = (ip, cidr) => {
   const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
   return ((toInt(ip) & mask) >>> 0) === ((toInt(base) & mask) >>> 0);
 };
-const fromTrustedNet = (req) => TRUST_CIDRS.some((c) => ipInCidr(req.socket?.remoteAddress, c));
+// loopback is always trusted (a local process can do anything anyway — this is what lets the
+// machine's own browser open its panel without pasting the token). To keep BOTH loopback and
+// LAN trust safe from DNS rebinding, the Host header must be an IP literal or localhost — a
+// rebinding page necessarily carries the attacker's domain there.
+const LOOPBACK_RE = /^(::1$|::ffff:127\.|127\.)/;
+const fromTrustedNet = (req) => {
+  const ip = req.socket?.remoteAddress || "";
+  const h = (req.headers.host || "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+  if (!(h === "localhost" || /^[0-9.]+$/.test(h) || /^[0-9a-f:]+$/i.test(h))) return false;
+  return LOOPBACK_RE.test(ip) || TRUST_CIDRS.some((c) => ipInCidr(ip, c));
+};
 
 const authorized = (req) => {
   if (!TOKEN) return true;
@@ -1072,7 +1084,8 @@ async function stopWebTool(def) {
     const pid = (r.out || "").trim();
     if (/^\d+$/.test(pid)) await run("taskkill", ["/PID", pid, "/F"], ROOT, 10000);
   } else {
-    const r = await run("lsof", ["-ti", `tcp:${def.web}`], ROOT, 5000);
+    // macOS: lsof lives in /usr/sbin, which a launchd service's PATH often lacks
+    const r = await run(process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof", ["-ti", `tcp:${def.web}`], ROOT, 5000);
     const pid = (r.out || "").split("\n")[0].trim();
     if (/^\d+$/.test(pid)) await run("kill", [pid], ROOT, 5000);
   }
