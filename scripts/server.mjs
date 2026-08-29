@@ -280,8 +280,13 @@ async function pasteToPane(paneId, text, enter) {
 }
 
 // --- federation: hosts this panel aggregates (data/hosts.json, host-local, NEVER automatic) ---
-function readHosts() {
+// every federation consumer (agents, proxy, broadcast) sees only ENABLED hosts — a disabled
+// host stays configured (token and all) but the panel acts as if it weren't there
+function readHostsAll() {
   try { return (readJSON(join(ROOT, "data", "hosts.json")).hosts || []).filter((h) => h.id && h.url); } catch { return []; }
+}
+function readHosts() {
+  return readHostsAll().filter((h) => !h.disabled);
 }
 async function federatedAgents() {
   const local = await detectAgents();
@@ -544,17 +549,32 @@ async function api(req, res, path) {
   // --- federated hosts CRUD (edits data/hosts.json from Settings) ---
   // list never returns tokens — the browser only ever learns whether one is set
   if (path === "/api/hosts") {
-    const hosts = await Promise.all(readHosts().map(async (h) => {
+    const hosts = await Promise.all(readHostsAll().map(async (h) => {
       let reachable = false;
-      try {
-        const r = await fetch(`${h.url.replace(/\/$/, "")}/api/agents?flat=1`, {
-          headers: h.token ? { authorization: `Bearer ${h.token}` } : {}, signal: AbortSignal.timeout(2500),
-        });
-        reachable = r.ok;
-      } catch { /* down/unreachable */ }
-      return { id: h.id, name: h.name || h.id, url: h.url, hasToken: !!h.token, reachable };
+      if (!h.disabled) {
+        try {
+          const r = await fetch(`${h.url.replace(/\/$/, "")}/api/agents?flat=1`, {
+            headers: h.token ? { authorization: `Bearer ${h.token}` } : {}, signal: AbortSignal.timeout(2500),
+          });
+          reachable = r.ok;
+        } catch { /* down/unreachable */ }
+      }
+      return { id: h.id, name: h.name || h.id, url: h.url, hasToken: !!h.token, reachable, disabled: !!h.disabled };
     }));
     return sendJSON(res, 200, { hosts });
+  }
+
+  // flip a federated host on/off WITHOUT losing its config (url + token stay in hosts.json)
+  if (path === "/api/toggle-host" && req.method === "POST") {
+    const { id, disabled } = await body(req);
+    const hf = join(ROOT, "data", "hosts.json");
+    const cfg = existsSync(hf) ? readJSON(hf) : { hosts: [] };
+    const h = (cfg.hosts || []).find((x) => x.id === id);
+    if (!h) return sendJSON(res, 404, { ok: false, err: "host desconocido" });
+    h.disabled = !!disabled;
+    writeFileSync(hf, JSON.stringify(cfg, null, 2) + "\n");
+    logEvent(`toggle-host · ${id} · ${h.disabled ? "apagado" : "prendido"}`);
+    return sendJSON(res, 200, { ok: true, disabled: h.disabled });
   }
 
   if (path === "/api/save-host" && req.method === "POST") {
@@ -571,6 +591,7 @@ async function api(req, res, path) {
       id, name: (name || id).toString().slice(0, 40), url,
       // empty token on edit keeps the stored one — so editing the URL never forces re-pasting the secret
       token: typeof token === "string" && token.trim() ? token.trim() : prev?.token || "",
+      ...(prev?.disabled ? { disabled: true } : {}), // editing never silently re-enables
     };
     cfg.hosts = [...cfg.hosts.filter((h) => h.id !== id), entry];
     writeFileSync(hf, JSON.stringify(cfg, null, 2) + "\n");

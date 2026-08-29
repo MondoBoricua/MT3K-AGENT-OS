@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, uploadFile, agentKey } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import AgentLogo from "./AgentLogo";
 
@@ -31,6 +31,7 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const [killed, setKilled] = useState<string[]>([]); // panes we killed but the status poll hasn't dropped yet
   const [firstPrompt, setFirstPrompt] = useState(""); // optional first message pasted once the CLI boots
   const [macros, setMacros] = useState<string[]>([]); // one-tap quick prompts for the compose bar
+  const [fedHosts, setFedHosts] = useState<FedHost[]>([]); // to build web-UI links for federated agents
   const [uploading, setUploading] = useState(false); // screenshot upload in flight
   const fileRef = useRef<HTMLInputElement>(null); // hidden file input behind the 📎 button
   const termRef = useRef<HTMLPreElement>(null);
@@ -38,7 +39,10 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const [scrolledUp, setScrolledUp] = useState(false); // mirrors stickToBottom for the "↓ al final" pill
   const host = agent?.host; // set → this agent lives on a federated host; every tmux call is proxied there
 
-  useEffect(() => { getMacros().then((r) => { if (r?.macros) setMacros(r.macros); }); }, []);
+  useEffect(() => {
+    getMacros().then((r) => { if (r?.macros) setMacros(r.macros); });
+    getHosts().then((r) => { if (r?.hosts) setFedHosts(r.hosts); });
+  }, []);
 
   // a just-launched pane isn't in agent.panes until the next status poll — merge it in meanwhile
   const basePanes: PaneRef[] = (agent?.panes ?? []).filter((p) => !killed.includes(p.paneId));
@@ -219,6 +223,16 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   };
 
   if (!agent) return null;
+
+  // web-UI link target: local agents use the address the browser reached the panel with; a
+  // federated agent uses its host's configured URL (the browser must reach that hostname —
+  // true on this LAN/WG mesh). Our token only rides LOCAL links: a federated host has its own
+  // token (never sent to browsers) — its trusted-subnet rules are what let the owner in.
+  const fed = agent.host ? fedHosts.find((h) => h.id === agent.host) : undefined;
+  const webHostname = agent.host
+    ? (() => { try { return fed ? new URL(fed.url).hostname : undefined; } catch { return undefined; } })()
+    : window.location.hostname;
+  const webUrl = `${agent.webTls ? "https" : "http"}://${webHostname}:${agent.webPort}/${!agent.host && getToken() ? `?t=${encodeURIComponent(getToken())}` : ""}`;
 
   // Fullscreen terminal: big live view + docked compose bar so you can watch and type comfortably (mobile-first).
   if (fullscreen && activePane) {
@@ -413,14 +427,14 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
               </div>
             </div>
         ) : panes.length === 0 ? (
-          agent.webPort && !agent.host ? (
+          agent.webPort && webHostname ? (
             // web-UI agent (e.g. DeepSeek Harness): its interactive surface is a local web app.
             // location.hostname keeps the link valid however you reached the panel (LAN, WG, localhost)
             // — as long as that tool's server binds beyond 127.0.0.1.
             <div className="flex flex-col items-center gap-3 py-6">
               <p className="text-center font-mono text-xs text-white/40">Este agente vive en su propia UI web (puerto {agent.webPort}).{agent.webTls ? " Cert self-signed: acepta el aviso del navegador la primera vez." : ""}</p>
               {/* webPort is the panel's authed proxy — ?t= mints the cookie that auths every follow-up request */}
-              <a href={`${agent.webTls ? "https" : "http"}://${window.location.hostname}:${agent.webPort}/${getToken() ? `?t=${encodeURIComponent(getToken())}` : ""}`} target="_blank" rel="noopener noreferrer"
+              <a href={webUrl} target="_blank" rel="noopener noreferrer"
                 className="rounded-full border border-accent/40 bg-gradient-to-b from-accent/40 to-accent/20 px-5 py-2 font-mono text-sm font-medium text-white shadow-[0_0_20px_-8px] shadow-accent transition hover:from-accent/50 active:scale-95">
                 abrir UI web ↗
               </a>

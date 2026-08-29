@@ -51,11 +51,13 @@ export const uploadFile = (name: string, dataUrl: string, host?: string) =>
   jpost<{ ok: boolean; path?: string; err?: string }>(`/api/upload${hostQ(host)}`, { name, data: dataUrl });
 export const getMacros = () => jget<{ macros: string[] }>("/api/macros");
 
-export interface FedHost { id: string; name: string; url: string; hasToken: boolean; reachable: boolean }
+export interface FedHost { id: string; name: string; url: string; hasToken: boolean; reachable: boolean; disabled?: boolean }
 export const getHosts = () => jget<{ hosts: FedHost[] }>("/api/hosts");
 export const saveHost = (h: { id?: string; name?: string; url: string; token?: string }) =>
   jpost<{ ok: boolean; id?: string; reachable?: boolean; status?: number; err?: string }>("/api/save-host", h);
 export const removeHost = (id: string) => jpost<{ ok: boolean }>("/api/remove-host", { id });
+// flip a federated host on/off without deleting its config (url + token survive)
+export const toggleHost = (id: string, disabled: boolean) => jpost<{ ok: boolean; disabled?: boolean; err?: string }>("/api/toggle-host", { id, disabled });
 export const refreshProject = (projectId: string) => jpost<{ ok: boolean; log: string }>("/api/refresh", { projectId });
 
 export interface DiscoverRepo { name: string; path: string; files: number }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Manifest } from "../types";
-import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, type SystemStatus, type FedHost } from "../lib/api";
+import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, type SystemStatus, type FedHost } from "../lib/api";
 import { fmt } from "../lib/ui";
 
 const REFRESH_KEY = "mt3k.refreshMs";
@@ -42,6 +42,11 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
       setHId(""); setHName(""); setHUrl(""); setHToken("");
       loadHosts();
     } else setHMsg(r?.err ? `error: ${r.err}` : "no se pudo guardar");
+  };
+  const doToggleHost = async (h: FedHost) => {
+    const r = await toggleHost(h.id, !h.disabled);
+    if (!r?.ok) setHMsg(r?.err ?? "no se pudo cambiar el estado");
+    loadHosts();
   };
   const doRemoveHost = async (id: string) => {
     if (!confirm(`¿Quitar el host "${id}" de la federación? (no toca nada en ese host)`)) return;
@@ -124,17 +129,23 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
           </p>
           <div className="space-y-2">
             {hosts.map((h) => (
-              <div key={h.id} className="flex items-center justify-between gap-3 rounded-lg border border-ink-line bg-ink-850/40 px-3 py-2">
+              <div key={h.id} className={`flex items-center justify-between gap-3 rounded-lg border border-ink-line bg-ink-850/40 px-3 py-2 ${h.disabled ? "opacity-55" : ""}`}>
                 <div className="flex min-w-0 items-center gap-2.5">
-                  <span className={`h-2 w-2 shrink-0 rounded-full ${h.reachable ? "bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400" : "bg-red-400/70"}`}
-                    title={h.reachable ? "conectado" : "no responde"} />
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${h.disabled ? "bg-white/25" : h.reachable ? "bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400" : "bg-red-400/70"}`}
+                    title={h.disabled ? "apagado" : h.reachable ? "conectado" : "no responde"} />
                   <div className="min-w-0">
                     <span className="text-sm font-medium">{h.name}</span>
                     <span className="ml-2 font-mono text-[11px] text-white/40">{h.url}</span>
+                    {h.disabled && <span className="ml-2 font-mono text-[10px] text-white/45">apagado</span>}
                     {!h.hasToken && <span className="ml-2 font-mono text-[10px] text-amber-300/80">sin token</span>}
                   </div>
                 </div>
                 <div className="flex shrink-0 gap-1.5">
+                  {/* on/off without deleting: url + token stay saved, the wall just stops aggregating it */}
+                  <button onClick={() => doToggleHost(h)} disabled={!!busy}
+                    className={`rounded-md border px-2.5 py-1 font-mono text-[11px] transition disabled:opacity-40 ${h.disabled ? "border-emerald-400/40 text-emerald-300/90 hover:bg-emerald-400/10" : "border-ink-line text-white/60 hover:border-amber-400/50 hover:text-amber-300"}`}>
+                    {h.disabled ? "▶ prender" : "⏻ apagar"}
+                  </button>
                   <button onClick={() => editHost(h)} disabled={!!busy}
                     className="rounded-md border border-ink-line px-2.5 py-1 font-mono text-[11px] text-white/60 transition hover:border-accent/50 hover:text-accent disabled:opacity-40">
                     editar
