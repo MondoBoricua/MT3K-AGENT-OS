@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, agentKey, type FedHost } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, webStart, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import AgentLogo from "./AgentLogo";
 
@@ -32,6 +32,7 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   const [firstPrompt, setFirstPrompt] = useState(""); // optional first message pasted once the CLI boots
   const [macros, setMacros] = useState<string[]>([]); // one-tap quick prompts for the compose bar
   const [fedHosts, setFedHosts] = useState<FedHost[]>([]); // to build web-UI links for federated agents
+  const [webStarting, setWebStarting] = useState(false); // "prender UI web" in flight
   const [uploading, setUploading] = useState(false); // screenshot upload in flight
   const fileRef = useRef<HTMLInputElement>(null); // hidden file input behind the 📎 button
   const termRef = useRef<HTMLPreElement>(null);
@@ -217,6 +218,17 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
   };
 
   // leaving fullscreen: back to the picker if there are other sessions, otherwise close the sheet
+  // fire up a web-UI agent's server on its host (works for federated hosts via ?host=);
+  // once it answers, the status poll flips webOff→webPort and this sheet re-renders the link
+  const startWeb = async () => {
+    if (!agent || webStarting) return;
+    setWebStarting(true);
+    const r = await webStart(agent.id, host);
+    setWebStarting(false);
+    if (r?.ok) onToast?.(`${agent.name} UI web ${r.already ? "ya estaba prendida" : "prendida"}`, true);
+    else onToast?.(r?.err ? `error: ${r.err}` : "no se pudo prender la UI web", false);
+  };
+
   const exitFullscreen = () => {
     if (panes.length > 1) { setFullscreen(false); setPaneId(null); setText(""); }
     else onClose();
@@ -440,9 +452,20 @@ export default function AgentTerminalSheet({ agent, projects = [], onClose, onTo
               </a>
             </div>
           ) : (
+          agent.webOff ? (
+            // installed web-UI agent whose server is down → one tap turns it on, on ITS host
+            <div className="flex flex-col items-center gap-3 py-6">
+              <p className="text-center font-mono text-xs text-white/40">La UI web de {agent.name} está apagada en {agent.host ?? "esta máquina"}.</p>
+              <button onClick={startWeb} disabled={webStarting}
+                className="rounded-full border border-emerald-400/40 bg-gradient-to-b from-emerald-400/30 to-emerald-400/10 px-5 py-2 font-mono text-sm font-medium text-emerald-100 transition hover:from-emerald-400/40 active:scale-95 disabled:opacity-50">
+                {webStarting ? "prendiendo… (~10s)" : "▶ prender UI web"}
+              </button>
+            </div>
+          ) : (
           <p className="py-6 text-center font-mono text-xs text-white/40">
             {agent.online ? "Este agente es una app (GUI) y no se puede abrir en tmux." : "Agente offline."}
           </p>
+          )
           )
         ) : (
           // session picker — pick which tmux pane to open in fullscreen
