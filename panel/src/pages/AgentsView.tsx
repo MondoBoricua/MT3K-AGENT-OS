@@ -8,9 +8,9 @@ const LAPTOP = "/sprites/laptop.png"; // coding-on-laptop strip (6 good frames)
 const CODE_COLORS = ["#34d399", "#e6edf3", "#fb923c", "#60a5fa"];
 const CODE_W = [82, 56, 70, 44];
 
-type Props = { agents: AgentRow[]; onOpen: (a: AgentRow) => void; onToast?: (text: string, live: boolean) => void };
+type Props = { agents: AgentRow[]; onOpen: (a: AgentRow) => void; onToast?: (text: string, live: boolean) => void; focusPath?: string };
 
-export default function AgentsView({ agents, onOpen, onToast }: Props) {
+export default function AgentsView({ agents, onOpen, onToast, focusPath }: Props) {
   const live = agents.filter((a) => a.running).length;
   const ready = agents.filter((a) => a.online).length;
   const sessions = agents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
@@ -23,7 +23,7 @@ export default function AgentsView({ agents, onOpen, onToast }: Props) {
     const text = bcText.trim();
     if (!text || bcSending) return;
     setBcSending(true);
-    const r = await broadcast(text);
+    const r = await broadcast(text, focusPath); // under Focus it only reaches the project's sessions
     setBcSending(false);
     if (r?.ok) { setBcText(""); onToast?.(`📣 enviado a ${r.sent} ${r.sent === 1 ? "sesión" : "sesiones"}`, true); }
     else onToast?.(r?.err ? `error: ${r.err}` : "broadcast falló", false);

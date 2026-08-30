@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
-import { fsList, fsRead, fsWrite, fsRawUrl, getHosts, type FsEntry, type FsListing, type FsFile, type FedHost } from "../lib/api";
+import { fsList, fsRead, fsWrite, fsRawUrl, getHosts, getAgents, sendToPane, type FsEntry, type FsListing, type FsFile, type FedHost, type PaneRef } from "../lib/api";
 
 // CodeMirror (VS Code look: One Dark + line numbers + syntax) is heavy → its own chunk,
 // downloaded only when a text file is opened
@@ -146,6 +146,23 @@ export default function Files({ onToast, focusPath }: Props) {
   };
 
   const closeFile = () => { if (confirmDiscard()) { setFile(null); setDraft(""); } };
+
+  // "enviar al agente": paste this file's path into a live session ON THE SAME HOST
+  const [sendOpen, setSendOpen] = useState(false);
+  const [sendTargets, setSendTargets] = useState<{ agent: string; pane: PaneRef }[]>([]);
+  const openSend = async () => {
+    const r = await getAgents();
+    const rows = (r?.agents ?? []).filter((a) => (a.host ?? "") === host);
+    const t = rows.flatMap((a) => (a.panes ?? []).map((pn) => ({ agent: a.name, pane: pn })));
+    setSendTargets(t); setSendOpen(true);
+    if (t.length === 0) onToast?.("no hay sesiones vivas en este host", false);
+  };
+  const sendPathTo = async (paneId: string) => {
+    if (!file) return;
+    const r = await sendToPane(paneId, `Mira este archivo: ${file.path}`, true, hq);
+    setSendOpen(false);
+    onToast?.(r?.ok ? "ruta enviada a la sesión" : (r?.err ?? "no se pudo enviar"), !!r?.ok);
+  };
   const copyPath = () => { if (file) navigator.clipboard.writeText(file.path).then(() => onToast?.("ruta copiada", true), () => onToast?.("no se pudo copiar", false)); };
 
   const prep = (list: FsEntry[]) => list
@@ -274,6 +291,23 @@ export default function Files({ onToast, focusPath }: Props) {
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                   <button onClick={copyPath} title="copiar ruta" className={`${glassPill} px-2.5 py-1.5 font-mono text-[10px] text-white/60`}>⧉ ruta</button>
+                  <div className="relative">
+                    <button onClick={openSend} title="pegar la ruta en una sesión viva de este host" className={`${glassPill} px-2.5 py-1.5 font-mono text-[10px] text-white/60`}>➤ agente</button>
+                    {sendOpen && sendTargets.length > 0 && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setSendOpen(false)} />
+                        <div className="absolute right-0 top-9 z-50 w-64 rounded-xl border border-white/10 bg-ink-900/95 p-1.5 shadow-2xl backdrop-blur-xl">
+                          {sendTargets.map((t) => (
+                            <button key={t.pane.paneId} onClick={() => sendPathTo(t.pane.paneId)}
+                              className="flex w-full flex-col rounded-lg px-2.5 py-1.5 text-left transition hover:bg-white/[0.08]">
+                              <span className="font-mono text-[11px] text-white">{t.agent}</span>
+                              <span className="truncate font-mono text-[9px] text-white/40">{t.pane.cwd}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
                   {file.kind === "text" && (
                     <button onClick={save} disabled={saving || (!dirty && !!file.mtime)}
                       className="rounded-full border border-accent/40 bg-gradient-to-b from-accent/40 to-accent/20 px-3.5 py-1.5 font-mono text-[11px] font-medium text-white shadow-[0_0_20px_-8px] shadow-accent backdrop-blur-xl transition hover:from-accent/50 active:scale-95 disabled:opacity-35 disabled:shadow-none">

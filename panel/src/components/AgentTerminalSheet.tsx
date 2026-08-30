@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, webStart, webRestart, agentKey, type FedHost } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import AgentLogo from "./AgentLogo";
 
@@ -247,6 +247,15 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     if (r?.ok) onToast?.(`${agent.name} UI web ${r.already ? "ya estaba prendida" : "prendida"}`, true);
     else onToast?.(r?.err ? `error: ${r.err}` : "no se pudo prender la UI web", false);
   };
+  const stopWeb = async () => {
+    if (!agent || webStarting) return;
+    if (!window.confirm(`¿Apagar la UI web de ${agent.name}?`)) return;
+    setWebStarting(true);
+    const r = await webStop(agent.id, host);
+    setWebStarting(false);
+    if (r?.ok) onToast?.(`${agent.name} UI web apagada`, false);
+    else onToast?.(r?.err ? `error: ${r.err}` : "no se pudo apagar", false);
+  };
   // stop+start on its host — dsh pide reinicio después de instalar un plugin
   const restartWeb = async () => {
     if (!agent || webStarting) return;
@@ -481,7 +490,11 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
                 </a>
                 <button onClick={restartWeb} disabled={webStarting} title="parar y volver a arrancar (ej. tras instalar un plugin de dsh)"
                   className="rounded-full border border-ink-line bg-white/[0.06] px-4 py-2 font-mono text-sm text-white/70 transition hover:border-accent/50 hover:text-accent active:scale-95 disabled:opacity-50">
-                  {webStarting ? "reiniciando…" : "⟳ reiniciar"}
+                  {webStarting ? "…" : "⟳ reiniciar"}
+                </button>
+                <button onClick={stopWeb} disabled={webStarting} title="apagar la UI web en su host"
+                  className="rounded-full border border-red-400/25 bg-white/[0.04] px-3 py-2 font-mono text-sm text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 active:scale-95 disabled:opacity-50">
+                  ⏻
                 </button>
               </div>
             </div>

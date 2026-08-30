@@ -314,7 +314,7 @@ export default function App() {
         {page === "Memory" && <Memory />}
         {page === "Activity" && <Activity />}
         {page === "Files" && <Files onToast={pushToast} focusPath={focus?.path} />}
-        {page === "Agents View" && <AgentsView agents={viewAgents} onOpen={openAgent} onToast={pushToast} />}
+        {page === "Agents View" && <AgentsView agents={viewAgents} onOpen={openAgent} onToast={pushToast} focusPath={focus?.path} />}
         {page === "Settings" && <Settings manifest={manifest} onChanged={() => loadManifest(`?t=${Date.now()}`)} />}
       </main>
 

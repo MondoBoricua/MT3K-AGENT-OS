@@ -19,11 +19,11 @@
 import { createServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { connect as netConnect } from "node:net";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync, statfsSync } from "node:fs";
 import { join, dirname, extname, basename, resolve, isAbsolute, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
-import { homedir, networkInterfaces } from "node:os";
-import { spawn } from "node:child_process";
+import { homedir, networkInterfaces, loadavg, cpus, totalmem, freemem } from "node:os";
+import { spawn, spawnSync } from "node:child_process";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -531,10 +531,12 @@ async function api(req, res, path) {
 
   // one message → every live agent pane on this host (and, unless flat=1, on federated hosts too)
   if (path === "/api/broadcast" && req.method === "POST") {
-    const { text } = await body(req);
+    const { text, cwdPrefix } = await body(req);
     if (typeof text !== "string" || !text.trim()) return sendJSON(res, 400, { ok: false, err: "texto vacío" });
     if (text.length > 4000) return sendJSON(res, 400, { ok: false, err: "texto demasiado largo (máx 4000)" });
-    const locals = (await detectAgents()).flatMap((a) => a.panes);
+    // Focus mode: only sessions whose cwd lives under the focused project (clones on other hosts match too)
+    const inPrefix = (cwd) => typeof cwdPrefix !== "string" || !cwdPrefix || cwd === cwdPrefix || cwd.startsWith(cwdPrefix + "/");
+    const locals = (await detectAgents()).flatMap((a) => a.panes).filter((p) => inPrefix(p.cwd));
     let sent = 0;
     for (const p of locals) { if ((await pasteToPane(p.paneId, text, true)).ok) sent++; }
     const flat = new URL(req.url, "http://x").searchParams.get("flat");
@@ -544,7 +546,7 @@ async function api(req, res, path) {
           const r = await fetch(`${h.url.replace(/\/$/, "")}/api/broadcast?flat=1`, {
             method: "POST", signal: AbortSignal.timeout(5000),
             headers: { "content-type": "application/json", ...(h.token ? { authorization: `Bearer ${h.token}` } : {}) },
-            body: JSON.stringify({ text }),
+            body: JSON.stringify({ text, cwdPrefix }),
           });
           if (r.ok) sent += (await r.json()).sent || 0;
         } catch { /* host down → skip */ }
@@ -592,6 +594,86 @@ async function api(req, res, path) {
     const r = await startWebTool(def);
     if (r.ok) logEvent(`web-restart · ${def.id}`);
     return sendJSON(res, r.ok ? 200 : 500, r);
+  }
+
+  if (path === "/api/vitals") {
+    return sendJSON(res, 200, { ok: true, vitals: await readVitals() });
+  }
+
+  // local + every enabled federated host, in one shot for the fleet-health row
+  if (path === "/api/fleet-vitals") {
+    const out = [{ id: "local", name: "local", vitals: await readVitals() }];
+    await Promise.all(readHosts().map(async (h) => {
+      try {
+        const r = await fetch(`${h.url.replace(/\/$/, "")}/api/vitals`, {
+          headers: h.token ? { authorization: `Bearer ${h.token}` } : {}, signal: AbortSignal.timeout(6000),
+        });
+        if (r.ok) out.push({ id: h.id, name: h.name || h.id, vitals: (await r.json()).vitals });
+        else out.push({ id: h.id, name: h.name || h.id, vitals: null });
+      } catch { out.push({ id: h.id, name: h.name || h.id, vitals: null }); }
+    }));
+    return sendJSON(res, 200, { ok: true, hosts: out });
+  }
+
+  // stop a web-UI agent's server (the ⏻ symmetry of prender/reiniciar)
+  if (path === "/api/web-stop" && req.method === "POST") {
+    const { agentId } = await body(req);
+    const def = AGENT_DEFS.find((a) => a.id === agentId && a.web && a.webCmd);
+    if (!def) return sendJSON(res, 400, { ok: false, err: "ese agente no tiene UI web" });
+    const stopped = await stopWebTool(def);
+    if (stopped) logEvent(`web-stop · ${def.id}`);
+    return sendJSON(res, stopped ? 200 : 500, stopped ? { ok: true } : { ok: false, err: "no se pudo detener (¿estaba corriendo?)" });
+  }
+
+  // quick-prompts editor (Settings) — writes the host-local data/macros.json
+  if (path === "/api/save-macros" && req.method === "POST") {
+    const { macros } = await body(req);
+    if (!Array.isArray(macros) || macros.some((m) => typeof m !== "string") || macros.length > 30) return sendJSON(res, 400, { ok: false, err: "lista inválida (máx 30)" });
+    const clean = macros.map((m) => m.trim()).filter(Boolean).map((m) => m.slice(0, 200));
+    writeFileSync(join(ROOT, "data", "macros.json"), JSON.stringify({ macros: clean }, null, 2) + "\n");
+    logEvent(`macros · ${clean.length} guardados`);
+    return sendJSON(res, 200, { ok: true, macros: clean });
+  }
+
+  // RECEIVE a fleet update: extract the gzipped-tar bundle over ROOT, then restart.
+  if (path === "/api/self-update" && req.method === "POST") {
+    const raw = await rawBody(req);
+    let bundle;
+    try { bundle = JSON.parse(raw).bundle; } catch { return sendJSON(res, 400, { ok: false, err: "cuerpo inválido" }); }
+    if (typeof bundle !== "string" || !bundle) return sendJSON(res, 400, { ok: false, err: "bundle vacío" });
+    let buf;
+    try { buf = Buffer.from(bundle, "base64"); if (buf[0] !== 0x1f || buf[1] !== 0x8b) throw new Error("no es gzip"); } catch (e) { return sendJSON(res, 400, { ok: false, err: `bundle inválido: ${e.message}` }); }
+    if (buf.length > 64 * 1024 * 1024) return sendJSON(res, 400, { ok: false, err: "bundle demasiado grande" });
+    const tmp = join(ROOT, ".update.tgz");
+    try {
+      writeFileSync(tmp, buf);
+      const r = spawnSync("tar", ["xzf", tmp, "-C", ROOT], { maxBuffer: 8 * 1024 * 1024 });
+      unlinkSync(tmp);
+      if (r.status !== 0) return sendJSON(res, 500, { ok: false, err: "tar xzf falló: " + (r.stderr?.toString().slice(0, 200) || r.status) });
+    } catch (e) { try { unlinkSync(tmp); } catch { /* none */ } return sendJSON(res, 500, { ok: false, err: String(e).slice(0, 200) }); }
+    logEvent("self-update aplicado — reiniciando");
+    sendJSON(res, 200, { ok: true });
+    scheduleSelfRestart();
+    return;
+  }
+
+  // PUSH an update to every enabled federated host (this host = the aggregator/source).
+  if (path === "/api/update-fleet" && req.method === "POST") {
+    let bundle;
+    try { bundle = buildUpdateBundle().toString("base64"); } catch (e) { return sendJSON(res, 500, { ok: false, err: String(e).slice(0, 200) }); }
+    const results = [];
+    for (const h of readHosts()) {
+      try {
+        const r = await fetch(`${h.url.replace(/\/$/, "")}/api/self-update`, {
+          method: "POST", signal: AbortSignal.timeout(60000),
+          headers: { "content-type": "application/json", ...(h.token ? { authorization: `Bearer ${h.token}` } : {}) },
+          body: JSON.stringify({ bundle }),
+        });
+        results.push({ id: h.id, ok: r.ok, status: r.status });
+      } catch (e) { results.push({ id: h.id, ok: false, err: String(e).slice(0, 80) }); }
+    }
+    logEvent(`update-fleet · ${results.filter((x) => x.ok).length}/${results.length} ok · ${Math.round(Buffer.byteLength(bundle, "base64") / 1024)}KB`);
+    return sendJSON(res, 200, { ok: true, sizeKB: Math.round(bundle.length * 0.75 / 1024), results });
   }
 
   // reorder federated hosts — hosts.json order IS the wall/sidebar order
@@ -1096,6 +1178,58 @@ async function stopWebTool(def) {
     await new Promise((r) => setTimeout(r, 700));
   }
   return false;
+}
+
+// --- fleet self-update: the aggregator (Mac) tars its own server.mjs + panel/dist, the
+// receiving host extracts over its ROOT and restarts. Same trust gate as everything else;
+// the payload is code from the owner's own trusted panel. data/ is never in the bundle.
+// host vitals for the fleet-health row: cheap OS reads + (when present) nvidia-smi.
+// GPU is cached briefly — several browsers poll status at once.
+let _gpuCache = { at: 0, gpu: null };
+async function readVitals() {
+  let cpu = null;
+  if (process.platform === "win32") {
+    // loadavg is always 0 on Windows — sample the perf counter instead
+    const r = await run("powershell", ["-NoProfile", "-Command", "(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average"], ROOT, 8000);
+    const n = parseFloat(r.out); cpu = Number.isFinite(n) ? Math.round(n) : null;
+  } else {
+    cpu = Math.min(100, Math.round((loadavg()[0] / cpus().length) * 100));
+  }
+  let disk = null;
+  try { const f = statfsSync(ROOT); disk = { total: f.blocks * f.bsize, free: f.bavail * f.bsize }; } catch { /* unsupported fs */ }
+  let gpu = null;
+  if (Date.now() - _gpuCache.at < 5000) gpu = _gpuCache.gpu;
+  else {
+    if (absBin("nvidia-smi")) {
+      const r = await run("nvidia-smi", ["--query-gpu=utilization.gpu,temperature.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"], ROOT, 8000);
+      const m = (r.out || "").split(",").map((x) => parseFloat(x));
+      if (r.ok && m.length >= 4 && m.every(Number.isFinite)) gpu = { util: m[0], temp: m[1], memUsed: m[2], memTotal: m[3] };
+    }
+    _gpuCache = { at: Date.now(), gpu };
+  }
+  return { cpu, mem: { total: totalmem(), free: freemem() }, disk, gpu };
+}
+
+function buildUpdateBundle() {
+  // tar without data (privacy gate) — spawnSync so we can return the bytes synchronously
+  const r = spawnSync("tar", ["czf", "-", "--exclude", "panel/dist/data", "scripts/server.mjs", "panel/dist"], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error("tar falló: " + (r.stderr?.toString().slice(0, 200) || r.status));
+  return r.stdout; // gzipped tar bytes
+}
+function scheduleSelfRestart() {
+  // respond first, then restart out-of-band so THIS request finishes cleanly
+  setTimeout(() => {
+    try {
+      if (process.platform === "win32") {
+        // detached powershell: kill the :PORT owner and rerun the scheduled task
+        spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(ROOT, "restart-panel.ps1")], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+      } else if (existsSync("/etc/systemd/system/mt3k-agent-os.service")) {
+        spawn("systemctl", ["restart", "mt3k-agent-os"], { detached: true, stdio: "ignore" }).unref();
+      } else {
+        process.exit(0); // launchd/pm2 KeepAlive respawns us
+      }
+    } catch { process.exit(0); }
+  }, 400);
 }
 
 // --- web-app proxy: expose a localhost-only tool (e.g. DeepSeek's `dsh web`) through the

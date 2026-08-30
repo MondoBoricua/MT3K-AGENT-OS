@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Manifest } from "../types";
-import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, moveHost, type SystemStatus, type FedHost } from "../lib/api";
+import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, moveHost, updateFleet, getMacros, saveMacros, type SystemStatus, type FedHost } from "../lib/api";
 import { fmt } from "../lib/ui";
 
 const REFRESH_KEY = "mt3k.refreshMs";
@@ -44,6 +44,26 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
     } else setHMsg(r?.err ? `error: ${r.err}` : "no se pudo guardar");
   };
   const doMoveHost = async (id: string, dir: -1 | 1) => { await moveHost(id, dir); loadHosts(); };
+  // fleet ops
+  const [fleetBusy, setFleetBusy] = useState(false);
+  const [fleetMsg, setFleetMsg] = useState("");
+  const doUpdateFleet = async () => {
+    if (fleetBusy || !window.confirm("¿Empujar la versión de ESTE host (server + panel) a todos los hosts federados prendidos? Se reinician solos.")) return;
+    setFleetBusy(true); setFleetMsg("empaquetando y empujando…");
+    const r = await updateFleet();
+    setFleetBusy(false);
+    if (r?.ok && r.results) setFleetMsg(`${r.sizeKB}KB → ` + r.results.map((x) => `${x.id}: ${x.ok ? "✓" : `✗ ${x.err ?? x.status}`}`).join(" · "));
+    else setFleetMsg(r?.err ?? "falló el push");
+    setTimeout(loadHosts, 4000); // hosts reboot → reprobe
+  };
+  // quick-prompts (macros) editor
+  const [macrosText, setMacrosText] = useState("");
+  const [macrosMsg, setMacrosMsg] = useState("");
+  useEffect(() => { getMacros().then((r) => setMacrosText((r?.macros ?? []).join("\n"))); }, []);
+  const doSaveMacros = async () => {
+    const r = await saveMacros(macrosText.split("\n").map((m) => m.trim()).filter(Boolean));
+    setMacrosMsg(r?.ok ? `guardados ${r.macros?.length ?? 0} — aplican al próximo abrir de terminal` : (r?.err ?? "error"));
+  };
   const doToggleHost = async (h: FedHost) => {
     const r = await toggleHost(h.id, !h.disabled);
     if (!r?.ok) setHMsg(r?.err ?? "no se pudo cambiar el estado");
@@ -185,6 +205,29 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
         </div>
 
         {/* projects */}
+        <div className="surface p-5 lg:col-span-2">
+          <div className="mb-3 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-white/50"><span className="text-accent">✦</span> Actualizar flota</div>
+          <p className="mb-3 text-sm text-white/55">Empuja el server + panel de <b>este host</b> a todos los federados prendidos (bundle limpio, sin data) y los reinicia. Úsalo desde el host donde acabas de actualizar el código.</p>
+          <div className="mb-2 flex items-center gap-3">
+            <button onClick={doUpdateFleet} disabled={fleetBusy || hosts.filter((h) => !h.disabled).length === 0}
+              className="rounded-lg border border-accent/40 bg-accent/15 px-4 py-2 font-mono text-xs font-medium text-accent transition hover:bg-accent/25 disabled:opacity-40">
+              {fleetBusy ? "empujando…" : "⇪ actualizar flota"}
+            </button>
+            {fleetMsg && <span className="font-mono text-[11px] text-white/55">{fleetMsg}</span>}
+          </div>
+        </div>
+
+        <div className="surface p-5">
+          <div className="mb-3 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-white/50"><span className="text-accent">✦</span> Quick prompts (macros)</div>
+          <p className="mb-2 text-sm text-white/55">Los botones ⚡ del compose del terminal — uno por línea, host-local.</p>
+          <textarea value={macrosText} onChange={(e) => setMacrosText(e.target.value)} rows={4} spellCheck={false}
+            className="mb-2 w-full resize-y rounded-lg border border-ink-line bg-ink-850/60 px-3 py-2 font-mono text-xs text-white placeholder:text-white/30 focus:border-accent/50 focus:outline-none" />
+          <div className="flex items-center gap-3">
+            <button onClick={doSaveMacros} className="rounded-lg border border-ink-line px-3 py-1.5 font-mono text-xs text-white/70 transition hover:border-accent/50 hover:text-accent">guardar</button>
+            {macrosMsg && <span className="font-mono text-[11px] text-white/55">{macrosMsg}</span>}
+          </div>
+        </div>
+
         <div className="surface p-5 lg:col-span-2">
           <div className="mb-3 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-white/50"><span className="text-accent">✦</span> Proyectos trackeados</div>
           <div className="space-y-2">

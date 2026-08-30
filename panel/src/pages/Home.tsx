@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Manifest } from "../types";
 import { fmt, langTint, money } from "../lib/ui";
-import { getLogs } from "../lib/api";
+import { getLogs, getFleetVitals, type HostVitals } from "../lib/api";
 
 interface Ev { date: string; time: string; text: string }
 
@@ -10,6 +10,15 @@ export default function Home({ manifest, go }: { manifest: Manifest | null; go: 
   const sum = (k: "files" | "links" | "clusters") => ps.reduce((a, p) => a + p[k], 0);
   const savings = ps.reduce((a, p) => a + p.savings.costPerSession, 0);
   const [events, setEvents] = useState<Ev[]>([]);
+  const [fleet, setFleet] = useState<{ id: string; name: string; vitals: HostVitals | null }[]>([]);
+  useEffect(() => {
+    const pull = () => getFleetVitals().then((r) => { if (r?.hosts) setFleet(r.hosts); });
+    pull();
+    const iv = setInterval(pull, 15000);
+    return () => clearInterval(iv);
+  }, []);
+  const pct = (used: number, total: number) => Math.min(100, Math.round((used / total) * 100));
+  const gb = (n: number) => (n / 1073741824).toFixed(0);
 
   useEffect(() => {
     getLogs().then((r) => {
@@ -36,6 +45,33 @@ export default function Home({ manifest, go }: { manifest: Manifest | null; go: 
         <Big icon="↬" label="Relaciones" value={fmt(sum("links"))} />
         <Big icon="$" label="Ahorro / sesión" value={`~${money(savings)}`} accent />
       </div>
+
+      {/* fleet health: one card per host, refreshed every 15s straight from each panel */}
+      {fleet.length > 0 && (
+        <div className="mb-7">
+          <div className="mb-2 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-white/50"><span className="text-accent">✦</span> Salud de la flota</div>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+            {fleet.map((h) => (
+              <div key={h.id} className="surface p-3">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="font-mono text-xs font-semibold">{h.name}</span>
+                  <span className={`h-1.5 w-1.5 rounded-full ${h.vitals ? "bg-emerald-400" : "bg-red-400/70"}`} />
+                </div>
+                {h.vitals ? (
+                  <div className="space-y-1 font-mono text-[10px] text-white/55">
+                    <Meter label="cpu" value={h.vitals.cpu ?? 0} suffix="%" />
+                    <Meter label="ram" value={pct(h.vitals.mem.total - h.vitals.mem.free, h.vitals.mem.total)} suffix="%" />
+                    {h.vitals.disk && <Meter label="disk" value={pct(h.vitals.disk.total - h.vitals.disk.free, h.vitals.disk.total)} suffix={`% · ${gb(h.vitals.disk.free)}GB libres`} />}
+                    {h.vitals.gpu && <Meter label="gpu" value={h.vitals.gpu.util} suffix={`% · ${h.vitals.gpu.temp}°C`} hot={h.vitals.gpu.temp >= 80} />}
+                  </div>
+                ) : (
+                  <div className="font-mono text-[10px] text-white/30">no responde</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid min-h-0 flex-1 gap-7 lg:grid-cols-[1.4fr_1fr]">
         {/* projects */}
@@ -120,6 +156,16 @@ function Big({ icon, label, value, accent }: { icon: string; label: string; valu
         <span className={`font-mono text-sm ${accent ? "text-emerald-300/70" : "text-white/25"}`}>{icon}</span>
       </div>
       <div className={`mt-1.5 font-mono text-3xl font-bold ${accent ? "text-emerald-300 drop-shadow-[0_0_12px_oklch(80%_0.15_150_/_0.4)]" : ""}`}>{value}</div>
+    </div>
+  );
+}
+
+function Meter({ label, value, suffix, hot }: { label: string; value: number; suffix?: string; hot?: boolean }) {
+  const color = hot || value >= 90 ? "bg-red-400" : value >= 70 ? "bg-amber-400" : "bg-emerald-400";
+  return (
+    <div>
+      <div className="flex justify-between"><span>{label}</span><span className={hot ? "text-red-300" : ""}>{value}{suffix ?? ""}</span></div>
+      <div className="h-1 overflow-hidden rounded-full bg-white/10"><div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(100, value)}%` }} /></div>
     </div>
   );
 }

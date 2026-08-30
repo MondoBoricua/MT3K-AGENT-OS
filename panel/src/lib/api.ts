@@ -44,7 +44,7 @@ export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: s
   const { host, ...rest } = opts;
   return jpost<{ ok: boolean; paneId?: string; label?: string; session?: string; cwd?: string; err?: string; missingDir?: boolean }>(`/api/launch${hostQ(host)}`, { agentId, ...rest });
 };
-export const broadcast = (text: string) => jpost<{ ok: boolean; sent?: number; err?: string }>("/api/broadcast", { text });
+export const broadcast = (text: string, cwdPrefix?: string) => jpost<{ ok: boolean; sent?: number; err?: string }>("/api/broadcast", { text, cwdPrefix });
 // upload a screenshot/image/PDF → the target host saves it under data/uploads/ and returns the
 // absolute path, which agent CLIs (claude/codex/…) can read when the path is pasted to them
 export const uploadFile = (name: string, dataUrl: string, host?: string) =>
@@ -53,6 +53,12 @@ export const getMacros = () => jget<{ macros: string[] }>("/api/macros");
 // start a web-UI agent's server on its host (federation-aware via ?host=)
 export const webStart = (agentId: string, host?: string) => jpost<{ ok: boolean; already?: boolean; err?: string }>(`/api/web-start${hostQ(host)}`, { agentId });
 export const webRestart = (agentId: string, host?: string) => jpost<{ ok: boolean; err?: string }>(`/api/web-restart${hostQ(host)}`, { agentId });
+export const webStop = (agentId: string, host?: string) => jpost<{ ok: boolean; err?: string }>(`/api/web-stop${hostQ(host)}`, { agentId });
+// fleet ops (aggregator only): push this host's server+panel build to every enabled federated host
+export const updateFleet = () => jpost<{ ok: boolean; sizeKB?: number; results?: { id: string; ok: boolean; status?: number; err?: string }[]; err?: string }>("/api/update-fleet", {});
+export const saveMacros = (macros: string[]) => jpost<{ ok: boolean; macros?: string[]; err?: string }>("/api/save-macros", { macros });
+export interface HostVitals { cpu: number | null; mem: { total: number; free: number }; disk: { total: number; free: number } | null; gpu: { util: number; temp: number; memUsed: number; memTotal: number } | null }
+export const getFleetVitals = () => jget<{ ok: boolean; hosts: { id: string; name: string; vitals: HostVitals | null }[] }>("/api/fleet-vitals");
 
 export interface FedHost { id: string; name: string; url: string; hasToken: boolean; reachable: boolean; disabled?: boolean }
 export const getHosts = () => jget<{ hosts: FedHost[] }>("/api/hosts");
