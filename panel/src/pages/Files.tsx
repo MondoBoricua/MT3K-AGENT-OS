@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { fsList, fsRead, fsWrite, fsUpload, fsRawUrl, getHosts, getAgents, sendToPane, type FsEntry, type FsListing, type FsFile, type FedHost, type PaneRef } from "../lib/api";
-import { childPath, destinationDir } from "../lib/file-manager";
+import { childPath, destinationDir, directorySelection } from "../lib/file-manager";
 
 // CodeMirror (VS Code look: One Dark + line numbers + syntax) is heavy → its own chunk,
 // downloaded only when a text file is opened
@@ -98,7 +98,9 @@ export default function Files({ onToast, focusPath }: Props) {
 
   // expand/collapse a folder in place; children fetch once and cache for the session
   const toggleDir = async (p: string) => {
-    setSelectedDir(p);
+    const selection = directorySelection(listing?.path ?? "", p);
+    setSelectedDir(selection.selectedDir);
+    setPathInput(selection.pathInput);
     if (expanded.includes(p)) {
       setExpanded((x) => x.filter((e) => e !== p && !e.startsWith(p + "/"))); // collapse children too
       return;
