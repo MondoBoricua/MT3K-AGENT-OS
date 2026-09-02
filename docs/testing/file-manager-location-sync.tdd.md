@@ -12,7 +12,7 @@ No plan file was provided. The journey came from the reported regression:
 - RED: `npm test` failed because `directorySelection` did not exist; checkpoint `44fbf7c`.
 - GREEN: `npm test` passed all 3 tests after synchronizing `selectedDir` and `pathInput`; checkpoint `d876a8b`.
 - Build: `npm run build` completed successfully.
-- Browser verification: selecting `/Users/mondo/MT3K-AGENT-OS/panel` updated the location field and destination label to that exact path, kept the folder selected, and left its children expanded.
+- Browser verification: selecting `/Users/mondo/MT3K-AGENT-OS/panel` updated the location field, breadcrumbs, and destination label to that exact path, kept the folder selected, and left its children expanded.
 
 ## Test specification
 
@@ -21,7 +21,7 @@ No plan file was provided. The journey came from the reported regression:
 | 1 | Selecting a folder produces the same value for the operational destination and visible location | `panel/tests/file-manager.test.ts` | Unit | PASS | `npm test` — 3/3 passed |
 | 2 | The extracted file-manager helper remains fully covered | Node test coverage | Coverage | PASS | 100% lines, branches, and functions |
 | 3 | The React/TypeScript production bundle compiles | `npm run build` | Integration/build | PASS | TypeScript and Vite build completed |
-| 4 | The live UI updates the field and keeps the selected folder expanded | Browser automation against `http://localhost:4288/` | E2E | PASS | Exact path, `aria-pressed=true`, and visible child asserted |
+| 4 | The live UI updates the field and breadcrumbs while keeping the selected folder expanded | Browser automation against `http://localhost:4288/` | E2E | PASS | Exact path, selected breadcrumb, `aria-pressed=true`, and visible child asserted |
 
 ## Coverage and known gaps
 

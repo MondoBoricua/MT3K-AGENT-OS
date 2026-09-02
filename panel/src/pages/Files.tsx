@@ -226,7 +226,8 @@ export default function Files({ onToast, focusPath }: Props) {
       );
     });
 
-  const crumbs = listing ? listing.path.split("/").filter(Boolean) : [];
+  const locationPath = selectedDir || listing?.path || "";
+  const crumbs = locationPath.split("/").filter(Boolean);
   const raw = file ? fsRawUrl(file.path, hq) : "";
   const kind = file ? kindOf(file.mime) : "other";
 
