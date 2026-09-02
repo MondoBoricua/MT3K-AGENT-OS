@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { childPath, destinationDir } from "../src/lib/file-manager.ts";
+import { childPath, destinationDir, directorySelection } from "../src/lib/file-manager.ts";
 
 test("an expanded folder can become the destination instead of the tree root", () => {
   assert.equal(destinationDir("/workspace", "/workspace/src"), "/workspace/src");
@@ -10,4 +10,11 @@ test("an expanded folder can become the destination instead of the tree root", (
 test("new files are joined to the selected destination without breaking root", () => {
   assert.equal(childPath("/workspace/src", "new.ts"), "/workspace/src/new.ts");
   assert.equal(childPath("/", "new.ts"), "/new.ts");
+});
+
+test("selecting a folder updates both the destination and the visible location", () => {
+  assert.deepEqual(directorySelection("/workspace", "/workspace/src"), {
+    selectedDir: "/workspace/src",
+    pathInput: "/workspace/src",
+  });
 });
