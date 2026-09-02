@@ -1,5 +1,6 @@
-import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
-import { fsList, fsRead, fsWrite, fsRawUrl, getHosts, getAgents, sendToPane, type FsEntry, type FsListing, type FsFile, type FedHost, type PaneRef } from "../lib/api";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import { fsList, fsRead, fsWrite, fsUpload, fsRawUrl, getHosts, getAgents, sendToPane, type FsEntry, type FsListing, type FsFile, type FedHost, type PaneRef } from "../lib/api";
+import { childPath, destinationDir } from "../lib/file-manager";
 
 // CodeMirror (VS Code look: One Dark + line numbers + syntax) is heavy → its own chunk,
 // downloaded only when a text file is opened
@@ -57,6 +58,7 @@ export default function Files({ onToast, focusPath }: Props) {
   const [listing, setListing] = useState<FsListing | null>(null); // tree ROOT
   const [kids, setKids] = useState<Record<string, FsEntry[]>>({}); // children per expanded dir
   const [expanded, setExpanded] = useState<string[]>([]);
+  const [selectedDir, setSelectedDir] = useState("");
   const [loadingDir, setLoadingDir] = useState("");
   const [listErr, setListErr] = useState("");
   const [pathInput, setPathInput] = useState("");
@@ -65,9 +67,12 @@ export default function Files({ onToast, focusPath }: Props) {
   const [draft, setDraft] = useState(""); // editor buffer
   const [saving, setSaving] = useState(false);
   const [opening, setOpening] = useState("");
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const uploadRef = useRef<HTMLInputElement>(null);
   const dirty = !!file && file.kind === "text" && draft !== (file.content ?? "");
   const hq = host || undefined;
   const memKey = `mt3k.files.${host || "local"}`;
+  const targetDir = listing ? destinationDir(listing.path, selectedDir) : "";
 
   useEffect(() => { getHosts().then((r) => setHosts((r?.hosts ?? []).filter((h) => h.reachable))); }, []);
 
@@ -75,7 +80,7 @@ export default function Files({ onToast, focusPath }: Props) {
   const load = async (p: string) => {
     const r = await fsList(p, hq);
     if (r?.ok) {
-      setListing(r); setKids({ [r.path]: r.entries }); setExpanded([]); setPathInput(r.path); setListErr("");
+      setListing(r); setKids({ [r.path]: r.entries }); setExpanded([]); setSelectedDir(r.path); setPathInput(r.path); setListErr("");
       try { localStorage.setItem(memKey, r.path); } catch { /* private mode */ }
     } else {
       setListErr(r?.err ?? "no se pudo listar esa carpeta");
@@ -93,6 +98,7 @@ export default function Files({ onToast, focusPath }: Props) {
 
   // expand/collapse a folder in place; children fetch once and cache for the session
   const toggleDir = async (p: string) => {
+    setSelectedDir(p);
     if (expanded.includes(p)) {
       setExpanded((x) => x.filter((e) => e !== p && !e.startsWith(p + "/"))); // collapse children too
       return;
@@ -138,11 +144,33 @@ export default function Files({ onToast, focusPath }: Props) {
   const save = () => { if (file && !saving && (dirty || !file.mtime)) write(file.mtime || undefined); };
 
   const newFile = () => {
-    if (!listing || !confirmDiscard()) return;
-    const name = window.prompt("Nombre del archivo nuevo (en la raíz del árbol):");
+    if (!targetDir || !confirmDiscard()) return;
+    const name = window.prompt(`Nombre del archivo nuevo en ${targetDir}:`);
     if (!name?.trim() || name.includes("/")) return;
-    setFile({ ok: true, path: `${listing.path.replace(/\/$/, "")}/${name.trim()}`, kind: "text", mime: "text/plain", content: "", size: 0, mtime: 0 });
+    setFile({ ok: true, path: childPath(targetDir, name.trim()), kind: "text", mime: "text/plain", content: "", size: 0, mtime: 0 });
     setDraft("");
+  };
+
+  const uploadHere = (picked: File) => {
+    if (!targetDir || uploadBusy) return;
+    if (picked.size > 25 * 1024 * 1024) { onToast?.("archivo demasiado grande (máx 25MB)", false); return; }
+    setUploadBusy(true);
+    const reader = new FileReader();
+    reader.onerror = () => { setUploadBusy(false); onToast?.("no se pudo leer el archivo", false); };
+    reader.onload = async () => {
+      const send = (overwrite: boolean) => fsUpload(targetDir, picked.name, String(reader.result), overwrite, hq);
+      let r = await send(false);
+      if (r?.exists && window.confirm(`Ya existe «${picked.name}» en ${targetDir}. ¿Sobrescribirlo?`)) r = await send(true);
+      setUploadBusy(false);
+      if (r?.ok) {
+        onToast?.(`subido · ${picked.name}`, true);
+        const rl = await fsList(targetDir, hq);
+        if (rl?.ok) setKids((k) => ({ ...k, [targetDir]: rl.entries }));
+      } else if (!r?.exists) {
+        onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir", false);
+      }
+    };
+    reader.readAsDataURL(picked);
   };
 
   const closeFile = () => { if (confirmDiscard()) { setFile(null); setDraft(""); } };
@@ -174,10 +202,11 @@ export default function Files({ onToast, focusPath }: Props) {
     prep(kids[dirPath] ?? []).map((e) => {
       const full = `${dirPath.replace(/\/$/, "")}/${e.name}`;
       const isOpen = expanded.includes(full);
-      const active = file?.path === full;
+      const active = e.dir ? selectedDir === full : file?.path === full;
       return (
         <div key={full}>
           <button onClick={() => (e.dir ? toggleDir(full) : open(full))} disabled={opening === full}
+            aria-pressed={e.dir ? selectedDir === full : undefined}
             style={{ paddingLeft: `${10 + depth * 16}px` }}
             className={`flex w-full items-center gap-2 rounded-lg py-[5px] pr-2 text-left transition hover:bg-white/[0.07] active:scale-[0.995] ${active ? "bg-accent/15" : ""}`}>
             <span className={`w-3 shrink-0 text-center text-[10px] text-white/35 transition-transform ${e.dir ? (isOpen ? "rotate-90" : "") : "opacity-0"}`}>▶</span>
@@ -268,7 +297,16 @@ export default function Files({ onToast, focusPath }: Props) {
           )}
           {listing && (
             <div className="border-t border-white/[0.07] p-2">
-              <button onClick={newFile} className={`${glassPill} w-full border-dashed px-3 py-2 font-mono text-[11px] text-white/50 hover:text-accent`}>＋ archivo nuevo aquí</button>
+              <div className="mb-2 truncate px-1 font-mono text-[9px] text-white/35" title={targetDir}>destino · {targetDir}</div>
+              <div className="flex gap-2">
+                <input ref={uploadRef} type="file" className="hidden" aria-label="seleccionar archivo para subir"
+                  onChange={(e) => { const picked = e.target.files?.[0]; if (picked) uploadHere(picked); e.target.value = ""; }} />
+                <button onClick={newFile} className={`${glassPill} flex-1 border-dashed px-3 py-2 font-mono text-[11px] text-white/50 hover:text-accent`}>＋ archivo</button>
+                <button onClick={() => uploadRef.current?.click()} disabled={uploadBusy}
+                  className={`${glassPill} flex-1 border-dashed px-3 py-2 font-mono text-[11px] text-white/50 hover:text-accent disabled:opacity-40`}>
+                  {uploadBusy ? "subiendo…" : "⬆ subir"}
+                </button>
+              </div>
             </div>
           )}
         </div>
