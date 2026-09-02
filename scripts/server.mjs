@@ -491,7 +491,7 @@ async function api(req, res, path) {
     const { paneId, text, enter = true } = await body(req);
     if (typeof paneId !== "string" || !/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
     if (typeof text !== "string" || !text.trim()) return sendJSON(res, 400, { ok: false, err: "texto vacío" });
-    if (text.length > 4000) return sendJSON(res, 400, { ok: false, err: "texto demasiado largo (máx 4000)" });
+    if (text.length > 64000) return sendJSON(res, 400, { ok: false, err: "texto demasiado largo (máx 64000)" }); // long pastes (docs, diffs) are legit — tmux buffers handle them fine
     // confirm the pane still exists before sending
     const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
@@ -817,7 +817,7 @@ async function api(req, res, path) {
     const [paneId, label] = (r.out || "").split("|");
     // optional first message: wait for the CLI to boot (screen settles), then paste + enter.
     // fire-and-forget — the client already has its pane and is watching it live.
-    if (typeof firstPrompt === "string" && firstPrompt.trim() && firstPrompt.length <= 4000) {
+    if (typeof firstPrompt === "string" && firstPrompt.trim() && firstPrompt.length <= 64000) {
       (async () => {
         let prev = "";
         for (let i = 0; i < 10; i++) {
