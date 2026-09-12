@@ -19,7 +19,7 @@
 import { createServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { connect as netConnect } from "node:net";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync, statfsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync, statfsSync, createWriteStream } from "node:fs";
 import { join, dirname, extname, basename, resolve, isAbsolute, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, networkInterfaces, loadavg, cpus, totalmem, freemem } from "node:os";
@@ -63,6 +63,25 @@ function sendJSON(res, code, obj) {
 function body(req) {
   return new Promise((resolve) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => { try { resolve(JSON.parse(d || "{}")); } catch { resolve({}); } }); });
 }
+// big uploads travel as raw octet-stream bodies, never base64-in-JSON: at 500MB the base64
+// string would blow past phone-browser memory and flirt with V8's max string length
+const UPLOAD_MAX = 500 * 1024 * 1024;
+function streamUploadToFile(req, tmp) {
+  return new Promise((resolve) => {
+    const out = createWriteStream(tmp);
+    let size = 0, done = false;
+    const finish = (ok, err) => { if (done) return; done = true; resolve({ ok, size, err }); };
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > UPLOAD_MAX) { out.destroy(); req.destroy(); return finish(false, `archivo demasiado grande (máx ${UPLOAD_MAX / 1024 / 1024}MB)`); }
+      if (!out.write(c)) { req.pause(); out.once("drain", () => req.resume()); }
+    });
+    req.on("end", () => out.end(() => finish(size > 0, size > 0 ? undefined : "archivo vacío")));
+    req.on("error", () => { out.destroy(); finish(false, "subida interrumpida"); });
+    out.on("error", (e) => { req.destroy(); finish(false, `no se pudo escribir: ${e.code || e}`); });
+  });
+}
+const isRawUpload = (req) => (req.headers["content-type"] || "").includes("octet-stream");
 function run(cmd, args, cwd, timeoutMs = 60000) {
   return new Promise((resolve) => {
     const ch = spawn(cmd, args, { cwd, env: { ...process.env, PATH: `${join(homedir(), ".local/bin")}:${process.env.PATH}` } });
@@ -506,13 +525,6 @@ async function api(req, res, path) {
   // so the panel then pastes that path into the pane. ?host= proxies this to a federated host,
   // which saves the file on ITS disk (where its agents can actually read it).
   if (path === "/api/upload" && req.method === "POST") {
-    const { name, data } = await body(req);
-    if (typeof data !== "string" || !data) return sendJSON(res, 400, { ok: false, err: "imagen vacía" });
-    const m = data.match(/^data:(image\/(?:png|jpeg|webp|gif)|application\/pdf|audio\/(?:mpeg|mp3|mp4|x-m4a|wav|x-wav|ogg|webm|aac|flac));base64,([A-Za-z0-9+/=]+)$/);
-    if (!m) return sendJSON(res, 400, { ok: false, err: "formato no soportado (png/jpeg/webp/gif/pdf/audio)" });
-    const buf = Buffer.from(m[2], "base64");
-    if (!buf.length) return sendJSON(res, 400, { ok: false, err: "archivo vacío" });
-    if (buf.length > 25 * 1024 * 1024) return sendJSON(res, 400, { ok: false, err: "archivo demasiado grande (máx 25MB)" });
     const EXT = {
       "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif",
       "application/pdf": ".pdf",
@@ -522,8 +534,30 @@ async function api(req, res, path) {
     };
     mkdirSync(UPLOADS_DIR, { recursive: true });
     // sanitized original name (for humans) + ms timestamp (uniqueness) — never trust the client's filename
-    const base = (typeof name === "string" ? basename(name) : "").replace(/\.[^.]*$/, "").replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 40) || "screenshot";
-    const file = join(UPLOADS_DIR, `${Date.now()}-${base}${EXT[m[1]]}`);
+    const cleanBase = (raw) => (typeof raw === "string" ? basename(raw) : "").replace(/\.[^.]*$/, "").replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 40) || "screenshot";
+    // raw octet-stream branch (new clients): bytes stream straight to disk, up to UPLOAD_MAX.
+    // The type allowlist is enforced by extension — same set as the base64 MIME allowlist.
+    if (isRawUpload(req)) {
+      const rawName = new URL(req.url, "http://x").searchParams.get("name") || "";
+      const ext = extname(basename(rawName)).toLowerCase();
+      if (!Object.values(EXT).includes(ext)) return sendJSON(res, 400, { ok: false, err: "formato no soportado (png/jpeg/webp/gif/pdf/audio)" });
+      const file = join(UPLOADS_DIR, `${Date.now()}-${cleanBase(rawName)}${ext}`);
+      const tmp = `${file}.mt3k-tmp-${process.pid}`;
+      const r = await streamUploadToFile(req, tmp);
+      if (!r.ok) { try { unlinkSync(tmp); } catch { /* none */ } return sendJSON(res, r.err?.includes("grande") ? 413 : 400, { ok: false, err: r.err }); }
+      renameSync(tmp, file);
+      logEvent(`upload · ${basename(file)} · ${Math.round(r.size / 1024)}KB`);
+      return sendJSON(res, 200, { ok: true, path: file });
+    }
+    // legacy base64-in-JSON branch (old federated panels) — small files only
+    const { name, data } = await body(req);
+    if (typeof data !== "string" || !data) return sendJSON(res, 400, { ok: false, err: "imagen vacía" });
+    const m = data.match(/^data:(image\/(?:png|jpeg|webp|gif)|application\/pdf|audio\/(?:mpeg|mp3|mp4|x-m4a|wav|x-wav|ogg|webm|aac|flac));base64,([A-Za-z0-9+/=]+)$/);
+    if (!m) return sendJSON(res, 400, { ok: false, err: "formato no soportado (png/jpeg/webp/gif/pdf/audio)" });
+    const buf = Buffer.from(m[2], "base64");
+    if (!buf.length) return sendJSON(res, 400, { ok: false, err: "archivo vacío" });
+    if (buf.length > 25 * 1024 * 1024) return sendJSON(res, 400, { ok: false, err: "archivo demasiado grande (máx 25MB)" });
+    const file = join(UPLOADS_DIR, `${Date.now()}-${cleanBase(name)}${EXT[m[1]]}`);
     writeFileSync(file, buf);
     logEvent(`upload · ${basename(file)} · ${Math.round(buf.length / 1024)}KB`);
     return sendJSON(res, 200, { ok: true, path: file });
@@ -946,7 +980,12 @@ async function api(req, res, path) {
   // drop a file from the device into the current folder (any type — this is a file manager,
   // not the agent-attach flow). Refuses to clobber silently: existing name -> 409 unless overwrite.
   if (path === "/api/fs/upload" && req.method === "POST") {
-    const { dir, name, data, overwrite } = await body(req);
+    // raw octet-stream branch (new clients): metadata in the query string, bytes streamed to disk
+    const raw = isRawUpload(req);
+    const q = raw ? new URL(req.url, "http://x").searchParams : null;
+    const { dir, name, data, overwrite } = raw
+      ? { dir: q.get("dir") || "", name: q.get("name") || "", data: null, overwrite: q.get("overwrite") === "1" }
+      : await body(req);
     const target = fsPath(typeof dir === "string" ? dir : "");
     if (!target) return sendJSON(res, 400, { ok: false, err: "carpeta inválida" });
     let st; try { st = statSync(target); } catch { return sendJSON(res, 404, { ok: false, err: "esa carpeta no existe" }); }
@@ -955,15 +994,25 @@ async function api(req, res, path) {
     const rawName = typeof name === "string" ? basename(name) : "";
     const clean = Array.from(rawName).filter((c) => c.charCodeAt(0) > 31 && c !== "/" && c !== "\\").join("").trim();
     if (!clean || clean === "." || clean === "..") return sendJSON(res, 400, { ok: false, err: "nombre inválido" });
-    const m = typeof data === "string" ? data.match(/^data:[^;,]*;base64,([A-Za-z0-9+\/=]+)$/) : null;
-    if (!m) return sendJSON(res, 400, { ok: false, err: "archivo vacío o mal codificado" });
-    const buf = Buffer.from(m[1], "base64");
-    if (buf.length > 25 * 1024 * 1024) return sendJSON(res, 400, { ok: false, err: "archivo demasiado grande (máx 25MB)" });
     const file = join(target, clean);
     if (existsSync(file) && !overwrite) return sendJSON(res, 409, { ok: false, exists: true, err: "ya existe un archivo con ese nombre" });
     const tmp = `${file}.mt3k-tmp-${process.pid}`;
-    try { writeFileSync(tmp, buf); renameSync(tmp, file); } catch (e) { try { unlinkSync(tmp); } catch { /* none */ } return sendJSON(res, 500, { ok: false, err: `no se pudo subir: ${e.code || e}` }); }
-    logEvent(`fs-upload · ${file} · ${Math.round(buf.length / 1024)}KB`);
+    let size = 0;
+    if (raw) {
+      const r = await streamUploadToFile(req, tmp);
+      if (!r.ok) { try { unlinkSync(tmp); } catch { /* none */ } return sendJSON(res, r.err?.includes("grande") ? 413 : 400, { ok: false, err: r.err }); }
+      try { renameSync(tmp, file); } catch (e) { try { unlinkSync(tmp); } catch { /* none */ } return sendJSON(res, 500, { ok: false, err: `no se pudo subir: ${e.code || e}` }); }
+      size = r.size;
+    } else {
+      // legacy base64-in-JSON branch (old federated panels) — small files only
+      const m = typeof data === "string" ? data.match(/^data:[^;,]*;base64,([A-Za-z0-9+\/=]+)$/) : null;
+      if (!m) return sendJSON(res, 400, { ok: false, err: "archivo vacío o mal codificado" });
+      const buf = Buffer.from(m[1], "base64");
+      if (buf.length > 25 * 1024 * 1024) return sendJSON(res, 400, { ok: false, err: "archivo demasiado grande (máx 25MB)" });
+      try { writeFileSync(tmp, buf); renameSync(tmp, file); } catch (e) { try { unlinkSync(tmp); } catch { /* none */ } return sendJSON(res, 500, { ok: false, err: `no se pudo subir: ${e.code || e}` }); }
+      size = buf.length;
+    }
+    logEvent(`fs-upload · ${file} · ${Math.round(size / 1024)}KB`);
     return sendJSON(res, 200, { ok: true, path: file });
   }
 
@@ -1031,7 +1080,8 @@ async function api(req, res, path) {
 
 // forward one request to a federated host (data/hosts.json). Streams SSE bodies through.
 function rawBody(req) {
-  return new Promise((resolve) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => resolve(d)); });
+  // Buffer, not string — POST bodies proxied to federated hosts include raw binary uploads
+  return new Promise((resolve) => { const chunks = []; req.on("data", (c) => chunks.push(c)); req.on("end", () => resolve(Buffer.concat(chunks))); });
 }
 async function proxyToHost(req, res, path, hostId) {
   const h = readHosts().find((x) => x.id === hostId);
@@ -1039,10 +1089,12 @@ async function proxyToHost(req, res, path, hostId) {
   const u = new URL(req.url, "http://x");
   u.searchParams.delete("host"); u.searchParams.delete("t"); // our token never leaves this host
   const target = `${h.url.replace(/\/$/, "")}${path}${u.searchParams.size ? `?${u.searchParams}` : ""}`;
+  // uploads can be 500MB over Wi-Fi — give them 10 min instead of the usual 2
+  const isUpload = path === "/api/upload" || path === "/api/fs/upload";
   const init = {
     method: req.method,
-    signal: req.method === "GET" && path === "/api/pane-stream" ? undefined : AbortSignal.timeout(120000),
-    headers: { "content-type": "application/json", ...(h.token ? { authorization: `Bearer ${h.token}` } : {}) },
+    signal: req.method === "GET" && path === "/api/pane-stream" ? undefined : AbortSignal.timeout(isUpload ? 600000 : 120000),
+    headers: { "content-type": req.headers["content-type"] || "application/json", ...(h.token ? { authorization: `Bearer ${h.token}` } : {}) },
   };
   if (req.method === "POST") init.body = await rawBody(req);
   let r;

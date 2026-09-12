@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
-import { fsList, fsRead, fsWrite, fsUpload, fsRawUrl, getHosts, getAgents, sendToPane, type FsEntry, type FsListing, type FsFile, type FedHost, type PaneRef } from "../lib/api";
+import { fsList, fsRead, fsWrite, fsUpload, fsRawUrl, getHosts, getAgents, sendToPane, UPLOAD_MAX_MB, type FsEntry, type FsListing, type FsFile, type FedHost, type PaneRef } from "../lib/api";
 import { childPath, destinationDir, directorySelection } from "../lib/file-manager";
 
 // CodeMirror (VS Code look: One Dark + line numbers + syntax) is heavy → its own chunk,
@@ -153,26 +153,22 @@ export default function Files({ onToast, focusPath }: Props) {
     setDraft("");
   };
 
-  const uploadHere = (picked: File) => {
+  const uploadHere = async (picked: File) => {
     if (!targetDir || uploadBusy) return;
-    if (picked.size > 25 * 1024 * 1024) { onToast?.("archivo demasiado grande (máx 25MB)", false); return; }
+    if (picked.size > UPLOAD_MAX_MB * 1024 * 1024) { onToast?.(`archivo demasiado grande (máx ${UPLOAD_MAX_MB}MB)`, false); return; }
     setUploadBusy(true);
-    const reader = new FileReader();
-    reader.onerror = () => { setUploadBusy(false); onToast?.("no se pudo leer el archivo", false); };
-    reader.onload = async () => {
-      const send = (overwrite: boolean) => fsUpload(targetDir, picked.name, String(reader.result), overwrite, hq);
-      let r = await send(false);
-      if (r?.exists && window.confirm(`Ya existe «${picked.name}» en ${targetDir}. ¿Sobrescribirlo?`)) r = await send(true);
-      setUploadBusy(false);
-      if (r?.ok) {
-        onToast?.(`subido · ${picked.name}`, true);
-        const rl = await fsList(targetDir, hq);
-        if (rl?.ok) setKids((k) => ({ ...k, [targetDir]: rl.entries }));
-      } else if (!r?.exists) {
-        onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir", false);
-      }
-    };
-    reader.readAsDataURL(picked);
+    // the File streams as raw bytes (no FileReader/base64) — big files don't blow browser memory
+    const send = (overwrite: boolean) => fsUpload(targetDir, picked.name, picked, overwrite, hq);
+    let r = await send(false);
+    if (r?.exists && window.confirm(`Ya existe «${picked.name}» en ${targetDir}. ¿Sobrescribirlo?`)) r = await send(true);
+    setUploadBusy(false);
+    if (r?.ok) {
+      onToast?.(`subido · ${picked.name}`, true);
+      const rl = await fsList(targetDir, hq);
+      if (rl?.ok) setKids((k) => ({ ...k, [targetDir]: rl.entries }));
+    } else if (!r?.exists) {
+      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir", false);
+    }
   };
 
   const closeFile = () => { if (confirmDiscard()) { setFile(null); setDraft(""); } };
