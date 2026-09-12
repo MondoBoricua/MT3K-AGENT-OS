@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import AgentLogo from "./AgentLogo";
 
@@ -151,26 +151,26 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   // attach a screenshot or PDF: upload → the host saves it to data/uploads/ → its absolute path
   // lands in the compose box, ready to send (agent CLIs read images/PDFs by path). Works for
   // federated hosts too — ?host= makes the remote panel save the file where ITS agents read it.
-  const attachFile = (file: File) => {
+  const attachFile = async (file: File) => {
     const isPdf = file.type === "application/pdf";
     const isAudio = file.type.startsWith("audio/");
     if ((!file.type.startsWith("image/") && !isPdf && !isAudio) || uploading) return;
+    if (file.size > UPLOAD_MAX_MB * 1024 * 1024) { onToast?.(`archivo demasiado grande (máx ${UPLOAD_MAX_MB}MB)`, false); return; }
     setUploading(true);
-    const reader = new FileReader();
-    reader.onerror = () => { setUploading(false); onToast?.("no se pudo leer el archivo", false); };
-    reader.onload = async () => {
-      const r = await uploadFile(file.name || (isPdf ? "documento" : isAudio ? "audio" : "screenshot"), String(reader.result), host);
-      setUploading(false);
-      if (r?.ok && r.path) {
-        const intro = isPdf ? "Lee este PDF" : isAudio ? "Aquí tienes un audio" : "Mira este screenshot";
-        const ready = isPdf ? "PDF listo" : isAudio ? "audio listo" : "imagen lista";
-        setText((t) => (t.trim() ? `${t.trimEnd()}\n${r.path}` : `${intro}: ${r.path}`));
-        onToast?.(`${ready} — envía el mensaje para que ${agent?.name} lo lea`, true);
-      } else {
-        onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir el archivo", false);
-      }
-    };
-    reader.readAsDataURL(file);
+    // the File streams as raw bytes — no FileReader/base64, so 500MB works even on a phone.
+    // The server validates the type by extension, so a nameless clipboard paste gets one here.
+    const fallbackExt = isPdf ? ".pdf" : isAudio ? ".m4a" : file.type === "image/jpeg" ? ".jpg" : ".png";
+    const name = /\.[^.]+$/.test(file.name) ? file.name : `${file.name || (isPdf ? "documento" : isAudio ? "audio" : "screenshot")}${fallbackExt}`;
+    const r = await uploadFile(name, file, host);
+    setUploading(false);
+    if (r?.ok && r.path) {
+      const intro = isPdf ? "Lee este PDF" : isAudio ? "Aquí tienes un audio" : "Mira este screenshot";
+      const ready = isPdf ? "PDF listo" : isAudio ? "audio listo" : "imagen lista";
+      setText((t) => (t.trim() ? `${t.trimEnd()}\n${r.path}` : `${intro}: ${r.path}`));
+      onToast?.(`${ready} — envía el mensaje para que ${agent?.name} lo lea`, true);
+    } else {
+      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir el archivo", false);
+    }
   };
 
   // desktop nicety: pasting a screenshot (⌘V) into the compose box attaches it

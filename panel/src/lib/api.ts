@@ -6,6 +6,7 @@ export interface AgentRow { id: string; name: string; online: boolean; running: 
 export const agentKey = (a: Pick<AgentRow, "id" | "host">) => `${a.host ?? "local"}:${a.id}`;
 // tmux-touching endpoints ride ?host= so the server proxies them to the right federated panel
 const hostQ = (host?: string) => (host ? `?host=${encodeURIComponent(host)}` : "");
+const hostAmp = (host?: string) => (host ? `&host=${encodeURIComponent(host)}` : "");
 
 // optional bearer token (only needed when the server runs with MT3K_TOKEN set)
 export const getToken = () => localStorage.getItem("mt3k.token") ?? "";
@@ -46,9 +47,20 @@ export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: s
 };
 export const broadcast = (text: string, cwdPrefix?: string) => jpost<{ ok: boolean; sent?: number; err?: string }>("/api/broadcast", { text, cwdPrefix });
 // upload a screenshot/image/PDF → the target host saves it under data/uploads/ and returns the
-// absolute path, which agent CLIs (claude/codex/…) can read when the path is pasted to them
-export const uploadFile = (name: string, dataUrl: string, host?: string) =>
-  jpost<{ ok: boolean; path?: string; err?: string }>(`/api/upload${hostQ(host)}`, { name, data: dataUrl });
+// absolute path, which agent CLIs (claude/codex/…) can read when the path is pasted to them.
+// The File streams as raw bytes (no FileReader/base64) so big files don't blow browser memory.
+export const UPLOAD_MAX_MB = 500;
+async function rawUpload<T>(url: string, file: Blob): Promise<T | null> {
+  try {
+    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/octet-stream", ...authHeaders() }, body: file });
+    if (!r.ok) notifyUnauthorized(r);
+    return (await r.json()) as T;
+  } catch {
+    return null;
+  }
+}
+export const uploadFile = (name: string, file: Blob, host?: string) =>
+  rawUpload<{ ok: boolean; path?: string; err?: string }>(`/api/upload?name=${encodeURIComponent(name)}${hostAmp(host)}`, file);
 export const getMacros = () => jget<{ macros: string[] }>("/api/macros");
 // start a web-UI agent's server on its host (federation-aware via ?host=)
 export const webStart = (agentId: string, host?: string) => jpost<{ ok: boolean; already?: boolean; err?: string }>(`/api/web-start${hostQ(host)}`, { agentId });
@@ -98,7 +110,6 @@ export interface FsEntry { name: string; dir: boolean; size: number; mtime: numb
 export interface FsQuick { name: string; path: string }
 export interface FsListing { ok: boolean; path: string; parent: string; home: string; quick: FsQuick[]; entries: FsEntry[]; err?: string }
 export interface FsFile { ok: boolean; path: string; kind: "text" | "binary"; mime: string; content?: string; size: number; mtime: number; tooBig?: boolean; err?: string }
-const hostAmp = (host?: string) => (host ? `&host=${encodeURIComponent(host)}` : "");
 // fs endpoints answer 4xx WITH a JSON `err` worth showing ("esa carpeta no existe") — keep the body
 async function jgetLoose<T>(url: string): Promise<T | null> {
   try {
@@ -116,8 +127,9 @@ export const fsWrite = (path: string, content: string, expectMtime?: number, hos
 // <img>/<iframe>/<audio> can't send headers → the token rides the query string (same as SSE)
 export const fsRawUrl = (path: string, host?: string) =>
   `/api/fs/raw?path=${encodeURIComponent(path)}${hostAmp(host)}${getToken() ? `&t=${encodeURIComponent(getToken())}` : ""}`;
-export const fsUpload = (dir: string, name: string, dataUrl: string, overwrite = false, host?: string) =>
-  jpost<{ ok: boolean; path?: string; exists?: boolean; err?: string }>(`/api/fs/upload${hostQ(host)}`, { dir, name, data: dataUrl, overwrite });
+export const fsUpload = (dir: string, name: string, file: Blob, overwrite = false, host?: string) =>
+  rawUpload<{ ok: boolean; path?: string; exists?: boolean; err?: string }>(
+    `/api/fs/upload?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}${overwrite ? "&overwrite=1" : ""}${hostAmp(host)}`, file);
 export const fsMove = (from: string, to: string, overwrite = false, host?: string) =>
   jpost<{ ok: boolean; path?: string; exists?: boolean; err?: string }>(`/api/fs/move${hostQ(host)}`, { from, to, overwrite });
 export const fsDelete = (path: string, host?: string) =>
