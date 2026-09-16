@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import AgentLogo from "./AgentLogo";
 
@@ -129,6 +129,21 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     ro.observe(el);
     return () => ro.disconnect();
   }, [termCols, fullscreen]);
+
+  // wide screens: ask tmux for enough columns to fill the width at the 20px font cap, so the
+  // CLI reflows instead of leaving dead space. Server is grow-only + skips attached sessions,
+  // so phones and kitty never fight this. Debounced — window drags fire many resizes.
+  useEffect(() => {
+    const pane = paneToWatch;
+    const el = termRef.current;
+    if (!pane || !el || el.clientWidth < 900) return;
+    const t = setTimeout(() => {
+      const cols = Math.min(400, Math.floor((el.clientWidth - 24) / (20 * 0.62)));
+      const rows = Math.min(200, Math.max(24, Math.floor(el.clientHeight / (20 * 1.375))));
+      void paneResize(pane, cols, rows, host);
+    }, 600);
+    return () => clearTimeout(t);
+  }, [paneToWatch, fullscreen, termFont, host]);
 
   // re-stick whenever a different pane opens in fullscreen
   useEffect(() => { stickToBottom.current = true; setScrolledUp(false); }, [paneToWatch, fullscreen]);
