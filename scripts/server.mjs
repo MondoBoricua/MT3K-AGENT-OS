@@ -505,6 +505,32 @@ async function api(req, res, path) {
     return sendJSON(res, 200, { ok: r.ok, content: r.out });
   }
 
+  // grow a detached tmux window so the CLI reflows to the viewer's width — panel-launched
+  // sessions default to 80 cols, wasting most of a desktop screen. Never touches a window
+  // with a real client attached (kitty/ssh): that client owns the size.
+  if (path === "/api/pane-resize" && req.method === "POST") {
+    if (!HAS_TMUX) return sendJSON(res, 400, { ok: false, err: "este host no tiene tmux" });
+    const { paneId, cols, rows } = await body(req);
+    if (typeof paneId !== "string" || !/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
+    const c = Math.round(Number(cols)), r = Math.round(Number(rows));
+    if (!(c >= 40 && c <= 400) || !(r >= 10 && r <= 200)) return sendJSON(res, 400, { ok: false, err: "tamaño inválido" });
+    const cur = await run("tmux", ["display-message", "-p", "-t", paneId, "#{pane_width} #{pane_height} #{window_width} #{window_height}"], ROOT, 4000);
+    if (!cur.ok) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+    const [paneW, paneH, winW, winH] = cur.out.trim().split(" ").map(Number);
+    const attached = (await run("tmux", ["list-clients", "-t", paneId], ROOT, 4000)).out.trim();
+    if (attached) return sendJSON(res, 200, { ok: true, skipped: "attached", cols: paneW, rows: paneH });
+    // grow-only: a phone opening the same pane later must never shrink it back. The PANE is
+    // what matters — in a split window, grow the window by the pane's shortfall first so the
+    // sibling panes keep their size, then claim the new space for this pane.
+    const dW = Math.max(0, c - paneW), dH = Math.max(0, r - paneH);
+    if (!dW && !dH) return sendJSON(res, 200, { ok: true, cols: paneW, rows: paneH });
+    const rz = await run("tmux", ["resize-window", "-t", paneId, "-x", String(Math.min(400, winW + dW)), "-y", String(Math.min(200, winH + dH))], ROOT, 5000);
+    if (!rz.ok) return sendJSON(res, 500, { ok: false, err: rz.err || "no se pudo redimensionar" });
+    await run("tmux", ["resize-pane", "-t", paneId, "-x", String(c), "-y", String(r)], ROOT, 5000);
+    logEvent(`pane-resize · ${paneId} · ${paneW}x${paneH} → ${c}x${r}`);
+    return sendJSON(res, 200, { ok: true, cols: c, rows: r });
+  }
+
   // send text to an agent's tmux pane (tmux-only, LAN-only). text is untrusted input → no shell, literal paste.
   if (path === "/api/send" && req.method === "POST") {
     const { paneId, text, enter = true } = await body(req);

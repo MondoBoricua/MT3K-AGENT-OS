@@ -61,6 +61,10 @@ async function rawUpload<T>(url: string, file: Blob): Promise<T | null> {
 }
 export const uploadFile = (name: string, file: Blob, host?: string) =>
   rawUpload<{ ok: boolean; path?: string; err?: string }>(`/api/upload?name=${encodeURIComponent(name)}${hostAmp(host)}`, file);
+// grow a detached tmux window to the viewer's width so the CLI reflows (server is grow-only
+// and skips windows with a real terminal attached)
+export const paneResize = (paneId: string, cols: number, rows: number, host?: string) =>
+  jpost<{ ok: boolean; cols?: number; rows?: number; skipped?: string; err?: string }>(`/api/pane-resize${hostQ(host)}`, { paneId, cols, rows });
 export const getMacros = () => jget<{ macros: string[] }>("/api/macros");
 // start a web-UI agent's server on its host (federation-aware via ?host=)
 export const webStart = (agentId: string, host?: string) => jpost<{ ok: boolean; already?: boolean; err?: string }>(`/api/web-start${hostQ(host)}`, { agentId });
