@@ -75,14 +75,38 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   }, [aKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live view while fullscreen: SSE first (server pushes only when the screen changes),
+  // hold live updates while the user is selecting text in the terminal — every re-render
+  // nukes the DOM selection, turning copy into a race against the poll. The latest frame
+  // waits in a ref and lands the moment the selection is gone.
+  const heldTerm = useRef<string | null>(null);
+  const selectionInTerm = () => {
+    const sel = document.getSelection();
+    const el = termRef.current;
+    return !!(el && sel && !sel.isCollapsed && sel.anchorNode && el.contains(sel.anchorNode));
+  };
+  const applyTerm = (content: string) => {
+    if (selectionInTerm()) { heldTerm.current = content; return; }
+    heldTerm.current = null;
+    setTerm(content);
+  };
+  useEffect(() => {
+    const onSel = () => {
+      if (heldTerm.current === null || selectionInTerm()) return;
+      setTerm(heldTerm.current);
+      heldTerm.current = null;
+    };
+    document.addEventListener("selectionchange", onSel);
+    return () => document.removeEventListener("selectionchange", onSel);
+  }, []);
+
   // falling back to 900ms polling if the stream errors (old server, proxy, etc.)
   useEffect(() => {
-    if (!paneToWatch || !fullscreen) { setTerm(""); return; }
+    if (!paneToWatch || !fullscreen) { setTerm(""); heldTerm.current = null; return; }
     let alive = true;
     let iv: ReturnType<typeof setInterval> | undefined;
     let es: EventSource | null = null;
     const poll = () => {
-      const pull = async () => { const r = await getPane(paneToWatch, host); if (alive && r?.ok) setTerm(r.content ?? ""); };
+      const pull = async () => { const r = await getPane(paneToWatch, host); if (alive && r?.ok) applyTerm(r.content ?? ""); };
       pull();
       iv = setInterval(pull, 900);
     };
@@ -90,7 +114,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
       const t = getToken(); // EventSource can't send headers → token rides the query string
       const hq = host ? `&host=${encodeURIComponent(host)}` : "";
       es = new EventSource(`/api/pane-stream?id=${encodeURIComponent(paneToWatch)}${hq}${t ? `&t=${encodeURIComponent(t)}` : ""}`);
-      es.onmessage = (e) => { if (alive) setTerm(JSON.parse(e.data) as string); };
+      es.onmessage = (e) => { if (alive) applyTerm(JSON.parse(e.data) as string); };
       es.onerror = () => { es?.close(); es = null; if (alive && !iv) poll(); };
     } catch {
       poll();
