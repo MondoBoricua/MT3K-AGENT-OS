@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentRow, PaneRef } from "../lib/api";
 import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
@@ -111,6 +111,24 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     const el = termRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
   }, [term]);
+
+  // desktop: scale the mono font so the pane's ~80 tmux columns fill the width instead of
+  // huddling in a corner. tmux hard-wraps at the pane width, so the longest visible line IS
+  // the column count. Mono glyphs are ~0.62 × font-size wide; clamp keeps phones at 11px.
+  const [termFont, setTermFont] = useState(11);
+  const termCols = useMemo(() => {
+    if (!term) return 80;
+    return Math.max(60, ...term.replace(/\x1b(\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(\x07|\x1b\\))/g, "").split("\n").map((l) => l.length));
+  }, [term]);
+  useEffect(() => {
+    const el = termRef.current;
+    if (!el) return;
+    const fit = () => setTermFont(Math.max(11, Math.min(20, Math.floor((el.clientWidth - 24) / (termCols * 0.62)))));
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [termCols, fullscreen]);
 
   // re-stick whenever a different pane opens in fullscreen
   useEffect(() => { stickToBottom.current = true; setScrolledUp(false); }, [paneToWatch, fullscreen]);
@@ -320,8 +338,8 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
 
         {/* sanitized HTML: ansiToHtml escapes all text; spans carry only numeric-derived colors */}
         <div className="relative flex min-h-0 flex-1 flex-col">
-          <pre ref={termRef} onScroll={onTermScroll}
-            className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono text-[11px] leading-snug text-white/90"
+          <pre ref={termRef} onScroll={onTermScroll} style={{ fontSize: termFont }}
+            className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono leading-snug text-white/90"
             dangerouslySetInnerHTML={{ __html: term ? ansiToHtml(term) : "<span style=\"opacity:.4\">cargando terminal…</span>" }} />
           {/* the live feed keeps growing while you read scrollback — one tap re-engages auto-scroll */}
           {scrolledUp && (
