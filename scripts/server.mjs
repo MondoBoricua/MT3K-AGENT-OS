@@ -1326,12 +1326,13 @@ let PROXY_HTTPS = false; // detectAgents reports it so the panel builds the righ
 const PROXY_POLYFILL = `<script>if(!crypto.randomUUID){crypto.randomUUID=()=>{const b=crypto.getRandomValues(new Uint8Array(16));b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;const h=Array.from(b,x=>x.toString(16).padStart(2,"0")).join("");return h.slice(0,8)+"-"+h.slice(8,12)+"-"+h.slice(12,16)+"-"+h.slice(16,20)+"-"+h.slice(20)}}</script>`;
 // dsh hard-codes its Settings UI to loopback browsers (client-side isLoopbackHostname on
 // window.location — --trusted-host feeds only the server fence, not this). Behind OUR authed
-// proxy the remote browser IS the owner, so patch that single gate in flight. Exact-match on
-// the unminified bundle: if a future dsh changes the line, the patch silently no-ops and
-// Settings just stays localhost-only — nothing else breaks.
+// proxy the remote browser IS the owner, so patch that single gate in flight. The regex takes
+// any expression ending in the hostname check — 0.1.1 had `pageLocation === void 0 || …`,
+// 0.1.5 prepends `transport?.ownsHost === true || …`. A miss only keeps Settings
+// localhost-only (nothing else breaks), but it's logged so a dsh update can't hide it.
 const PROXY_JS_PATCHES = [{
   path: "/plugins/@deepseek-ai/dsh-client-connection/client.js",
-  find: "isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname)",
+  find: /isLoopback: [^,\n]*isLoopbackHostname\(pageLocation\.hostname\)/,
   replace: "isLoopback: true",
 }];
 const proxyCookieOk = (req) => {
@@ -1388,7 +1389,11 @@ async function proxyTlsOptions() {
           pr.on("end", () => {
             let text = Buffer.concat(chunks).toString("utf8");
             if (editHtml) text = text.includes("<head>") ? text.replace("<head>", "<head>" + PROXY_POLYFILL) : PROXY_POLYFILL + text;
-            if (jsPatch) text = text.replace(jsPatch.find, jsPatch.replace);
+            if (jsPatch) {
+              const patched = text.replace(jsPatch.find, jsPatch.replace);
+              if (patched === text) logEvent(`proxy-patch MISS · ${jsPatch.path} — dsh cambió; Settings remoto no funcionará`);
+              text = patched;
+            }
             const body = Buffer.from(text);
             res.writeHead(pr.statusCode || 200, { ...pr.headers, ...extra, "content-length": body.length });
             res.end(body);
