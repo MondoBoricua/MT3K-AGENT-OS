@@ -22,7 +22,7 @@ import { connect as netConnect } from "node:net";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync, statfsSync, createWriteStream } from "node:fs";
 import { join, dirname, extname, basename, resolve, isAbsolute, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
-import { homedir, networkInterfaces, loadavg, cpus, totalmem, freemem } from "node:os";
+import { homedir, userInfo, networkInterfaces, loadavg, cpus, totalmem, freemem } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -82,9 +82,10 @@ function streamUploadToFile(req, tmp) {
   });
 }
 const isRawUpload = (req) => (req.headers["content-type"] || "").includes("octet-stream");
-function run(cmd, args, cwd, timeoutMs = 60000) {
+function run(cmd, args, cwd, timeoutMs = 60000, envOverride = null) {
   return new Promise((resolve) => {
-    const ch = spawn(cmd, args, { cwd, env: { ...process.env, PATH: `${join(homedir(), ".local/bin")}:${process.env.PATH}` } });
+    const env = envOverride ? { ...process.env, ...envOverride } : { ...process.env, PATH: `${join(homedir(), ".local/bin")}:${process.env.PATH}` };
+    const ch = spawn(cmd, args, { cwd, env });
     let out = "", err = "";
     const t = setTimeout(() => { ch.kill("SIGKILL"); resolve({ ok: false, out, err: err + "\n[timeout]" }); }, timeoutMs);
     ch.stdout.on("data", (d) => (out += d));
@@ -202,6 +203,47 @@ const tildify = (p) => (p && p.startsWith(homedir()) ? "~" + p.slice(homedir().l
 const absBin = (name) => { for (const d of PATH_DIRS) for (const e of BIN_EXTS) { if (d && existsSync(join(d, name + e))) return join(d, name + e); } return null; };
 // no tmux (Windows) → nothing is launchable-in-tmux; web-UI agents and Files still work
 const HAS_TMUX = !!absBin("tmux");
+
+// PATH for everything the panel launches inside tmux. A new tmux session takes the env of the
+// CLIENT that runs `new-session` — this service, whose launchd/systemd PATH has no nvm — not
+// the server's global env. So derive the user's real PATH and hand it over explicitly.
+// Source of truth: the user's fish login config (it resolves the nvm default itself, nothing
+// pinned here); hosts without fish fall back to PATH_DIRS. Ephemeral dirs (agent plugins,
+// temp) never get in, missing dirs and duplicates are dropped, ~/.local/bin always goes first.
+const EPHEMERAL_DIRS = [/\/\.claude\/(plugins|skills|shell-snapshots)\//, /^\/(private\/)?tmp\//, /^\/(private\/)?var\/folders\//];
+let agentPathCache = { at: 0, value: "" };
+function cleanPath(dirs) {
+  const seen = new Set();
+  return [join(homedir(), ".local/bin"), ...dirs]
+    .filter((d) => d && !seen.has(d) && seen.add(d) && !EPHEMERAL_DIRS.some((re) => re.test(d + "/")) && existsSync(d))
+    .join(delimiter);
+}
+function fishPath() {
+  const fish = absBin("fish");
+  if (!fish) return Promise.resolve(null);
+  const user = process.env.USER || userInfo().username;
+  return new Promise((done) => {
+    // minimal env: nothing of this service (or of whoever started it) leaks into the result
+    const ch = spawn(fish, ["-l", "-c", "string join : $PATH"], { env: { HOME: homedir(), USER: user, LOGNAME: user, TERM: "dumb", PATH: "/usr/bin:/bin:/usr/sbin:/sbin" } });
+    let out = "";
+    const t = setTimeout(() => { ch.kill("SIGKILL"); done(null); }, 5000);
+    ch.stdout.on("data", (d) => (out += d));
+    ch.on("error", () => { clearTimeout(t); done(null); });
+    ch.on("close", (code) => {
+      clearTimeout(t);
+      // only the LAST line, and only if it looks like a PATH: anything config.fish prints
+      // (a greeting, fastfetch without its is-interactive guard…) must not become PATH
+      const last = out.trim().split("\n").pop() || "";
+      done(code === 0 && last.startsWith("/") && last.includes(":") ? last.split(":") : null);
+    });
+  });
+}
+async function agentPath() {
+  if (agentPathCache.value && Date.now() - agentPathCache.at < 60000) return agentPathCache.value;
+  // no fish, fish failed or timed out → PATH_DIRS (Debian hosts, Windows never reaches tmux)
+  agentPathCache = { at: Date.now(), value: cleanPath((await fishPath()) || PATH_DIRS) };
+  return agentPathCache.value;
+}
 
 // one ps snapshot → process tree (pid → ppid → comm). Used for both "is running" and pane discovery.
 async function procTree() {
@@ -868,11 +910,23 @@ async function api(req, res, path) {
         else cmd = [bin, ...args];
       }
     } catch { /* no launch.json → plain binary */ }
+    // tmux runs a ONE-word command through `$SHELL -c` (zsh reads ~/.zshenv, which may prepend
+    // /usr/local/bin and bury the PATH set below); 2+ words are exec'd directly → always 2+.
+    if (cmd.length === 1) cmd = ["/usr/bin/env", ...cmd];
     // a tmux server first started from inside a Claude session carries CLAUDE_CODE_CHILD_SESSION —
     // any claude launched there thinks it's a subagent and stops saving transcripts. Scrub it.
-    await run("tmux", ["set-environment", "-gr", "CLAUDE_CODE_CHILD_SESSION"], ROOT, 3000);
-    // -d detached · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
-    const r = await run("tmux", ["new-session", "-d", "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000);
+    // PATH (see agentPath): tmux gives a new session the PATH of the CLIENT running `new-session`,
+    // so running tmux with tmuxEnv is what sets it (and a server born right here starts with a
+    // clean global env too). -e also stores it in the session env for windows opened later in it,
+    // and the global copy keeps windows opened from other sessions in sync.
+    const tmuxEnv = { PATH: await agentPath() };
+    await run("tmux", ["set-environment", "-gr", "CLAUDE_CODE_CHILD_SESSION"], ROOT, 3000, tmuxEnv);
+    // global = the user's PATH + whatever the running server already had (e.g. kitty's own dir
+    // for windows opened from kitty), cleaned — never narrower than before
+    const curGlobal = (await run("tmux", ["show-environment", "-g", "PATH"], ROOT, 3000, tmuxEnv)).out.replace(/^PATH=/, "");
+    await run("tmux", ["set-environment", "-g", "PATH", cleanPath([...tmuxEnv.PATH.split(delimiter), ...(curGlobal ? curGlobal.split(delimiter) : [])])], ROOT, 3000, tmuxEnv);
+    // -d detached · -e PATH · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
+    const r = await run("tmux", ["new-session", "-d", "-e", `PATH=${tmuxEnv.PATH}`, "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000, tmuxEnv);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "tmux new-session falló (¿tmux instalado?)" });
     const [paneId, label] = (r.out || "").split("|");
     // optional first message: wait for the CLI to boot (screen settles), then paste + enter.
