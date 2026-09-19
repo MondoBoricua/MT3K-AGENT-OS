@@ -82,7 +82,10 @@ function styleAttr(s: Style): string {
   if (s.inverse) { const t = fg ?? "#cccccc"; fg = bg ?? "#1c1c1c"; bg = t; }
   const css: string[] = [];
   if (fg) css.push(`color:${fg}`);
-  if (bg) css.push(`background:${bg}`);
+  // an inline background only covers the glyph box, not the viewer's line-height, so
+  // full-screen TUIs that paint every cell (grok, …) came out as stripes. Padding bleeds
+  // the color into the leading without moving any text.
+  if (bg) css.push(`background:${bg};padding-block:.1em;-webkit-box-decoration-break:clone;box-decoration-break:clone`);
   if (s.bold) css.push("font-weight:600");
   if (s.dim) css.push("opacity:.6");
   if (s.italic) css.push("font-style:italic");
