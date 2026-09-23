@@ -170,6 +170,8 @@ agent with extra env/flags on a given host, copy `data/launch.example.json` → 
 Optional per-agent `resumeArgs` (for example, `["--continue"]`) are appended after `args` only when
 that agent has no live tmux pane in the same working directory. If one is already open there, the
 panel omits `resumeArgs` and starts a fresh conversation so two panes never resume the same session.
+For Claude Code they are also skipped in a folder with no saved conversation: an interactive
+`claude --continue` there exits with "No conversation found to continue" instead of starting fresh.
 
 ### Auth token (recommended)
 
