@@ -27,8 +27,8 @@ The kernel does not write feature code. For a UI feature or fix:
 4. Hand the merged commit to `@ops` for the fleet rollout.
 
 ## Constraints
-- **Privacy gate:** `panel/dist/data/` is the host's own baked project data and must never
-  travel to another host or into a bundle.
+- **Privacy gate:** host data never leaves its host — the rule, the three paths and how to
+  verify live in `README.md` → "Privacy gate".
 - No tokens, hostnames or private IPs in source, tests or docs (the repo is public).
 - Helpers with logic get a unit test next to them (`panel/tests/`).
 - Mobile first: touch targets, one-column layouts, no horizontal scroll; then scale up.
