@@ -19,7 +19,7 @@
 import { createServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { connect as netConnect } from "node:net";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync, statfsSync, createWriteStream } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync, statfsSync, createWriteStream, realpathSync } from "node:fs";
 import { join, dirname, extname, basename, resolve, isAbsolute, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, userInfo, networkInterfaces, loadavg, cpus, totalmem, freemem } from "node:os";
@@ -199,6 +199,11 @@ const AGENT_DEFS = [
 ];
 const base = (c) => (c || "").split("/").pop();
 const tildify = (p) => (p && p.startsWith(homedir()) ? "~" + p.slice(homedir().length) : p);
+const procMatches = (comm, proc) => comm.split("/").some((segment) => segment === proc || segment.startsWith(proc + "-"));
+const resumeLaunchReservations = new Set();
+const RESUME_HOLD_MS = 8000;
+// tmux reports the physical cwd (/private/tmp, not /tmp): compare real paths, not lexical ones
+const realDir = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
 // absolute path of a binary from our search dirs (so tmux launches it regardless of the server env's PATH)
 const absBin = (name) => { for (const d of PATH_DIRS) for (const e of BIN_EXTS) { if (d && existsSync(join(d, name + e))) return join(d, name + e); } return null; };
 // no tmux (Windows) → nothing is launchable-in-tmux; web-UI agents and Files still work
@@ -313,9 +318,8 @@ async function detectAgents() {
     // every pane whose process tree contains this agent's binary — supports multiple sessions of the same CLI.
     // segment match: the agent name may be the basename, a vendor/arch name ("codex-aarch64-…"),
     // or a directory in the executable's path (".../cursor-agent/versions/x.y/node").
-    const segMatch = (c, p) => c.split("/").some((s) => s === p || s.startsWith(p + "-"));
     const agentPanes = proc.length
-      ? panes.filter((pn) => pn.comms.some((c) => proc.some((p) => segMatch(c, p))))
+      ? panes.filter((pn) => pn.comms.some((comm) => proc.some((name) => procMatches(comm, name))))
           .map((pn) => ({ paneId: pn.paneId, label: pn.label, window: pn.window, cwd: pn.cwd }))
       : [];
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)
@@ -897,19 +901,50 @@ async function api(req, res, path) {
     const dirSlug = (basename(cwd) || "home").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 20) || "home";
     const session = `mt3k-${agentId}-${dirSlug}-${Date.now().toString(36).slice(-3)}`;
     // optional host-local launch flags (data/launch.json, gitignored) — shell aliases don't apply
-    // here because we spawn the raw binary, so per-host env/args live in data instead:
-    //   { "claude": { "env": { "IS_SANDBOX": "1" }, "args": ["--dangerously-skip-permissions"] } }
+    // here because we spawn the raw binary, so per-host env/args live in data instead. resumeArgs
+    // are appended only when this agent has no live pane in the same working directory.
     // shell → NO command: tmux spawns the user's default shell, so rc files and aliases apply
     let cmd = isShell ? [] : [bin];
+    let resumed = false;
+    let resumeReservation = null;
+    let ownsResumeReservation = false;
     try {
       const lc = isShell ? null : readJSON(join(ROOT, "data", "launch.json"))[agentId];
       if (lc) {
         const envPairs = Object.entries(lc.env || {}).filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === "string").map(([k, v]) => `${k}=${v}`);
         const args = (Array.isArray(lc.args) ? lc.args : []).filter((a) => typeof a === "string");
+        const resumeArgs = (Array.isArray(lc.resumeArgs) ? lc.resumeArgs : []).filter((a) => typeof a === "string");
+        if (resumeArgs.length) {
+          try {
+            const normalizedCwd = tildify(realDir(cwd));
+            resumeReservation = `${agentId}\0${normalizedCwd}`;
+            ownsResumeReservation = !resumeLaunchReservations.has(resumeReservation);
+            if (ownsResumeReservation) resumeLaunchReservations.add(resumeReservation);
+            const { descendants } = await procTree();
+            const panes = await discoverPanes(descendants);
+            const alreadyOpen = panes.some((pane) =>
+              tildify(realDir(expand(pane.cwd))) === normalizedCwd
+              && pane.comms.some((comm) => def.proc.some((name) => procMatches(comm, name)))
+            );
+            if (ownsResumeReservation && !alreadyOpen) {
+              args.push(...resumeArgs);
+              resumed = true;
+            }
+          } catch {
+            if (ownsResumeReservation) resumeLaunchReservations.delete(resumeReservation);
+            resumeReservation = null;
+            ownsResumeReservation = false;
+          }
+        }
         if (envPairs.length) cmd = ["/usr/bin/env", ...envPairs, bin, ...args];
         else cmd = [bin, ...args];
       }
-    } catch { /* no launch.json → plain binary */ }
+    } catch {
+      if (ownsResumeReservation) resumeLaunchReservations.delete(resumeReservation);
+      resumeReservation = null;
+      ownsResumeReservation = false;
+      // no/invalid launch.json → plain binary
+    }
     // tmux runs a ONE-word command through `$SHELL -c` (zsh reads ~/.zshenv, which may prepend
     // /usr/local/bin and bury the PATH set below); 2+ words are exec'd directly → always 2+.
     if (cmd.length === 1) cmd = ["/usr/bin/env", ...cmd];
@@ -919,14 +954,21 @@ async function api(req, res, path) {
     // so running tmux with tmuxEnv is what sets it (and a server born right here starts with a
     // clean global env too). -e also stores it in the session env for windows opened later in it,
     // and the global copy keeps windows opened from other sessions in sync.
-    const tmuxEnv = { PATH: await agentPath() };
-    await run("tmux", ["set-environment", "-gr", "CLAUDE_CODE_CHILD_SESSION"], ROOT, 3000, tmuxEnv);
-    // global = the user's PATH + whatever the running server already had (e.g. kitty's own dir
-    // for windows opened from kitty), cleaned — never narrower than before
-    const curGlobal = (await run("tmux", ["show-environment", "-g", "PATH"], ROOT, 3000, tmuxEnv)).out.replace(/^PATH=/, "");
-    await run("tmux", ["set-environment", "-g", "PATH", cleanPath([...tmuxEnv.PATH.split(delimiter), ...(curGlobal ? curGlobal.split(delimiter) : [])])], ROOT, 3000, tmuxEnv);
-    // -d detached · -e PATH · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
-    const r = await run("tmux", ["new-session", "-d", "-e", `PATH=${tmuxEnv.PATH}`, "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000, tmuxEnv);
+    let r;
+    try {
+      const tmuxEnv = { PATH: await agentPath() };
+      await run("tmux", ["set-environment", "-gr", "CLAUDE_CODE_CHILD_SESSION"], ROOT, 3000, tmuxEnv);
+      // global = the user's PATH + whatever the running server already had (e.g. kitty's own dir
+      // for windows opened from kitty), cleaned — never narrower than before
+      const curGlobal = (await run("tmux", ["show-environment", "-g", "PATH"], ROOT, 3000, tmuxEnv)).out.replace(/^PATH=/, "");
+      await run("tmux", ["set-environment", "-g", "PATH", cleanPath([...tmuxEnv.PATH.split(delimiter), ...(curGlobal ? curGlobal.split(delimiter) : [])])], ROOT, 3000, tmuxEnv);
+      // -d detached · -e PATH · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
+      r = await run("tmux", ["new-session", "-d", "-e", `PATH=${tmuxEnv.PATH}`, "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000, tmuxEnv);
+    } finally {
+      // tmux returns before the agent process shows up in the process tree, so a quick second
+      // launch could miss it; keep the reservation until the new pane is discoverable
+      if (ownsResumeReservation) setTimeout(() => resumeLaunchReservations.delete(resumeReservation), RESUME_HOLD_MS);
+    }
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "tmux new-session falló (¿tmux instalado?)" });
     const [paneId, label] = (r.out || "").split("|");
     // optional first message: wait for the CLI to boot (screen settles), then paste + enter.
@@ -945,8 +987,8 @@ async function api(req, res, path) {
         logEvent(`first-prompt · ${agentId} · "${firstPrompt.slice(0, 60).replace(/\s+/g, " ").trim()}"`);
       })().catch(() => {});
     }
-    logEvent(`launch · ${agentId} · ${session} · ${tildify(cwd)}`);
-    return sendJSON(res, 200, { ok: true, paneId, label: label || session, session, cwd: tildify(cwd) });
+    logEvent(`launch · ${agentId} · ${session} · ${tildify(cwd)} · resumed=${resumed}`);
+    return sendJSON(res, 200, { ok: true, paneId, label: label || session, session, cwd: tildify(cwd), resumed });
   }
 
   // kill an agent's tmux pane (its dedicated session dies with its last pane)
