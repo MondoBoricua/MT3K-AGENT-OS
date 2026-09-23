@@ -167,6 +167,10 @@ Because launches spawn the raw binary (no shell), your shell **aliases don't app
 agent with extra env/flags on a given host, copy `data/launch.example.json` → `data/launch.json`
 (gitignored, host-local) and set per-agent `env` / `args` there.
 
+Optional per-agent `resumeArgs` (for example, `["--continue"]`) are appended after `args` only when
+that agent has no live tmux pane in the same working directory. If one is already open there, the
+panel omits `resumeArgs` and starts a fresh conversation so two panes never resume the same session.
+
 ### Auth token (recommended)
 
 Set `MT3K_TOKEN` in the server's environment and every `/api/*` call requires
