@@ -26,6 +26,14 @@ MT3K Agent OS is a personal agentic operating system for Mondo. Two halves:
 2. Anything about the **dashboard look/behavior** → @panel.
 3. Anything that **runs on a schedule or a server** → @ops.
 4. When unsure, ask one clarifying question, then route.
+5. **Delegate by default.** The kernel coordinates, verifies and synthesizes; it does not
+   implement. Feature and fix work goes to the routed specialist, which hands it to an external
+   coding agent (Codex, Cursor, Antigravity…) in an isolated worktree with a closed brief
+   (goal, allowed files, forbidden files, branch, commands that must pass). Each agent file says
+   what it delegates and what it keeps.
+6. **Cross-review risky code.** Anything touching `scripts/server.mjs`, auth/trust, proxying or
+   the deploy path is reviewed by at least two independent agents before merge. A peer's "done"
+   is a hypothesis until the tests pass here. Deploys themselves are never delegated (`@ops`).
 
 ## Model Policy
 
