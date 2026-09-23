@@ -230,10 +230,7 @@ A fresh `git clone` is clean by design: everything private (`data/projects.json`
 `data/hosts.json`, `data/notify.json`, `data/logs/`, `panel/public/data/`, `graphify-out/`) is
 gitignored, ships as `*.example.json` templates, and the server falls back to empty defaults.
 
-- **Deploy from git, not from your working copy.** An `scp`/`rsync` of a working tree carries your
-  local `data/` and the baked graphs in `panel/{public,dist}/data/*.json` — that leaks your projects
-  and your federation tokens. If you must copy files, exclude those paths and verify the host serves
-  `/data/manifest.json` → `{"projects":[]}` before exposing it.
+- **Deploy from git, not from your working copy** — see the [privacy gate](#privacy-gate) below.
 - **Set `MT3K_TOKEN`** (see [Auth token](#auth-token-recommended)). The API launches agents and types
   into tmux panes — never expose `:4288` beyond a trusted LAN without the token (and ideally a
   reverse proxy or VPN on top).
@@ -241,6 +238,26 @@ gitignored, ships as `*.example.json` templates, and the server falls back to em
   don't kill the agents' tmux sessions.
 - Target needs: node ≥ 22, tmux, pnpm (one-time panel build), and optionally graphify to graph repos
   on that host. Updating = `git pull` + `pnpm --dir panel build` + restart.
+
+### Privacy gate
+
+This is the single definition of the rule; every other doc and agent file links here.
+
+**Host-specific data never leaves the host it was made on.** That is three paths:
+
+| Path | What it holds |
+|---|---|
+| `data/` | tracked projects, launch flags, federated hosts **with their tokens**, notify config, logs, uploads |
+| `panel/public/data/` | the per-repo knowledge graphs, served live at `/data/*` |
+| `panel/dist/data/` | the build-time copy of the same graphs (Vite copies `public/` into `dist/`) |
+
+- **Never ship them.** Deploy from git (they are gitignored), or exclude all three from any
+  `scp`/`rsync`/tar bundle. The panel's own fleet update (`/api/update-fleet`) already excludes
+  `panel/dist/data` and only ships `scripts/server.mjs` + `panel/dist`.
+- **Verify before exposing a new host:** it must serve `/data/manifest.json` → `{"projects":[]}`,
+  and none of your repo names may appear under those paths on the target.
+- **If it leaked:** delete those paths on the target, rebuild its own data from its own repos,
+  and rotate any token that was in `data/hosts.json`.
 
 ## Adding a project
 

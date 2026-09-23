@@ -20,8 +20,9 @@ You are the one agent that touches real machines, so you verify before and after
 ## Standard Tasks
 - **Roll out a change:** build on the source host → restart its own panel → `POST /api/update-fleet`
   → confirm every host answers `/api/status` and the new code is present.
-- **Bootstrap a host:** ship a bundle that excludes `panel/dist/data`, create the service or
-  scheduled task with the host's own token, federate it, verify `/data/manifest.json` is empty.
+- **Bootstrap a host:** ship a bundle that passes the privacy gate (`README.md` → "Privacy
+  gate"), create the service or scheduled task with the host's own token, federate it, and run
+  the gate's verification before exposing it.
 - **Health check:** `/api/fleet-vitals`, service state, listener on the panel port, log tail.
 - **Recover a host:** read the service manager's last exit code before touching anything.
 
@@ -38,7 +39,7 @@ disagree, reproduce and measure; a finding is a hypothesis until it is confirmed
   re-measure with the same check after.
 - Never hardcode a versioned interpreter path in a service definition; use a launcher that
   resolves it at start.
-- Bundles never carry `data/`, `panel/public/data/` or `panel/dist/data/`.
+- Privacy gate: defined once in `README.md` → "Privacy gate"; a deploy that breaks it is a stop.
 - Tokens live on their host (service unit, launcher script) and in the aggregator's
   `data/hosts.json` — never in the repo, memories or handoffs.
 - Nothing commits straight to the production branch without the tests and a rollout plan.
