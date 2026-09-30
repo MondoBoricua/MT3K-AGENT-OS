@@ -17,6 +17,25 @@ else
   echo "→ refrescando data de los repos…"; node scripts/build-data.mjs
 fi
 
+# installed as a service (install-service.sh)? then it's already running and restarts itself —
+# killing it here would just leave the service fighting this copy for the port. Open it and leave.
+service_up() {
+  if [ "$(uname)" = "Darwin" ]; then
+    launchctl print "gui/$(id -u)/com.mt3k.agent-os" 2>/dev/null | grep -q "state = running"
+  else
+    systemctl is-active --quiet mt3k-agent-os 2>/dev/null
+  fi
+}
+if service_up; then
+  echo ""
+  echo "  ✓ El panel ya corre como servicio (se levanta solo y se reinicia si muere)."
+  echo "    Ábrelo en: $URL"
+  echo "    ¿No carga? Revisa la IP (¿cambiaste de red?). Estado del servicio: ./scripts/install-service.sh status"
+  echo ""
+  open "$URL" 2>/dev/null || xdg-open "$URL" 2>/dev/null || true
+  exit 0
+fi
+
 # free the port if something is already there
 lsof -ti tcp:$PORT 2>/dev/null | xargs kill -9 2>/dev/null || true
 
