@@ -54,7 +54,7 @@ const readJSON = (p) => JSON.parse(readFileSync(p, "utf8"));
 const projects = () => { const f = join(ROOT, "data", "projects.json"); return existsSync(f) ? (readJSON(f).projects || []) : []; };
 const projectPath = (id) => { const p = projects().find((x) => x.id === id); return p ? expand(p.path) : null; };
 
-const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon" };
+const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2" };
 
 function sendJSON(res, code, obj) {
   res.writeHead(code, { "content-type": "application/json", "access-control-allow-origin": "*" });
