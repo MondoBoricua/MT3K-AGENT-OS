@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Nerd Font icons only (Powerline separators, file/git/clock glyphs from statuslines and
+   prompts). Listed LAST in the mono stack, so text keeps its font and only the private-use
+   glyphs fall through to this. Symbols Nerd Font Mono v3.5.1, MIT — license beside the file. */
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  src: url("./assets/fonts/SymbolsNerdFontMono.woff2") format("woff2");
+  font-display: swap;
+}
+
 :root { color-scheme: dark; }
 
 html, body, #root { height: 100%; }

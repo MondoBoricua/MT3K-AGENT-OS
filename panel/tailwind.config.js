@@ -17,7 +17,7 @@ export default {
         amber: "oklch(80% 0.15 75)",
       },
       fontFamily: {
-        mono: ["ui-monospace", "SF Mono", "JetBrains Mono", "monospace"],
+        mono: ["ui-monospace", "SF Mono", "JetBrains Mono", "Symbols Nerd Font Mono", "monospace"],
       },
     },
   },
