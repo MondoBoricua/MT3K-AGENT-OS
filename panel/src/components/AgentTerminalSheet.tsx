@@ -378,7 +378,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
         {/* sanitized HTML: ansiToHtml escapes all text; spans carry only numeric-derived colors */}
         <div className="relative flex min-h-0 flex-1 flex-col">
           <pre ref={termRef} onScroll={onTermScroll} style={{ fontSize: termFont }}
-            className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono leading-snug text-white/90"
+            className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono leading-none text-white/90"
             dangerouslySetInnerHTML={{ __html: term ? ansiToHtml(term) : "<span style=\"opacity:.4\">cargando terminal…</span>" }} />
           {/* the live feed keeps growing while you read scrollback — one tap re-engages auto-scroll */}
           {scrolledUp && (
