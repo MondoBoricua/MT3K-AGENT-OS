@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { AgentRow, PaneRef } from "../lib/api";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import type { AgentRow, PaneRef, PaneEvent } from "../lib/api";
 import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
+import { applyPaneEvent } from "../lib/pane-stream";
 import AgentLogo from "./AgentLogo";
 
 type Props = {
@@ -13,6 +14,12 @@ type Props = {
   onToast?: (text: string, live: boolean) => void;
 };
 
+// Memoized by raw line: unchanged rows keep their HTML and DOM, including selection.
+const TerminalLine = memo(function TerminalLine({ line, last }: { line: string; last: boolean }) {
+  const html = useMemo(() => ansiToHtml(line), [line]);
+  return <span className="whitespace-pre-wrap break-words" dangerouslySetInnerHTML={{ __html: html + (last ? "" : "\n") }} />;
+});
+
 // Shared sheet: session picker → fullscreen terminal (live view + docked compose).
 // Used from both Agents View (the room) and the sidebar quick-access list.
 // One session → opens straight into fullscreen; many → pick one, then fullscreen.
@@ -22,7 +29,8 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   const [enterOnSend, setEnterOnSend] = useState(true);
   const [sending, setSending] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
-  const [term, setTerm] = useState("");
+  const [term, setTerm] = useState<string[]>([]);
+  const latestTerm = useRef<string[]>([]);
   // launch flow (agent has no live pane yet): pick a project ("" = free-form path) + spawn
   const [launched, setLaunched] = useState<PaneRef | null>(null);
   const [launching, setLaunching] = useState(false);
@@ -61,7 +69,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   useEffect(() => {
     const single = !!agent && agent.panes?.length === 1;
     setPaneId(single ? agent!.panes![0].paneId : null);
-    setText(""); setFullscreen(single); setTerm("");
+    setText(""); setFullscreen(single); setTerm([]);
     let proj = "", cwd = "~";
     try {
       const saved = JSON.parse(localStorage.getItem(`mt3k.launch.${aKey}`) ?? "{}");
@@ -78,13 +86,15 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   // hold live updates while the user is selecting text in the terminal — every re-render
   // nukes the DOM selection, turning copy into a race against the poll. The latest frame
   // waits in a ref and lands the moment the selection is gone.
-  const heldTerm = useRef<string | null>(null);
+  const heldTerm = useRef<string[] | null>(null);
   const selectionInTerm = () => {
     const sel = document.getSelection();
     const el = termRef.current;
     return !!(el && sel && !sel.isCollapsed && sel.anchorNode && el.contains(sel.anchorNode));
   };
-  const applyTerm = (content: string) => {
+  const applyTerm = (event: PaneEvent) => {
+    const content = applyPaneEvent(latestTerm.current, event);
+    latestTerm.current = content;
     if (selectionInTerm()) { heldTerm.current = content; return; }
     heldTerm.current = null;
     setTerm(content);
@@ -101,7 +111,10 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
 
   // falling back to 900ms polling if the stream errors (old server, proxy, etc.)
   useEffect(() => {
-    if (!paneToWatch || !fullscreen) { setTerm(""); heldTerm.current = null; return; }
+    latestTerm.current = [];
+    heldTerm.current = null;
+    setTerm([]);
+    if (!paneToWatch || !fullscreen) return;
     let alive = true;
     let iv: ReturnType<typeof setInterval> | undefined;
     let es: EventSource | null = null;
@@ -113,8 +126,8 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     try {
       const t = getToken(); // EventSource can't send headers → token rides the query string
       const hq = host ? `&host=${encodeURIComponent(host)}` : "";
-      es = new EventSource(`/api/pane-stream?id=${encodeURIComponent(paneToWatch)}${hq}${t ? `&t=${encodeURIComponent(t)}` : ""}`);
-      es.onmessage = (e) => { if (alive) applyTerm(JSON.parse(e.data) as string); };
+      es = new EventSource(`/api/pane-stream?id=${encodeURIComponent(paneToWatch)}${hq}${t ? `&t=${encodeURIComponent(t)}` : ""}&fmt=lines`);
+      es.onmessage = (e) => { if (alive) applyTerm(JSON.parse(e.data) as PaneEvent); };
       es.onerror = () => { es?.close(); es = null; if (alive && !iv) poll(); };
     } catch {
       poll();
@@ -141,8 +154,8 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   // the column count. Mono glyphs are ~0.62 × font-size wide; clamp keeps phones at 11px.
   const [termFont, setTermFont] = useState(11);
   const termCols = useMemo(() => {
-    if (!term) return 80;
-    return Math.max(60, ...term.replace(/\x1b(\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(\x07|\x1b\\))/g, "").split("\n").map((l) => l.length));
+    if (!term.length || (term.length === 1 && term[0] === "")) return 80;
+    return Math.max(60, ...term.map((line) => line.replace(/\x1b(\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(\x07|\x1b\\))/g, "").length));
   }, [term]);
   useEffect(() => {
     const el = termRef.current;
@@ -378,8 +391,11 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
         {/* sanitized HTML: ansiToHtml escapes all text; spans carry only numeric-derived colors */}
         <div className="relative flex min-h-0 flex-1 flex-col">
           <pre ref={termRef} onScroll={onTermScroll} style={{ fontSize: termFont }}
-            className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono leading-none text-white/90"
-            dangerouslySetInnerHTML={{ __html: term ? ansiToHtml(term) : "<span style=\"opacity:.4\">cargando terminal…</span>" }} />
+            className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono leading-none text-white/90">
+            {term.length > 0 && !(term.length === 1 && term[0] === "")
+              ? term.map((line, index) => <TerminalLine key={index} line={line} last={index === term.length - 1} />)
+              : <span style={{ opacity: .4 }}>cargando terminal…</span>}
+          </pre>
           {/* the live feed keeps growing while you read scrollback — one tap re-engages auto-scroll */}
           {scrolledUp && (
             <button onClick={jumpToBottom}
