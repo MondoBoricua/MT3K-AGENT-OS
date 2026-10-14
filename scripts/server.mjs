@@ -1013,15 +1013,35 @@ async function api(req, res, path) {
 
   // live pane stream (SSE): pushes the rendered screen only when it changes — smoother than polling
   if (path === "/api/pane-stream") {
-    const paneId = new URL(req.url, "http://x").searchParams.get("id") || "";
+    const params = new URL(req.url, "http://x").searchParams;
+    const paneId = params.get("id") || "";
+    // Opt-in diffs preserve full strings for old bundles and mixed-version federation.
+    const lineDiffs = params.get("fmt") === "lines";
     if (!/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
-    let last = null, closed = false;
+    let last = null, closed = false, busy = false;
     const tick = async () => {
-      if (closed) return;
-      const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-N", "-S", "-1000"], ROOT, 5000);
-      if (!r.ok) { res.write(`event: gone\ndata: {}\n\n`); return end(); }
-      if (r.out !== last) { last = r.out; res.write(`data: ${JSON.stringify(r.out)}\n\n`); }
+      // Diffs are relative to `last`: a slow capture-pane must never overlap the next tick,
+      // or an out-of-order frame would corrupt the client's line buffer until it reloads.
+      if (closed || busy) return;
+      busy = true;
+      try {
+        const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-N", "-S", "-1000"], ROOT, 5000);
+        if (closed) return;
+        if (!r.ok) { res.write(`event: gone\ndata: {}\n\n`); return end(); }
+        const lines = r.out.split("\n");
+        if (last === null) {
+          res.write(`data: ${JSON.stringify(r.out)}\n\n`);
+        } else {
+          let from = 0;
+          while (from < last.length && from < lines.length && last[from] === lines[from]) from++;
+          if (from === last.length && from === lines.length) return;
+          res.write(`data: ${JSON.stringify(lineDiffs ? { from, lines: lines.slice(from) } : r.out)}\n\n`);
+        }
+        last = lines;
+      } finally {
+        busy = false;
+      }
     };
     const iv = setInterval(tick, 500);
     const end = () => { if (!closed) { closed = true; clearInterval(iv); try { res.end(); } catch { /* gone */ } } };
