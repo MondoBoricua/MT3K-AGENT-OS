@@ -1479,8 +1479,11 @@ function scheduleSelfRestart() {
   setTimeout(() => {
     try {
       if (process.platform === "win32") {
-        // detached powershell: kill the :PORT owner and rerun the scheduled task
-        spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(ROOT, "restart-panel.ps1")], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+        // kill the :PORT owner and rerun the scheduled task. A detached powershell.exe with no std
+        // handles dies at startup before running anything, so it must get a console of its own:
+        // `cmd /c start` creates one (minimized, then hidden by -WindowStyle).
+        const args = ["/c", "start", "/min", "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", join(ROOT, "restart-panel.ps1")];
+        spawn("cmd.exe", args, { detached: true, stdio: "ignore", windowsHide: true }).unref();
       } else if (existsSync("/etc/systemd/system/mt3k-agent-os.service")) {
         spawn("systemctl", ["restart", "mt3k-agent-os"], { detached: true, stdio: "ignore" }).unref();
       } else {
