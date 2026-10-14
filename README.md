@@ -136,6 +136,11 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
   http by default (a `crypto.randomUUID` polyfill is injected — that API is secure-context-only);
   set `MT3K_PROXY_HTTPS=1` to serve it over an auto-generated self-signed cert instead, when a
   proxied tool needs full secure-context APIs and you don't mind one cert warning per device.
+  Tools that wall their UI behind a per-launch token (`dsh web` ≥ 0.2 prints
+  `http://127.0.0.1:3080/?token=…` once) are handled server-side: the panel captures that line
+  (from the process it spawns, or from the tool's log file — `~/.dsh/web.log`, which the systemd
+  unit / scheduled task should write stdout to), exchanges it for the tool's session cookie once,
+  and attaches it to every proxied request and WebSocket. Browsers never see the tool's token.
 - **Terminal** — a pseudo-agent that opens a **plain tmux shell** (your login shell, rc + aliases
   applied — no AI). Same flow as any agent: pick a directory, type from the panel, kill when done.
   Its sessions are the ones named `mt3k-shell-*`.
