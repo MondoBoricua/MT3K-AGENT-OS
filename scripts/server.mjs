@@ -19,11 +19,12 @@
 import { createServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { connect as netConnect } from "node:net";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync, statfsSync, createWriteStream, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync, mkdirSync, unlinkSync, renameSync, rmdirSync, statfsSync, createWriteStream, realpathSync, openSync, closeSync } from "node:fs";
 import { join, dirname, extname, basename, resolve, isAbsolute, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, userInfo, networkInterfaces, loadavg, cpus, totalmem, freemem } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
+import { lastWebToken, sessionCookie } from "./lib/web-session.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -192,7 +193,7 @@ const AGENT_DEFS = [
   // DeepSeek Harness (dsh): no TUI profile — its interactive surface is `dsh web` on a local
   // port. `web` marks it as a web-UI agent: a port probe drives "running" and the panel offers
   // an "abrir UI web" link instead of a tmux terminal.
-  { id: "deepseek", name: "DeepSeek", bins: ["dsh"], paths: ["~/.dsh"], proc: [], web: 3080, webProxy: 4290, webCmd: ["dsh", "web", "--no-open"], webService: "dsh-web", webTask: "DSH-Web" },
+  { id: "deepseek", name: "DeepSeek", bins: ["dsh"], paths: ["~/.dsh"], proc: [], web: 3080, webProxy: 4290, webCmd: ["dsh", "web", "--no-open"], webService: "dsh-web", webTask: "DSH-Web", webLog: "~/.dsh/web.log" },
   // plain tmux shell — no AI. Launch runs the user's default shell (rc + aliases apply).
   // Its panes are matched by session-name prefix, not by process (every pane has a shell).
   { id: "shell", name: "Terminal", bins: [], paths: [], proc: [] },
@@ -312,7 +313,7 @@ async function detectAgents() {
   // web-UI agents (def.web = local port): a quick probe tells us whether their server is up
   const webUp = new Set();
   await Promise.all(AGENT_DEFS.filter((a) => a.web).map(async (a) => {
-    try { const r = await fetch(`http://127.0.0.1:${a.web}/`, { signal: AbortSignal.timeout(800) }); if (r.ok) webUp.add(a.id); } catch { /* down */ }
+    if (await webProbe(a)) webUp.add(a.id); // same probe as web-start: an auth-walled 401 still means "up"
   }));
   const rows = AGENT_DEFS.map((a) => {
     if (a.id === "shell") {
@@ -1340,7 +1341,59 @@ createServer(async (req, res) => {
 // start/stop a web-UI tool on THIS host. Start prefers the host's systemd unit, then a
 // Windows hidden scheduled task (a naked detached spawn opens a console window the user
 // closes — killing the tool), then a detached spawn as last resort.
-const webProbe = (def) => fetch(`http://127.0.0.1:${def.web}/`, { signal: AbortSignal.timeout(800) }).then((r) => r.ok, () => false);
+const webTokens = new Map();
+const webSessions = new Map();
+const webSessionPending = new Map();
+const webProbe = (def) => fetch(`http://127.0.0.1:${def.web}/`, { redirect: "manual", signal: AbortSignal.timeout(800) }).then((r) => {
+  r.body?.cancel().catch(() => {});
+  return r.status >= 200 && r.status < 500;
+}, () => false);
+
+function readWebToken(def) {
+  if (!def.webLog) return null;
+  try { return lastWebToken(readFileSync(expand(def.webLog), "utf8")); } catch { return null; }
+}
+
+async function exchangeWebSession(def) {
+  let token = webTokens.get(def.id) || readWebToken(def);
+  for (let attempt = 0; token && attempt < 2; attempt++) {
+    webTokens.set(def.id, token);
+    const host = `127.0.0.1:${def.web}`;
+    const r = await fetch(`http://${host}/?token=${encodeURIComponent(token)}`, {
+      headers: { host }, redirect: "manual", signal: AbortSignal.timeout(3000),
+    });
+    const cookie = r.status === 303 ? sessionCookie(r.headers.get("set-cookie")) : null;
+    await r.body?.cancel();
+    if (cookie) { webSessions.set(def.id, cookie); return cookie; }
+    if (r.status !== 401) break;
+    webTokens.delete(def.id);
+    token = attempt === 0 ? readWebToken(def) : null;
+  }
+  return null;
+}
+
+function webSession(def, invalid = null) {
+  if (!def.webLog) return Promise.resolve(null);
+  if (invalid && webSessions.get(def.id) === invalid) webSessions.delete(def.id);
+  if (webSessions.has(def.id)) return Promise.resolve(webSessions.get(def.id));
+  if (!webSessionPending.has(def.id)) {
+    const pending = exchangeWebSession(def).catch(() => null).finally(() => webSessionPending.delete(def.id));
+    webSessionPending.set(def.id, pending);
+  }
+  return webSessionPending.get(def.id);
+}
+
+// stdout/stderr of a spawned web tool go straight to its log file (a kernel fd, not a pipe we
+// would have to drain forever: closing a pipe while the tool still logs kills it with EPIPE).
+// The launch token is read back from that file on demand (readWebToken).
+function webLogFd(def) {
+  if (!def.webLog) return null;
+  try {
+    const file = expand(def.webLog);
+    mkdirSync(dirname(file), { recursive: true });
+    return openSync(file, "a", 0o600);
+  } catch { return null; }
+}
 async function startWebTool(def) {
   if (await webProbe(def)) return { ok: true, already: true };
   const bin = absBin(def.webCmd[0]);
@@ -1353,8 +1406,11 @@ async function startWebTool(def) {
     started = (await run("schtasks", ["/run", "/tn", def.webTask], ROOT, 10000)).ok;
   }
   if (!started) {
-    const ch = spawn(bin, def.webCmd.slice(1), { detached: true, stdio: "ignore", windowsHide: true, shell: process.platform === "win32", env: process.env });
+    const fd = webLogFd(def);
+    const ch = spawn(bin, def.webCmd.slice(1), { detached: true, stdio: fd === null ? "ignore" : ["ignore", fd, fd], windowsHide: true, shell: process.platform === "win32", env: process.env });
     ch.unref();
+    if (fd !== null) { try { closeSync(fd); } catch { /* child holds its own copy */ } }
+    webTokens.delete(def.id); webSessions.delete(def.id); // a fresh process mints a fresh token
   }
   for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 1000));
@@ -1414,7 +1470,7 @@ async function readVitals() {
 
 function buildUpdateBundle() {
   // tar without data (privacy gate) — spawnSync so we can return the bytes synchronously
-  const r = spawnSync("tar", ["czf", "-", "--exclude", "panel/dist/data", "scripts/server.mjs", "panel/dist"], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync("tar", ["czf", "-", "--exclude", "panel/dist/data", "scripts/server.mjs", "scripts/lib/web-session.mjs", "panel/dist"], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) throw new Error("tar falló: " + (r.stderr?.toString().slice(0, 200) || r.status));
   return r.stdout; // gzipped tar bytes
 }
@@ -1482,58 +1538,124 @@ async function proxyTlsOptions() {
   const tls = wantTls ? await proxyTlsOptions() : null;
   PROXY_HTTPS = !!tls;
   for (const def of defs) {
-    const rewrite = (headers) => {
+    const rewrite = (headers, session = null) => {
       const h = { ...headers, host: `127.0.0.1:${def.web}` };
       if (h.origin) h.origin = `http://127.0.0.1:${def.web}`;
       if (h.referer) h.referer = `http://127.0.0.1:${def.web}/`;
       delete h.cookie; // our auth cookie is not the tool's business
+      if (def.webLog && session) {
+        const cookies = (headers.cookie || "").split(";").map((c) => c.trim()).filter((c) => c && !/^mt3k_t\s*=/.test(c));
+        h.cookie = [session, ...cookies].join("; ");
+      }
       return h;
     };
     const cleanPath = (url) => {
-      const u = new URL(url, "http://x");
-      const hadToken = u.searchParams.has("t");
-      u.searchParams.delete("t"); // never forward the panel token into the tool
-      return { path: u.pathname + (u.searchParams.size ? `?${u.searchParams}` : ""), pathname: u.pathname, hadToken };
+      // Strip only our `t` param and forward the rest of the query byte-for-byte: tools use
+      // combo URLs like /plugins/??a/x.js,b/y.js&rev=… that URLSearchParams would re-encode into 404s.
+      const qi = url.indexOf("?");
+      const pathname = qi === -1 ? url : url.slice(0, qi);
+      const parts = qi === -1 ? [] : url.slice(qi + 1).split("&");
+      const hadToken = parts.some((p) => /^t=/.test(p));
+      const kept = parts.filter((p) => !/^t=/.test(p));
+      return { path: pathname + (kept.length ? `?${kept.join("&")}` : ""), pathname, hadToken };
     };
-    const handler = (req, res) => {
+    const handler = async (req, res) => {
       if (!(authorized(req) || proxyCookieOk(req))) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); return res.end("token requerido — abre desde el panel"); }
       const { path: fwdPath, pathname, hadToken } = cleanPath(req.url);
-      const fh = rewrite(req.headers);
+      let session = await webSession(def);
+      if (res.destroyed) return;
+      const fh = rewrite(req.headers, session);
       const wantsHtml = (req.headers.accept || "").includes("text/html");
-      const jsPatch = PROXY_JS_PATCHES.find((x) => x.path === pathname);
+      // dsh ≥0.2 ships client modules as one combo bundle (/plugins/??a/x.js,b/y.js) — match the module inside it too
+      const jsPatch = PROXY_JS_PATCHES.find((x) => x.path === pathname || (pathname === "/plugins/" && fwdPath.includes(x.path.slice("/plugins/".length))));
       if ((wantsHtml && !tls) || jsPatch) delete fh["accept-encoding"]; // we edit these bodies → identity encoding
-      const p = httpRequest({ host: "127.0.0.1", port: def.web, method: req.method, path: fwdPath, headers: fh }, (pr) => {
-        const extra = {};
-        if (TOKEN && hadToken) extra["set-cookie"] = `mt3k_t=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax${tls ? "; Secure" : ""}`;
-        const isHtml = (pr.headers["content-type"] || "").includes("text/html");
-        const editHtml = isHtml && !tls; // http fallback: inject the randomUUID polyfill (https doesn't need it)
-        if ((editHtml || jsPatch) && !pr.headers["content-encoding"]) {
-          const chunks = [];
-          pr.on("data", (c) => chunks.push(c));
-          pr.on("end", () => {
-            let text = Buffer.concat(chunks).toString("utf8");
-            if (editHtml) text = text.includes("<head>") ? text.replace("<head>", "<head>" + PROXY_POLYFILL) : PROXY_POLYFILL + text;
-            if (jsPatch) {
-              const patched = text.replace(jsPatch.find, jsPatch.replace);
-              if (patched === text) logEvent(`proxy-patch MISS · ${jsPatch.path} — dsh cambió; Settings remoto no funcionará`);
-              text = patched;
+      const replayable = !req.headers["transfer-encoding"] && (!req.headers["content-length"] || req.headers["content-length"] === "0");
+      const forward = (retried = false) => {
+        const p = httpRequest({ host: "127.0.0.1", port: def.web, method: req.method, path: fwdPath, headers: fh }, async (pr) => {
+          if (pr.statusCode === 401 && session) {
+            if (webSessions.get(def.id) === session) webSessions.delete(def.id); // stale: the next request re-exchanges
+            const renewed = retried ? null : await webSession(def); // renew now so the next request is fast
+            if (renewed && replayable) {
+              pr.resume();
+              session = renewed;
+              fh.cookie = rewrite(req.headers, session).cookie;
+              if (!res.destroyed) forward(true);
+              return;
             }
-            const body = Buffer.from(text);
-            res.writeHead(pr.statusCode || 200, { ...pr.headers, ...extra, "content-length": body.length });
-            res.end(body);
-          });
-          return;
-        }
-        res.writeHead(pr.statusCode || 502, { ...pr.headers, ...extra });
-        pr.pipe(res); // streamed, not buffered — the tool may use SSE
-      });
-      p.on("error", () => { if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain; charset=utf-8" }); res.end(`${def.name} no responde en 127.0.0.1:${def.web} — ¿está corriendo?`); });
-      req.pipe(p);
+          }
+          const extra = {};
+          if (TOKEN && hadToken) extra["set-cookie"] = `mt3k_t=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax${tls ? "; Secure" : ""}`;
+          const isHtml = (pr.headers["content-type"] || "").includes("text/html");
+          const editHtml = isHtml && !tls; // http fallback: inject the randomUUID polyfill (https doesn't need it)
+          if ((editHtml || jsPatch) && !pr.headers["content-encoding"]) {
+            const chunks = [];
+            pr.on("data", (c) => chunks.push(c));
+            pr.on("end", () => {
+              let text = Buffer.concat(chunks).toString("utf8");
+              if (editHtml) text = text.includes("<head>") ? text.replace("<head>", "<head>" + PROXY_POLYFILL) : PROXY_POLYFILL + text;
+              if (jsPatch) {
+                const patched = text.replace(jsPatch.find, jsPatch.replace);
+                if (patched === text) logEvent(`proxy-patch MISS · ${jsPatch.path} — dsh cambió; Settings remoto no funcionará`);
+                text = patched;
+              }
+              const body = Buffer.from(text);
+              delete pr.headers["transfer-encoding"]; // buffered responses use Content-Length
+              res.writeHead(pr.statusCode || 200, { ...pr.headers, ...extra, "content-length": body.length });
+              res.end(body);
+            });
+            return;
+          }
+          res.writeHead(pr.statusCode || 502, { ...pr.headers, ...extra });
+          pr.pipe(res); // streamed, not buffered — the tool may use SSE
+        });
+        p.on("error", () => { if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain; charset=utf-8" }); res.end(`${def.name} no responde en 127.0.0.1:${def.web} — ¿está corriendo?`); });
+        if (retried) p.end(); else req.pipe(p);
+      };
+      forward();
     };
     const srv = tls ? createHttpsServer(tls, handler) : createServer(handler);
     // WebSocket passthrough: replay the upgrade against the target, then pipe both ways
-    srv.on("upgrade", (req, socket, head) => {
+    srv.on("upgrade", async (req, socket, head) => {
       if (!(authorized(req) || proxyCookieOk(req))) return socket.destroy();
+      socket.on("error", () => socket.destroy()); // the browser may drop the socket while we await the session
+      let session = await webSession(def);
+      if (session) {
+        const forward = (retried = false) => {
+          if (socket.destroyed) return;
+          const up = httpRequest({ host: "127.0.0.1", port: def.web, method: req.method,
+            path: cleanPath(req.url).path, headers: rewrite(req.headers, session) });
+          const abort = () => up.destroy();
+          socket.once("close", abort);
+          up.once("close", () => socket.removeListener("close", abort));
+          up.on("upgrade", (pr, peer, peerHead) => {
+            let raw = `HTTP/1.1 ${pr.statusCode} ${pr.statusMessage}\r\n`;
+            for (let i = 0; i < pr.rawHeaders.length; i += 2) raw += `${pr.rawHeaders[i]}: ${pr.rawHeaders[i + 1]}\r\n`;
+            socket.write(raw + "\r\n");
+            if (peerHead.length) socket.write(peerHead);
+            if (head.length) peer.write(head);
+            peer.on("error", () => socket.destroy());
+            socket.on("error", () => peer.destroy());
+            socket.once("close", () => peer.destroy());
+            peer.once("close", () => socket.destroy());
+            socket.pipe(peer); peer.pipe(socket);
+          });
+          up.on("response", async (pr) => {
+            if (pr.statusCode === 401 && session) {
+              if (webSessions.get(def.id) === session) webSessions.delete(def.id);
+              const replayable = !req.headers["transfer-encoding"] && (!req.headers["content-length"] || req.headers["content-length"] === "0");
+              const renewed = retried ? null : await webSession(def);
+              if (renewed && replayable) { pr.resume(); session = renewed; forward(true); return; }
+            }
+            // Send the failed handshake as a close-delimited HTTP response.
+            socket.write(`HTTP/1.1 ${pr.statusCode} ${pr.statusMessage}\r\nConnection: close\r\n\r\n`);
+            pr.pipe(socket);
+          });
+          up.on("error", () => socket.destroy());
+          up.end();
+        };
+        forward();
+        return;
+      }
       const up = netConnect(def.web, "127.0.0.1", () => {
         const h = rewrite(req.headers);
         let raw = `${req.method} ${cleanPath(req.url).path} HTTP/1.1\r\n`;
