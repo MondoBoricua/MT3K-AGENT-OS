@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { homedir, userInfo, networkInterfaces, loadavg, cpus, totalmem, freemem } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { lastWebToken, sessionCookie } from "./lib/web-session.mjs";
+import { keyArgs } from "./lib/keys.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -869,12 +870,12 @@ async function api(req, res, path) {
   // allowlisted to tmux key names only → never raw shell, never arbitrary keystrokes
   if (path === "/api/key" && req.method === "POST") {
     const { paneId, key } = await body(req);
-    const ALLOWED = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "Space", "BSpace", "PageUp", "PageDown", "Home", "End"]);
     if (typeof paneId !== "string" || !/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
-    if (typeof key !== "string" || !ALLOWED.has(key)) return sendJSON(res, 400, { ok: false, err: "tecla no permitida" });
+    const args = keyArgs(key);
+    if (!args) return sendJSON(res, 400, { ok: false, err: "tecla no permitida" });
     const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
-    const r = await run("tmux", ["send-keys", "-t", paneId, key], ROOT, 5000);
+    const r = await run("tmux", ["send-keys", "-t", paneId, ...args], ROOT, 5000);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "send-keys falló" });
     logEvent(`key · ${paneId} · ${key}`);
     return sendJSON(res, 200, { ok: true, paneId, key });
