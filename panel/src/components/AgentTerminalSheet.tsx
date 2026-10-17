@@ -416,6 +416,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
             <button onClick={() => key("Enter")} title="Enter" className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-2 font-mono text-xs text-white/80 transition active:bg-accent/20 active:text-accent">↵</button>
             <button onClick={() => key("Escape")} title="Escape" className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-2 font-mono text-[10px] text-white/80 transition active:bg-accent/20 active:text-accent">esc</button>
             <button onClick={() => key("Tab")} title="Tab" className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-2 font-mono text-[10px] text-white/80 transition active:bg-accent/20 active:text-accent">tab</button>
+            {agent?.id === "claude" && <button onClick={() => key("SendNow")} title="Enviar lo encolado ahora (Claude: ctrl+x ctrl+s / ctrl+enter)" className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-2 font-mono text-[10px] text-white/80 transition active:bg-accent/20 active:text-accent">⚡ ya</button>}
           </div>
           {/* quick prompts: one tap = sent (data/macros.json or defaults) */}
           {macros.length > 0 && (
