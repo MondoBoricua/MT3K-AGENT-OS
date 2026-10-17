@@ -1471,7 +1471,9 @@ async function readVitals() {
 
 function buildUpdateBundle() {
   // tar without data (privacy gate) — spawnSync so we can return the bytes synchronously
-  const r = spawnSync("tar", ["czf", "-", "--exclude", "panel/dist/data", "scripts/server.mjs", "scripts/lib/web-session.mjs", "panel/dist"], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 });
+  // ship the whole scripts/lib dir: a module server.mjs imports but the bundle lacks crashes every host on restart
+  // COPYFILE_DISABLE keeps macOS from adding AppleDouble ._* entries that then litter other hosts
+  const r = spawnSync("tar", ["czf", "-", "--exclude", "panel/dist/data", "scripts/server.mjs", "scripts/lib", "panel/dist"], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, COPYFILE_DISABLE: "1" } });
   if (r.status !== 0) throw new Error("tar falló: " + (r.stderr?.toString().slice(0, 200) || r.status));
   return r.stdout; // gzipped tar bytes
 }
