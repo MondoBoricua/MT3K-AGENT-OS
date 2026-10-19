@@ -147,6 +147,8 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
 
 All tmux control is **LAN-only** and goes through `tmux` directly (no shell) — see the API table.
 
+Windows enlarged by the panel follow the terminal size again when a client attaches or changes sessions, using appended tmux hooks that preserve existing user hooks.
+
 ### Terminal scrollback
 
 The live terminal ships up to **1,000 lines** of tmux scrollback and only auto-follows the feed while

@@ -26,6 +26,7 @@ import { homedir, userInfo, networkInterfaces, loadavg, cpus, totalmem, freemem 
 import { spawn, spawnSync } from "node:child_process";
 import { lastWebToken, sessionCookie } from "./lib/web-session.mjs";
 import { keyArgs } from "./lib/keys.mjs";
+import { missingHooks } from "./lib/tmux-hooks.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -218,6 +219,32 @@ const hasResumableHistory = (agentId, dir) => {
 const absBin = (name) => { for (const d of PATH_DIRS) for (const e of BIN_EXTS) { if (d && existsSync(join(d, name + e))) return join(d, name + e); } return null; };
 // no tmux (Windows) → nothing is launchable-in-tmux; web-UI agents and Files still work
 const HAS_TMUX = !!absBin("tmux");
+
+let tmuxHooksVerified = false;
+let tmuxHooksPending = null;
+async function ensureTmuxHooks(force = false) {
+  try {
+    if (!HAS_TMUX) return;
+    if (force) {
+      await tmuxHooksPending;
+      tmuxHooksVerified = false;
+    }
+    if (tmuxHooksVerified) return;
+    if (tmuxHooksPending) return await tmuxHooksPending;
+    tmuxHooksPending = (async () => {
+      const hooks = await run("tmux", ["show-hooks", "-g"], ROOT, 3000);
+      if (!hooks.ok) return;
+      // tmux manual: resize-window "will automatically set window-size to manual in the window options".
+      for (const hook of missingHooks(hooks.out)) {
+        const added = await run("tmux", ["set-hook", "-ga", hook, "set -w window-size latest"], ROOT, 3000);
+        if (!added.ok) return;
+      }
+      tmuxHooksVerified = true;
+    })();
+    try { await tmuxHooksPending; } finally { tmuxHooksPending = null; }
+  } catch { /* tmux absent, stopped or unavailable: retry on the next call */ }
+}
+if (HAS_TMUX && (await run("tmux", ["list-sessions"], ROOT, 3000)).ok) await ensureTmuxHooks();
 
 // PATH for everything the panel launches inside tmux. A new tmux session takes the env of the
 // CLIENT that runs `new-session` — this service, whose launchd/systemd PATH has no nvm — not
@@ -580,6 +607,7 @@ async function api(req, res, path) {
     // sibling panes keep their size, then claim the new space for this pane.
     const dW = Math.max(0, c - paneW), dH = Math.max(0, r - paneH);
     if (!dW && !dH) return sendJSON(res, 200, { ok: true, cols: paneW, rows: paneH });
+    await ensureTmuxHooks();
     const rz = await run("tmux", ["resize-window", "-t", paneId, "-x", String(Math.min(400, winW + dW)), "-y", String(Math.min(200, winH + dH))], ROOT, 5000);
     if (!rz.ok) return sendJSON(res, 500, { ok: false, err: rz.err || "no se pudo redimensionar" });
     await run("tmux", ["resize-pane", "-t", paneId, "-x", String(c), "-y", String(r)], ROOT, 5000);
@@ -974,6 +1002,7 @@ async function api(req, res, path) {
       await run("tmux", ["set-environment", "-g", "PATH", cleanPath([...tmuxEnv.PATH.split(delimiter), ...(curGlobal ? curGlobal.split(delimiter) : [])])], ROOT, 3000, tmuxEnv);
       // -d detached · -e PATH · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
       r = await run("tmux", ["new-session", "-d", "-e", `PATH=${tmuxEnv.PATH}`, "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000, tmuxEnv);
+      if (r.ok) await ensureTmuxHooks(true);
     } finally {
       // tmux returns before the agent process shows up in the process tree, so a quick second
       // launch could miss it; keep the reservation until the new pane is discoverable
