@@ -27,6 +27,10 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   const [paneId, setPaneId] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [enterOnSend, setEnterOnSend] = useState(true);
+  const [enterSends, setEnterSends] = useState(() => {
+    try { return localStorage.getItem("mt3k.enterSends") !== "false"; }
+    catch { return true; }
+  });
   const [sending, setSending] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [term, setTerm] = useState<string[]>([]);
@@ -433,9 +437,14 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
             value={text}
             onChange={(e) => setText(e.target.value)}
             onPaste={onComposePaste}
-            onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); } }}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); }
+              else if (e.key === "Enter" && !e.shiftKey && !e.altKey && enterSends && !e.nativeEvent.isComposing) { e.preventDefault(); send(); }
+            }}
             rows={2}
-            placeholder={`escríbele a ${agent.name}…  (⌘/Ctrl+Enter para enviar · pega un screenshot)`}
+            placeholder={enterSends
+              ? `escríbele a ${agent.name}…  (Enter para enviar · Shift+Enter salto · pega un screenshot)`
+              : `escríbele a ${agent.name}…  (⌘/Ctrl+Enter para enviar · pega un screenshot)`}
             className="w-full resize-none rounded-lg border border-ink-line bg-ink-850/60 px-3 py-2 text-base text-white placeholder:text-white/30 focus:border-accent/50 focus:outline-none sm:text-sm" />
           {/* hidden file input behind 📎 — image/* opens galería/cámara on the phone; pdf/audio add Archivos */}
           <input ref={fileRef} type="file" accept="image/*,application/pdf,.pdf,audio/*,.mp3,.m4a,.wav" className="hidden"
@@ -449,6 +458,13 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
               <label className="flex cursor-pointer items-center gap-2 font-mono text-[11px] text-white/55">
                 <input type="checkbox" checked={enterOnSend} onChange={(e) => setEnterOnSend(e.target.checked)} className="accent-[oklch(62%_0.23_25)]" />
                 ↵ enviar (Enter en la terminal)
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 font-mono text-[11px] text-white/55">
+                <input type="checkbox" checked={enterSends} onChange={(e) => {
+                  setEnterSends(e.target.checked);
+                  try { localStorage.setItem("mt3k.enterSends", String(e.target.checked)); } catch { /* private mode */ }
+                }} className="accent-[oklch(62%_0.23_25)]" />
+                Enter envía (Shift+Enter = línea)
               </label>
             </div>
             <button onClick={send} disabled={!text.trim() || sending || uploading}
