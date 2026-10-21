@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentRow, PaneRef, PaneEvent } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
+import { sendToPane, getPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import { applyPaneEvent } from "../lib/pane-stream";
 import AgentLogo from "./AgentLogo";
@@ -40,6 +40,9 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   const [launching, setLaunching] = useState(false);
   const [launchProject, setLaunchProject] = useState<string>("");
   const [launchCwd, setLaunchCwd] = useState("~");
+  const [resumable, setResumable] = useState<boolean | null>(null);
+  const resumeRequest = useRef(0);
+  const resumeTarget = useRef<string | null>(null);
   const [missingDir, setMissingDir] = useState(false); // free-form path doesn't exist → offer to create it
   const [showLaunch, setShowLaunch] = useState(false); // force the launch form even when sessions exist (＋ nueva sesión)
   const [killed, setKilled] = useState<string[]>([]); // panes we killed but the status poll hasn't dropped yet
@@ -85,6 +88,28 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     if (!agent?.host && focusProjectId && projects.some((p) => p.id === focusProjectId)) proj = focusProjectId;
     setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false); setShowLaunch(false); setKilled([]); setFirstPrompt("");
   }, [aKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const launchVisible = !!agent?.launchable && !fullscreen && (showLaunch || panes.length === 0);
+  const agentId = agent?.id;
+  useEffect(() => {
+    const request = ++resumeRequest.current;
+    if (!launchVisible || !agentId) return;
+    const targetKey = `${aKey}|${host ?? ""}|${launchProject}|${launchCwd.trim()}`;
+    if (resumeTarget.current !== targetKey) {
+      resumeTarget.current = targetKey;
+      setResumable(null);
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const target = launchProject ? { projectId: launchProject, host } : { cwd: launchCwd.trim() || "~", host };
+        const result = await resumableFor(agentId, target);
+        if (request === resumeRequest.current) setResumable(result?.ok ? result.resumable : null);
+      } catch {
+        if (request === resumeRequest.current) setResumable(null);
+      }
+    }, 300);
+    return () => { clearTimeout(timer); ++resumeRequest.current; };
+  }, [launchProject, launchCwd, aKey, host, launchVisible]);
 
   // live view while fullscreen: SSE first (server pushes only when the screen changes),
   // hold live updates while the user is selecting text in the terminal — every re-render
@@ -263,19 +288,19 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
 
   // spin up a fresh tmux session for this agent, then jump straight into its terminal.
   // create=true mkdir -p's a missing free-form path first.
-  const launch = async (create = false, projOverride?: string) => {
+  const launch = async (create = false, projOverride?: string, options?: { fresh?: boolean }) => {
     if (!agent || launching) return;
     setLaunching(true);
     const proj = projOverride ?? launchProject;
     const fp = firstPrompt.trim() ? { firstPrompt: firstPrompt.trim() } : {};
     const opts = proj ? { projectId: proj, create, host, ...fp } : { cwd: launchCwd.trim() || "~", create, host, ...fp };
-    const r = await launchAgent(agent.id, opts);
+    const r = await launchAgent(agent.id, { ...opts, ...options });
     setLaunching(false);
     if (r?.ok && r.paneId) {
       const pane: PaneRef = { paneId: r.paneId, label: r.label ?? r.session ?? "", window: r.session ?? "", cwd: r.cwd ?? "" };
       setLaunched(pane); setPaneId(r.paneId); setFullscreen(true); setMissingDir(false); setShowLaunch(false); setFirstPrompt("");
       try { localStorage.setItem(`mt3k.launch.${agentKey(agent)}`, JSON.stringify(proj ? { projectId: proj } : { cwd: launchCwd.trim() || "~" })); } catch { /* private mode */ }
-      onToast?.(`${agent.name} abierto · ${pane.cwd}`, true);
+      onToast?.(`${agent.name} abierto · ${pane.cwd}${r.resumed ? " · continuada" : ""}`, true);
     } else if (r?.missingDir) {
       setMissingDir(true); // show the "create & open" affordance inline instead of a dead-end error
     } else {
@@ -559,10 +584,23 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
 
               {/* sticky CTA that says WHERE it will open — always reachable without scrolling back */}
               <div className="sticky bottom-0 -mx-1 mt-1 bg-ink-900/95 px-1 pb-1 pt-2 backdrop-blur">
+                {resumable === true ? (
+                  <div className="flex gap-2">
+                    <button onClick={() => launch()} disabled={launching}
+                      className="min-w-0 flex-1 rounded-lg bg-accent/20 px-4 py-2.5 text-sm font-medium text-accent transition hover:bg-accent/30 disabled:opacity-40">
+                      {launching ? "abriendo…" : `↻ continuar en ${launchProject ? (projects.find((p) => p.id === launchProject)?.name ?? launchProject) : (launchCwd.trim() || "~")}`}
+                    </button>
+                    <button onClick={() => launch(false, undefined, { fresh: true })} disabled={launching}
+                      className="min-w-0 flex-1 rounded-lg border border-ink-line px-4 py-2.5 text-sm font-medium text-white/70 transition hover:border-accent/50 disabled:opacity-40">
+                      {launching ? "abriendo…" : `✦ nueva en ${launchProject ? (projects.find((p) => p.id === launchProject)?.name ?? launchProject) : (launchCwd.trim() || "~")}`}
+                    </button>
+                  </div>
+                ) : (
                 <button onClick={() => launch()} disabled={launching}
                   className="w-full rounded-lg bg-accent/20 px-4 py-2.5 text-sm font-medium text-accent transition hover:bg-accent/30 disabled:opacity-40">
                   {launching ? "abriendo…" : `▶ abrir en ${launchProject ? (projects.find((p) => p.id === launchProject)?.name ?? launchProject) : (launchCwd.trim() || "~")}`}
                 </button>
+                )}
               </div>
             </div>
         ) : panes.length === 0 ? (

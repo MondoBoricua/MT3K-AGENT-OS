@@ -42,9 +42,16 @@ export const sendToPane = (paneId: string, text: string, enter = true, host?: st
 export const getPane = (paneId: string, host?: string) => jget<{ ok: boolean; content: string }>(`/api/pane?id=${encodeURIComponent(paneId)}${host ? `&host=${encodeURIComponent(host)}` : ""}`);
 export const sendKey = (paneId: string, key: string, host?: string) => jpost<{ ok: boolean; paneId?: string; key?: string; err?: string }>(`/api/key${hostQ(host)}`, { paneId, key });
 export const killPane = (paneId: string, host?: string) => jpost<{ ok: boolean; err?: string }>(`/api/kill${hostQ(host)}`, { paneId });
-export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: string; create?: boolean; firstPrompt?: string; host?: string }) => {
+export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: string; create?: boolean; firstPrompt?: string; host?: string; fresh?: boolean }) => {
   const { host, ...rest } = opts;
-  return jpost<{ ok: boolean; paneId?: string; label?: string; session?: string; cwd?: string; err?: string; missingDir?: boolean }>(`/api/launch${hostQ(host)}`, { agentId, ...rest });
+  return jpost<{ ok: boolean; paneId?: string; label?: string; session?: string; cwd?: string; err?: string; missingDir?: boolean; resumed?: boolean; reason?: string }>(`/api/launch${hostQ(host)}`, { agentId, ...rest });
+};
+export const resumableFor = (agentId: string, opts: { projectId?: string; cwd?: string; host?: string }) => {
+  const { host, ...target } = opts;
+  const params = new URLSearchParams({ agentId });
+  if (target.projectId) params.set("projectId", target.projectId);
+  if (target.cwd) params.set("cwd", target.cwd);
+  return jget<{ ok: boolean; cwd?: string; resumable: boolean; alreadyOpen?: boolean; hasHistory?: boolean; reason: string }>(`/api/resumable${hostQ(host)}${host ? "&" : "?"}${params}`);
 };
 export const broadcast = (text: string, cwdPrefix?: string) => jpost<{ ok: boolean; sent?: number; err?: string }>("/api/broadcast", { text, cwdPrefix });
 // upload a screenshot/image/PDF → the target host saves it under data/uploads/ and returns the

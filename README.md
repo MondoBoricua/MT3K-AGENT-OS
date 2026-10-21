@@ -182,6 +182,9 @@ For Claude Code, Grok and Cursor they are also skipped in a folder with no saved
 starting fresh (see `scripts/lib/resume-history.mjs` for where each one keeps its history). Codex
 (`["resume", "--last"]`, after the flags), OpenCode (`["-c"]`) and Antigravity (`["--continue"]`)
 start a new conversation when there is nothing to resume, so they get their flags every time.
+When there is something to resume, the launch form shows two buttons, **continuar** and **nueva**
+(`GET /api/resumable?agentId=&cwd=|projectId=` answers that question; `POST /api/launch` with
+`fresh: true` skips the resume flags). Otherwise it keeps the single **abrir** button.
 
 ### Auth token (recommended)
 

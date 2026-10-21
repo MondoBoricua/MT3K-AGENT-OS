@@ -3,6 +3,14 @@ import { readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+export function decideResume({ resumeArgs, alreadyOpen, hasHistory, fresh }) {
+  if (!resumeArgs?.length) return { resume: false, reason: "no-args" };
+  if (fresh) return { resume: false, reason: "fresh" };
+  if (alreadyOpen) return { resume: false, reason: "already-open" };
+  if (!hasHistory) return { resume: false, reason: "no-history" };
+  return { resume: true, reason: "ok" };
+}
+
 function hasSubdirectory(dir) {
   try { return readdirSync(dir, { withFileTypes: true }).some((entry) => entry.isDirectory()); }
   catch { return false; }
