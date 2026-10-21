@@ -27,7 +27,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { lastWebToken, sessionCookie } from "./lib/web-session.mjs";
 import { keyArgs } from "./lib/keys.mjs";
 import { missingHooks } from "./lib/tmux-hooks.mjs";
-import { hasResumableHistory } from "./lib/resume-history.mjs";
+import { decideResume, hasResumableHistory } from "./lib/resume-history.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -477,6 +477,41 @@ function discover() {
 }
 
 // --- routes ---
+async function resolveLaunchCwd({ projectId, cwd: cwdIn }) {
+  let cwd = homedir();
+  if (projectId) {
+    const pp = projectPath(projectId);
+    if (!pp) return { err: "proyecto desconocido", status: 400 };
+    cwd = pp;
+  } else if (typeof cwdIn === "string" && cwdIn.trim()) {
+    cwd = expand(cwdIn.trim());
+  }
+  if (!existsSync(cwd)) return { cwd, err: "esa carpeta no existe", status: 400, missingDir: true };
+  if (!statSync(cwd).isDirectory()) return { err: "esa ruta no es una carpeta", status: 400 };
+  return { cwd };
+}
+
+async function resumeProbe(def, agentId, cwd) {
+  let resumeArgs = [];
+  try {
+    const lc = agentId === "shell" ? null : readJSON(join(ROOT, "data", "launch.json"))[agentId];
+    resumeArgs = (Array.isArray(lc?.resumeArgs) ? lc.resumeArgs : []).filter((a) => typeof a === "string");
+  } catch { /* no/invalid launch.json → no resume flags */ }
+  if (!resumeArgs.length) return { resumeArgs, alreadyOpen: false, hasHistory: false };
+  try {
+    const normalizedCwd = tildify(realDir(cwd));
+    const { descendants } = await procTree();
+    const panes = await discoverPanes(descendants);
+    const alreadyOpen = panes.some((pane) =>
+      tildify(realDir(expand(pane.cwd))) === normalizedCwd
+      && pane.comms.some((comm) => def.proc.some((name) => procMatches(comm, name)))
+    );
+    return { resumeArgs, alreadyOpen, hasHistory: hasResumableHistory(agentId, cwd, { realDir }) };
+  } catch {
+    return { resumeArgs, alreadyOpen: false, hasHistory: false };
+  }
+}
+
 async function api(req, res, path) {
   if (path === "/api/manifest") {
     const src = join(ROOT, "panel", "public", "data", "manifest.json");
@@ -904,31 +939,39 @@ async function api(req, res, path) {
     return sendJSON(res, 200, { ok: true, paneId, key });
   }
 
+  if (path === "/api/resumable" && req.method === "GET") {
+    const params = new URL(req.url, "http://x").searchParams;
+    const agentId = params.get("agentId");
+    const def = AGENT_DEFS.find((a) => a.id === agentId);
+    const isShell = agentId === "shell";
+    if (!HAS_TMUX || !def || (!isShell && (!def.proc?.length || !def.bins.map(absBin).find(Boolean)))) {
+      return sendJSON(res, 200, { ok: true, resumable: false, reason: "not-launchable" });
+    }
+    const target = await resolveLaunchCwd({ projectId: params.get("projectId"), cwd: params.get("cwd") });
+    if (target.err) return sendJSON(res, 200, { ok: true, resumable: false, reason: "no-dir" });
+    const probe = await resumeProbe(def, agentId, target.cwd);
+    const decision = decideResume(probe);
+    return sendJSON(res, 200, { ok: true, cwd: tildify(target.cwd), resumable: decision.resume, alreadyOpen: probe.alreadyOpen, hasHistory: probe.hasHistory, reason: decision.reason });
+  }
+
   // launch an agent CLI in a fresh detached tmux session (LAN-only). The binary comes from
   // AGENT_DEFS (allowlist) — never from the client; cwd is a tracked project or a real dir.
   if (path === "/api/launch" && req.method === "POST") {
     if (!HAS_TMUX) return sendJSON(res, 400, { ok: false, err: "tmux no está instalado en este host" });
-    const { agentId, projectId, cwd: cwdIn, create, firstPrompt } = await body(req);
+    const { agentId, projectId, cwd: cwdIn, create, firstPrompt, fresh } = await body(req);
     const def = AGENT_DEFS.find((a) => a.id === agentId);
     const isShell = agentId === "shell";
     if (!def || (!isShell && !(def.proc && def.proc.length))) return sendJSON(res, 400, { ok: false, err: "agente no lanzable" });
     const bin = isShell ? null : def.bins.map(absBin).find(Boolean);
     if (!isShell && !bin) return sendJSON(res, 400, { ok: false, err: `${def.name} no está instalado` });
-    // resolve working directory: a tracked project wins; else a free-form path (defaults to home)
-    let cwd = homedir();
-    if (projectId) {
-      const pp = projectPath(projectId);
-      if (!pp) return sendJSON(res, 400, { ok: false, err: "proyecto desconocido" });
-      cwd = pp;
-    } else if (typeof cwdIn === "string" && cwdIn.trim()) {
-      cwd = expand(cwdIn.trim());
+    const target = await resolveLaunchCwd({ projectId, cwd: cwdIn });
+    if (target.err && !(target.missingDir && create)) {
+      const { status, cwd: _cwd, ...error } = target;
+      return sendJSON(res, status, { ok: false, ...error });
     }
-    // create the folder on request (mkdir -p) — else report it's missing so the UI can offer to create it
-    if (!existsSync(cwd)) {
-      if (!create) return sendJSON(res, 400, { ok: false, err: "esa carpeta no existe", missingDir: true });
-      try { mkdirSync(cwd, { recursive: true }); } catch { return sendJSON(res, 500, { ok: false, err: "no se pudo crear la carpeta" }); }
-    } else if (!statSync(cwd).isDirectory()) {
-      return sendJSON(res, 400, { ok: false, err: "esa ruta no es una carpeta" });
+    const cwd = target.cwd;
+    if (target.missingDir) {
+      try { mkdirSync(target.cwd, { recursive: true }); } catch { return sendJSON(res, 500, { ok: false, err: "no se pudo crear la carpeta" }); }
     }
     // readable session name: mt3k-claude-onvacation-x4f (target dir + short suffix for uniqueness)
     const dirSlug = (basename(cwd) || "home").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 20) || "home";
@@ -939,6 +982,7 @@ async function api(req, res, path) {
     // shell → NO command: tmux spawns the user's default shell, so rc files and aliases apply
     let cmd = isShell ? [] : [bin];
     let resumed = false;
+    let reason = "no-args";
     let resumeReservation = null;
     let ownsResumeReservation = false;
     try {
@@ -946,28 +990,23 @@ async function api(req, res, path) {
       if (lc) {
         const envPairs = Object.entries(lc.env || {}).filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === "string").map(([k, v]) => `${k}=${v}`);
         const args = (Array.isArray(lc.args) ? lc.args : []).filter((a) => typeof a === "string");
-        const resumeArgs = (Array.isArray(lc.resumeArgs) ? lc.resumeArgs : []).filter((a) => typeof a === "string");
-        if (resumeArgs.length) {
-          try {
-            const normalizedCwd = tildify(realDir(cwd));
-            resumeReservation = `${agentId}\0${normalizedCwd}`;
-            ownsResumeReservation = !resumeLaunchReservations.has(resumeReservation);
-            if (ownsResumeReservation) resumeLaunchReservations.add(resumeReservation);
-            const { descendants } = await procTree();
-            const panes = await discoverPanes(descendants);
-            const alreadyOpen = panes.some((pane) =>
-              tildify(realDir(expand(pane.cwd))) === normalizedCwd
-              && pane.comms.some((comm) => def.proc.some((name) => procMatches(comm, name)))
-            );
-            if (ownsResumeReservation && !alreadyOpen && hasResumableHistory(agentId, cwd, { realDir })) {
-              args.push(...resumeArgs);
-              resumed = true;
-            }
-          } catch {
-            if (ownsResumeReservation) resumeLaunchReservations.delete(resumeReservation);
-            resumeReservation = null;
-            ownsResumeReservation = false;
-          }
+        const reservationKey = `${agentId}\0${tildify(realDir(cwd))}`;
+        if (!resumeLaunchReservations.has(reservationKey)) {
+          resumeReservation = reservationKey;
+          ownsResumeReservation = true;
+          resumeLaunchReservations.add(resumeReservation);
+        }
+        const probe = await resumeProbe(def, agentId, cwd);
+        const decision = decideResume({ ...probe, fresh: fresh === true, alreadyOpen: probe.alreadyOpen || !ownsResumeReservation });
+        reason = decision.reason;
+        if (!decision.resume && ownsResumeReservation) {
+          resumeLaunchReservations.delete(resumeReservation);
+          resumeReservation = null;
+          ownsResumeReservation = false;
+        }
+        if (decision.resume) {
+          args.push(...probe.resumeArgs);
+          resumed = true;
         }
         if (envPairs.length) cmd = ["/usr/bin/env", ...envPairs, bin, ...args];
         else cmd = [bin, ...args];
@@ -1022,7 +1061,7 @@ async function api(req, res, path) {
       })().catch(() => {});
     }
     logEvent(`launch · ${agentId} · ${session} · ${tildify(cwd)} · resumed=${resumed}`);
-    return sendJSON(res, 200, { ok: true, paneId, label: label || session, session, cwd: tildify(cwd), resumed });
+    return sendJSON(res, 200, { ok: true, paneId, label: label || session, session, cwd: tildify(cwd), resumed, reason });
   }
 
   // kill an agent's tmux pane (its dedicated session dies with its last pane)

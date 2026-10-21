@@ -4,7 +4,19 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hasResumableHistory } from "./resume-history.mjs";
+import { decideResume, hasResumableHistory } from "./resume-history.mjs";
+
+for (const [reason, input] of [
+  ["no-args", { resumeArgs: [], fresh: true, alreadyOpen: true, hasHistory: false }],
+  ["fresh", { resumeArgs: ["--resume"], fresh: true, alreadyOpen: true, hasHistory: false }],
+  ["already-open", { resumeArgs: ["--resume"], alreadyOpen: true, hasHistory: false }],
+  ["no-history", { resumeArgs: ["--resume"], alreadyOpen: false, hasHistory: false }],
+  ["ok", { resumeArgs: ["--resume"], alreadyOpen: false, hasHistory: true }],
+]) {
+  test(`decideResume returns ${reason} in priority order`, () => {
+    assert.deepEqual(decideResume(input), { resume: reason === "ok", reason });
+  });
+}
 
 function fixture(t) {
   const home = mkdtempSync(join(tmpdir(), "resume-history-"));
