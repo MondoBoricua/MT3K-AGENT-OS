@@ -27,6 +27,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { lastWebToken, sessionCookie } from "./lib/web-session.mjs";
 import { keyArgs } from "./lib/keys.mjs";
 import { missingHooks } from "./lib/tmux-hooks.mjs";
+import { hasResumableHistory } from "./lib/resume-history.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -207,14 +208,8 @@ const resumeLaunchReservations = new Set();
 const RESUME_HOLD_MS = 8000;
 // tmux reports the physical cwd (/private/tmp, not /tmp): compare real paths, not lexical ones
 const realDir = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
-// an interactive `claude --continue` in a folder with no saved conversation exits 1 ("No
-// conversation found to continue"), so resume only where a transcript exists. Claude keys its
-// history by the real cwd with every non-alphanumeric char turned into "-". Other agents: allowed.
-const hasResumableHistory = (agentId, dir) => {
-  if (agentId !== "claude") return true;
-  try { return readdirSync(join(homedir(), ".claude", "projects", realDir(dir).replace(/[^A-Za-z0-9]/g, "-"))).some((f) => f.endsWith(".jsonl")); }
-  catch { return false; }
-};
+// Claude, Grok and Cursor exit with an error when continuing without saved history, so
+// resume only where their per-project transcript/session/chat exists. Other agents: allowed.
 // absolute path of a binary from our search dirs (so tmux launches it regardless of the server env's PATH)
 const absBin = (name) => { for (const d of PATH_DIRS) for (const e of BIN_EXTS) { if (d && existsSync(join(d, name + e))) return join(d, name + e); } return null; };
 // no tmux (Windows) → nothing is launchable-in-tmux; web-UI agents and Files still work
@@ -964,7 +959,7 @@ async function api(req, res, path) {
               tildify(realDir(expand(pane.cwd))) === normalizedCwd
               && pane.comms.some((comm) => def.proc.some((name) => procMatches(comm, name)))
             );
-            if (ownsResumeReservation && !alreadyOpen && hasResumableHistory(agentId, cwd)) {
+            if (ownsResumeReservation && !alreadyOpen && hasResumableHistory(agentId, cwd, { realDir })) {
               args.push(...resumeArgs);
               resumed = true;
             }

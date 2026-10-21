@@ -177,8 +177,11 @@ agent with extra env/flags on a given host, copy `data/launch.example.json` → 
 Optional per-agent `resumeArgs` (for example, `["--continue"]`) are appended after `args` only when
 that agent has no live tmux pane in the same working directory. If one is already open there, the
 panel omits `resumeArgs` and starts a fresh conversation so two panes never resume the same session.
-For Claude Code they are also skipped in a folder with no saved conversation: an interactive
-`claude --continue` there exits with "No conversation found to continue" instead of starting fresh.
+For Claude Code, Grok and Cursor they are also skipped in a folder with no saved conversation:
+`claude --continue`, `grok -c` and `cursor-agent --continue` exit with an error there instead of
+starting fresh (see `scripts/lib/resume-history.mjs` for where each one keeps its history). Codex
+(`["resume", "--last"]`, after the flags), OpenCode (`["-c"]`) and Antigravity (`["--continue"]`)
+start a new conversation when there is nothing to resume, so they get their flags every time.
 
 ### Auth token (recommended)
 
