@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,6 +68,35 @@ for (const lexical of [false, true]) {
   });
 }
 
+// the zcode fixture db is seeded through the sqlite3 CLI, exactly like a real ~/.zcode db
+const sqlite3Available = (() => { try { execFileSync("sqlite3", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
+
+test("ZCode requires a session row for the real or lexical cwd", { skip: !sqlite3Available && "sqlite3 CLI no disponible" }, (t) => {
+  const { home, dir, real } = fixture(t);
+  const alias = join(home, "alias");
+  symlinkSync(dir, alias, "dir");
+  const db = join(home, ".zcode", "cli", "db", "db.sqlite");
+  const seed = (rows) => execFileSync("sqlite3", [db,
+    "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);",
+    ...rows.map((row, i) => `INSERT INTO session VALUES ('s${i}', '${row.replace(/'/g, "''")}');`),
+  ]);
+  // db absent → false
+  assert.equal(hasResumableHistory("zcode", dir, { home }), false);
+  mkdirSync(join(home, ".zcode", "cli", "db"), { recursive: true });
+  seed([]);
+  // db present but no row → false
+  assert.equal(hasResumableHistory("zcode", dir, { home }), false);
+  rmSync(db);
+  // row under the REAL cwd → true, also through a symlink pointing at it
+  seed([real]);
+  assert.equal(hasResumableHistory("zcode", dir, { home }), true);
+  assert.equal(hasResumableHistory("zcode", alias, { home }), true);
+  rmSync(db);
+  // row under the LEXICAL cwd (the symlink path itself) → true too
+  seed([alias]);
+  assert.equal(hasResumableHistory("zcode", alias, { home }), true);
+});
+
 test("agents without a history requirement always allow resume", (t) => {
   const { home } = fixture(t);
   for (const agent of ["codex", "opencode", "antigravity", "unknown", "constructor", "__proto__"]) {
@@ -77,7 +107,7 @@ test("agents without a history requirement always allow resume", (t) => {
 test("missing cwd and filesystem errors return false without throwing", (t) => {
   const { home, dir } = fixture(t);
   writeFileSync(join(home, "not-a-directory"), "");
-  for (const agent of ["claude", "grok", "cursor"]) {
+  for (const agent of ["claude", "grok", "cursor", "zcode"]) {
     assert.equal(hasResumableHistory(agent, join(home, "missing"), { home }), false);
     assert.equal(hasResumableHistory(agent, dir, {
       home, realDir() { throw new Error("unavailable cwd"); },
