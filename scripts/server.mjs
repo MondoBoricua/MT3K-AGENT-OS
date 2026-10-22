@@ -28,6 +28,7 @@ import { lastWebToken, sessionCookie } from "./lib/web-session.mjs";
 import { keyArgs } from "./lib/keys.mjs";
 import { missingHooks } from "./lib/tmux-hooks.mjs";
 import { decideResume, hasResumableHistory } from "./lib/resume-history.mjs";
+import { buildRunningSet } from "./lib/running-set.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -192,6 +193,9 @@ const AGENT_DEFS = [
   { id: "antigravity", name: "Antigravity", bins: ["agy", "antigravity"], paths: ["~/.antigravity", "/Applications/Antigravity.app"], proc: ["agy", "antigravity"] },
   // Cursor's agentic CLI (`cursor-agent`), not the `cursor` GUI launcher → real TUI, launchable in tmux
   { id: "cursor", name: "Cursor", bins: ["cursor-agent"], paths: ["~/.cursor"], proc: ["cursor-agent"] },
+  // `zcode` is an sh wrapper that execs node (~/.zcode/runtime/…/zcode.mjs); the TUI then
+  // re-titles its processes `zcode-cli`, so that's the live pane/run signal (tmux shows "node").
+  { id: "zcode", name: "ZCode", bins: ["zcode"], paths: ["~/.zcode"], proc: ["zcode", "zcode-cli"] },
   // DeepSeek Harness (dsh): no TUI profile — its interactive surface is `dsh web` on a local
   // port. `web` marks it as a web-UI agent: a port probe drives "running" and the panel offers
   // an "abrir UI web" link instead of a tmux terminal.
@@ -284,7 +288,7 @@ async function agentPath() {
 // one ps snapshot → process tree (pid → ppid → comm). Used for both "is running" and pane discovery.
 async function procTree() {
   const out = (await run("ps", ["-axo", "pid=,ppid=,comm="], ROOT, 5000)).out;
-  const byPid = new Map(), childrenOf = new Map(), running = new Set();
+  const byPid = new Map(), childrenOf = new Map(), rows = [];
   for (const line of out.split("\n")) {
     const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
     if (!m) continue;
@@ -292,11 +296,14 @@ async function procTree() {
     byPid.set(pid, comm);
     if (!childrenOf.has(ppid)) childrenOf.set(ppid, []);
     childrenOf.get(ppid).push(pid);
-    // index every path segment, not just the basename: cursor-agent's process is
-    // ".../cursor-agent/versions/x.y/node" — the agent's name only appears as a directory.
-    // GUI-app internals stay excluded (e.g. Codex.app/Resources/codex ≠ the codex CLI running).
-    if (!comm.includes(".app/")) for (const seg of comm.split("/")) if (seg) running.add(seg);
+    rows.push({ pid, ppid, comm });
   }
+  // index every path segment, not just the basename: cursor-agent's process is
+  // ".../cursor-agent/versions/x.y/node" — the agent's name only appears as a directory.
+  // GUI-app internals stay excluded (e.g. Codex.app/Resources/codex ≠ the codex CLI running)
+  // — including bundle workers whose .app/ origin only survives in their ancestry
+  // (buildRunningSet, ./lib/running-set.mjs).
+  const running = buildRunningSet(rows);
   // basenames of a pid's process AND all its descendants (the agent may BE the pane's root process
   // — tmux runs the binary directly on launch — or live under a kitty/shell wrapper)
   const descendants = (pid) => {
