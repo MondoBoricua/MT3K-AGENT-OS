@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -23,6 +23,9 @@ function hasSubdirectory(dir) {
 // keeps the check synchronous; it needs no flag on this Node (only a warning). Without it
 // (or when the open fails, e.g. a locked db), the sqlite3 CLI reads the same file read-only;
 // with neither available there is simply no resumable history — never an error thrown.
+// Every probe's answer is cached per (home, real, dir) for 5 s and while the db's mtime
+// stays put — /api/resumable (debounced 300 ms) and /api/launch re-ask about the same
+// folder constantly, while a new session bumps the mtime and is seen at once.
 let zcodeDatabaseSync;
 function zcodeNodeSqlite() {
   if (zcodeDatabaseSync !== undefined) return zcodeDatabaseSync;
@@ -31,8 +34,28 @@ function zcodeNodeSqlite() {
   return zcodeDatabaseSync;
 }
 
-function zcodeHasSession(dbPath, dirs) {
-  const DatabaseSync = zcodeNodeSqlite();
+const ZCODE_PROBE_TTL_MS = 5_000;
+const zcodeProbes = new Map(); // `${home}\0${real}\0${dir}\0${cli-only}` → { at, mtimeMs, value }
+let zcodeProbeCount = 0;
+
+// the sqlite3 CLI call, swappable in tests to simulate the CLI missing from PATH
+let runSqlite3 = (uri, sql) =>
+  execFileSync("sqlite3", [uri, "-noheader", sql], { stdio: ["ignore", "pipe", "ignore"] });
+
+// test-only hooks (probe counter/cache reset + a missing-sqlite3 simulation); the server never imports this
+export const __zcodeProbeForTests = {
+  count: () => zcodeProbeCount,
+  reset: () => { zcodeProbes.clear(); zcodeProbeCount = 0; },
+  withoutSqlite3Cli(fn) {
+    const prev = runSqlite3;
+    runSqlite3 = () => { throw new Error("spawn sqlite3 ENOENT"); };
+    try { fn(); } finally { runSqlite3 = prev; }
+  },
+};
+
+function zcodeHasSession(dbPath, dirs, useNodeSqlite) {
+  zcodeProbeCount++;
+  const DatabaseSync = useNodeSqlite === false ? null : zcodeNodeSqlite();
   if (DatabaseSync) {
     try {
       const db = new DatabaseSync(dbPath, { readOnly: true });
@@ -46,7 +69,7 @@ function zcodeHasSession(dbPath, dirs) {
     // file:…?mode=ro opens read-only (no -wal/-shm writes); ' doubled inside the SQL literal
     const uri = `file:${dbPath.replace(/[?#%]/g, (c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`)}?mode=ro`;
     return dirs.some((dir) =>
-      execFileSync("sqlite3", [uri, "-noheader", `SELECT 1 FROM session WHERE directory = '${dir.replace(/'/g, "''")}' LIMIT 1;`], { stdio: ["ignore", "pipe", "ignore"] }).length > 0);
+      runSqlite3(uri, `SELECT 1 FROM session WHERE directory = '${dir.replace(/'/g, "''")}' LIMIT 1;`).length > 0);
   } catch { return false; }
 }
 
@@ -58,17 +81,27 @@ const historyChecks = {
     let real = null; try { real = realDir(dir); } catch { /* unresolvable path: fall back to the lexical one */ }
     return (real !== null && hasChats(real)) || hasChats(dir);
   },
-  zcode: (dir, home, realDir) => {
+  zcode: (dir, home, realDir, opts) => {
     const db = join(home, ".zcode", "cli", "db", "db.sqlite");
-    if (!existsSync(db)) return false;
+    let mtimeMs; try { mtimeMs = statSync(db).mtimeMs; } catch { return false; } // no db → no cache to consult
     // `directory` stores the cwd as zcode saw it — real (/private/tmp) or lexical (/tmp): query both
     let real = null; try { real = realDir(dir); } catch { /* unresolvable path: fall back to the lexical one */ }
-    return zcodeHasSession(db, real === null || real === dir ? [dir] : [real, dir]);
+    const key = `${home}\0${real ?? dir}\0${dir}\0${opts?.useNodeSqlite === false ? 1 : 0}`;
+    const now = Date.now();
+    const cached = zcodeProbes.get(key);
+    if (cached && now - cached.at < ZCODE_PROBE_TTL_MS && cached.mtimeMs === mtimeMs) return cached.value;
+    const value = zcodeHasSession(db, real === null || real === dir ? [dir] : [real, dir], opts?.useNodeSqlite);
+    if (zcodeProbes.size >= 64) { // bound the cache across months of folder switches
+      for (const [k, v] of zcodeProbes) if (now - v.at >= ZCODE_PROBE_TTL_MS) zcodeProbes.delete(k);
+      if (zcodeProbes.size >= 64) zcodeProbes.clear();
+    }
+    zcodeProbes.set(key, { at: now, mtimeMs, value });
+    return value;
   },
 };
 
-export function hasResumableHistory(agentId, dir, { home = homedir(), realDir = realpathSync } = {}) {
+export function hasResumableHistory(agentId, dir, { home = homedir(), realDir = realpathSync, useNodeSqlite } = {}) {
   if (!Object.hasOwn(historyChecks, agentId)) return true;
-  try { return historyChecks[agentId](dir, home, realDir); }
+  try { return historyChecks[agentId](dir, home, realDir, { useNodeSqlite }); }
   catch { return false; }
 }

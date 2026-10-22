@@ -98,6 +98,23 @@ test("a re-titled main must match its child's bundle name, not merely own one", 
   assert.ok(running.has("grok")); // zsh spawned a bundle binary, not became its main
 });
 
+test("the bundle-name match stays case-sensitive (claude with a Claude.app child is a CLI, not the app)", () => {
+  // Measured with ps -axo pid=,ppid=,comm=: every re-titled main matches its bundle EXACTLY
+  // (ZCode↔ZCode.app, Cursor↔Cursor.app, even lowercase kitty↔kitty.app — title and .app name
+  // come from the same productName), so case never drifts on a real main. A case-only match is
+  // instead the CLI-spawns-app-binary shape (a `cursor` CLI launching Cursor.app internals),
+  // and excluding it would hide a live CLI session — so the comparison stays case-sensitive.
+  const running = buildRunningSet(rows([
+    [1, 0, "/sbin/launchd"],
+    [520, 1, "tmux"],
+    [521, 520, "/bin/zsh"],
+    [522, 521, "/Users/x/.local/bin/claude"],
+    [523, 522, "/Applications/Claude.app/Contents/MacOS/Claude"],
+  ]));
+  assert.ok(running.has("claude")); // the CLI did not become Claude.app's re-titled main
+  assert.ok(!running.has("Claude")); // the .app binary itself still stays out
+});
+
 test("ppid cycles and orphan parents resolve without hanging", () => {
   const running = buildRunningSet(rows([
     [1, 0, "/sbin/launchd"],
