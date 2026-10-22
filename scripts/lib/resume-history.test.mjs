@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decideResume, hasResumableHistory } from "./resume-history.mjs";
+import { decideResume, hasResumableHistory, __zcodeProbeForTests } from "./resume-history.mjs";
 
 for (const [reason, input] of [
   ["no-args", { resumeArgs: [], fresh: true, alreadyOpen: true, hasHistory: false }],
@@ -87,14 +87,67 @@ test("ZCode requires a session row for the real or lexical cwd", { skip: !sqlite
   // db present but no row → false
   assert.equal(hasResumableHistory("zcode", dir, { home }), false);
   rmSync(db);
+  __zcodeProbeForTests.reset(); // each re-seed must be seen, not served from the probe cache
   // row under the REAL cwd → true, also through a symlink pointing at it
   seed([real]);
   assert.equal(hasResumableHistory("zcode", dir, { home }), true);
   assert.equal(hasResumableHistory("zcode", alias, { home }), true);
   rmSync(db);
+  __zcodeProbeForTests.reset();
   // row under the LEXICAL cwd (the symlink path itself) → true too
   seed([alias]);
   assert.equal(hasResumableHistory("zcode", alias, { home }), true);
+});
+
+test("ZCode probe is cached per (home, dir) and re-queries when the db's mtime moves", { skip: !sqlite3Available && "sqlite3 CLI no disponible" }, (t) => {
+  const { home, dir, real } = fixture(t);
+  mkdirSync(join(home, ".zcode", "cli", "db"), { recursive: true });
+  const db = join(home, ".zcode", "cli", "db", "db.sqlite");
+  execFileSync("sqlite3", [db,
+    "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);",
+    `INSERT INTO session VALUES ('s0', '${real.replace(/'/g, "''")}');`,
+  ]);
+  __zcodeProbeForTests.reset();
+  assert.equal(hasResumableHistory("zcode", dir, { home }), true);
+  assert.equal(__zcodeProbeForTests.count(), 1);
+  // same (home, dir, mtime) within the TTL → served from the cache, no new query
+  assert.equal(hasResumableHistory("zcode", dir, { home }), true);
+  assert.equal(__zcodeProbeForTests.count(), 1);
+  // a new session rewrites the db → different mtime → queried again even inside the TTL
+  const st = statSync(db);
+  utimesSync(db, st.atime, new Date(st.mtimeMs + 2000));
+  assert.equal(hasResumableHistory("zcode", dir, { home }), true);
+  assert.equal(__zcodeProbeForTests.count(), 2);
+});
+
+test("ZCode falls back to the sqlite3 CLI when node:sqlite is skipped", { skip: !sqlite3Available && "sqlite3 CLI no disponible" }, (t) => {
+  const { home, dir, real } = fixture(t);
+  mkdirSync(join(home, ".zcode", "cli", "db"), { recursive: true });
+  const db = join(home, ".zcode", "cli", "db", "db.sqlite");
+  execFileSync("sqlite3", [db,
+    "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);",
+    `INSERT INTO session VALUES ('s0', '${real.replace(/'/g, "''")}');`,
+  ]);
+  __zcodeProbeForTests.reset();
+  // useNodeSqlite:false forces the CLI branch — the same one a Node without node:sqlite takes
+  assert.equal(hasResumableHistory("zcode", dir, { home, useNodeSqlite: false }), true);
+  assert.equal(hasResumableHistory("zcode", join(home, "nowhere"), { home, useNodeSqlite: false }), false);
+  assert.equal(__zcodeProbeForTests.count(), 2);
+});
+
+test("ZCode returns false without throwing when neither node:sqlite nor the sqlite3 CLI can answer", { skip: !sqlite3Available && "sqlite3 CLI no disponible" }, (t) => {
+  const { home, dir, real } = fixture(t);
+  mkdirSync(join(home, ".zcode", "cli", "db"), { recursive: true });
+  const db = join(home, ".zcode", "cli", "db", "db.sqlite");
+  execFileSync("sqlite3", [db,
+    "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);",
+    `INSERT INTO session VALUES ('s0', '${real.replace(/'/g, "''")}');`,
+  ]);
+  __zcodeProbeForTests.reset();
+  __zcodeProbeForTests.withoutSqlite3Cli(() => {
+    // the row exists (either reader would answer true), but no reader is reachable → false, no throw
+    assert.equal(hasResumableHistory("zcode", dir, { home, useNodeSqlite: false }), false);
+  });
 });
 
 test("agents without a history requirement always allow resume", (t) => {
