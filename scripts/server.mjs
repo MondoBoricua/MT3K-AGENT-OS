@@ -29,6 +29,7 @@ import { keyArgs } from "./lib/keys.mjs";
 import { missingHooks } from "./lib/tmux-hooks.mjs";
 import { decideResume, hasResumableHistory } from "./lib/resume-history.mjs";
 import { buildRunningSet } from "./lib/running-set.mjs";
+import { describeAgent, normalizeAgentDefs } from "./lib/adapters.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -204,6 +205,7 @@ const AGENT_DEFS = [
   // Its panes are matched by session-name prefix, not by process (every pane has a shell).
   { id: "shell", name: "Terminal", bins: [], paths: [], proc: [] },
 ];
+const NORMALIZED_AGENT_DEFS = normalizeAgentDefs(AGENT_DEFS);
 const base = (c) => (c || "").split("/").pop();
 const tildify = (p) => (p && p.startsWith(homedir()) ? "~" + p.slice(homedir().length) : p);
 const procMatches = (comm, proc) => comm.split("/").some((segment) => segment === proc || segment.startsWith(proc + "-"));
@@ -217,6 +219,7 @@ const realDir = (p) => { try { return realpathSync(p); } catch { return resolve(
 const absBin = (name) => { for (const d of PATH_DIRS) for (const e of BIN_EXTS) { if (d && existsSync(join(d, name + e))) return join(d, name + e); } return null; };
 // no tmux (Windows) → nothing is launchable-in-tmux; web-UI agents and Files still work
 const HAS_TMUX = !!absBin("tmux");
+const adapterEnv = () => ({ hasTmux: HAS_TMUX, platform: process.platform });
 
 let tmuxHooksVerified = false;
 let tmuxHooksPending = null;
@@ -341,14 +344,16 @@ async function detectAgents() {
   const panes = await discoverPanes(descendants);
   // web-UI agents (def.web = local port): a quick probe tells us whether their server is up
   const webUp = new Set();
-  await Promise.all(AGENT_DEFS.filter((a) => a.web).map(async (a) => {
+  await Promise.all(NORMALIZED_AGENT_DEFS.filter((a) => a.web).map(async (a) => {
     if (await webProbe(a)) webUp.add(a.id); // same probe as web-start: an auth-walled 401 still means "up"
   }));
-  const rows = AGENT_DEFS.map((a) => {
+  const env = adapterEnv();
+  const rows = NORMALIZED_AGENT_DEFS.map((a) => {
+    const adapterMeta = describeAgent(a, env);
     if (a.id === "shell") {
       const shellPanes = panes.filter((pn) => pn.label.startsWith("mt3k-shell-"))
         .map((pn) => ({ paneId: pn.paneId, label: pn.label, window: pn.window, cwd: pn.cwd }));
-      return { id: a.id, name: a.name, online: true, running: shellPanes.length > 0, launchable: HAS_TMUX, panes: shellPanes };
+      return { id: a.id, name: a.name, online: true, running: shellPanes.length > 0, launchable: HAS_TMUX, panes: shellPanes, ...adapterMeta };
     }
     const installed = a.bins.some(onPath) || a.paths.some((p) => existsSync(expand(p)));
     const proc = a.proc || [];
@@ -362,7 +367,7 @@ async function detectAgents() {
       : [];
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)
     const web = a.web && webUp.has(a.id) ? a.web : undefined;
-    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: HAS_TMUX && installed && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : a.web && installed && a.webCmd ? { webOff: true } : {}) };
+    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: HAS_TMUX && installed && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : a.web && installed && a.webCmd ? { webOff: true } : {}), ...adapterMeta };
   });
   await updateWaiting(rows.flatMap((r) => r.panes.map((p) => ({ ...p, agentName: r.name }))));
   for (const r of rows) {
