@@ -286,6 +286,8 @@ Graph a repo (`graphify .` inside it), then either:
 
 ## API
 
+Las operaciones responden **400** con `err` cuando el adaptador del agente no las soporta (`capabilities` en `GET /api/agents`). En hosts sin tmux, tras validar `paneId`, el gate devuelve 400 «no tmux» en lugar del 404 «ese pane ya no existe» (antes `list-panes` fallaba antes de comprobar el id).
+
 | Endpoint | What it does |
 |---|---|
 | `POST /api/query` | runs `graphify query` in a repo (traversal, $0) |

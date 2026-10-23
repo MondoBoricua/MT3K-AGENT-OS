@@ -5,6 +5,7 @@ import {
   capabilitiesFor,
   normalizeAgentDefs,
   describeAgent,
+  requireCapability,
   ADAPTER_PROTOCOL_VERSION,
 } from "./adapters.mjs";
 
@@ -37,6 +38,21 @@ test("capabilitiesFor cli-tmux con tmux: operaciones tmux true, resume true para
   assert.equal(c.launch.supported, true);
   assert.equal(c.resume.supported, true);
   assert.equal(c.discover.supported, true);
+});
+
+test("capabilitiesFor cli-tmux: resume true para codex (retoma solo)", () => {
+  const c = capabilitiesFor({ id: "codex", bins: ["codex"], proc: ["codex"] }, { hasTmux: true, platform: "darwin" });
+  assert.equal(c.resume.supported, true);
+});
+
+test("capabilitiesFor cli-tmux: resume true para antigravity (capacidad potencial cli-tmux)", () => {
+  const c = capabilitiesFor({ id: "antigravity", bins: ["agy"], proc: ["agy"] }, { hasTmux: true, platform: "darwin" });
+  assert.equal(c.resume.supported, true);
+});
+
+test("capabilitiesFor cli-tmux: resume true para agente cli-tmux desconocido", () => {
+  const c = capabilitiesFor({ id: "nuevo", bins: ["nuevo"], proc: ["nuevo"] }, { hasTmux: true, platform: "darwin" });
+  assert.equal(c.resume.supported, true);
 });
 
 test("capabilitiesFor cli-tmux sin tmux: launch/view/send/keys/resume/kill false", () => {
@@ -79,4 +95,21 @@ test("describeAgent forma del DTO", () => {
   assert.equal(d.adapterVersion, ADAPTER_PROTOCOL_VERSION);
   assert.equal(typeof d.capabilities, "object");
   assert.equal(d.capabilities.send.supported, true);
+});
+
+test("requireCapability: no tmux → 400 con reason", () => {
+  const gate = requireCapability(claude, { hasTmux: false, platform: "win32" }, "launch");
+  assert.equal(gate.ok, false);
+  assert.equal(gate.status, 400);
+  assert.equal(gate.err, "no tmux");
+});
+
+test("requireCapability: web-local send no soportado", () => {
+  const gate = requireCapability(deepseek, { hasTmux: true, platform: "darwin" }, "send");
+  assert.equal(gate.ok, false);
+  assert.equal(gate.err, "web-local UI");
+});
+
+test("requireCapability: ok cuando la op está soportada", () => {
+  assert.deepEqual(requireCapability(claude, { hasTmux: true, platform: "darwin" }, "send"), { ok: true });
 });

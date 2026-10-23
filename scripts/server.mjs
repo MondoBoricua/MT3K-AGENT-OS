@@ -24,12 +24,19 @@ import { join, dirname, extname, basename, resolve, isAbsolute, delimiter } from
 import { fileURLToPath } from "node:url";
 import { homedir, userInfo, networkInterfaces, loadavg, cpus, totalmem, freemem } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
-import { lastWebToken, sessionCookie } from "./lib/web-session.mjs";
+import { sessionCookie } from "./lib/web-session.mjs";
 import { keyArgs } from "./lib/keys.mjs";
 import { missingHooks } from "./lib/tmux-hooks.mjs";
 import { decideResume, hasResumableHistory } from "./lib/resume-history.mjs";
 import { buildRunningSet } from "./lib/running-set.mjs";
-import { describeAgent, normalizeAgentDefs } from "./lib/adapters.mjs";
+import { describeAgent, normalizeAgentDefs, requireCapability } from "./lib/adapters.mjs";
+import {
+  validatePaneId,
+  mt3kSessionName,
+  parseLaunchConfig,
+  composeTmuxArgv,
+} from "./lib/adapters/cli-tmux.mjs";
+import { pickWebStarter, webTokenFromLogText } from "./lib/adapters/web-local.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -220,6 +227,16 @@ const absBin = (name) => { for (const d of PATH_DIRS) for (const e of BIN_EXTS) 
 // no tmux (Windows) → nothing is launchable-in-tmux; web-UI agents and Files still work
 const HAS_TMUX = !!absBin("tmux");
 const adapterEnv = () => ({ hasTmux: HAS_TMUX, platform: process.platform });
+const SHELL_DEF = AGENT_DEFS.find((a) => a.id === "shell");
+/** Corta el handler si el adaptador no soporta la operación (respuesta uniforme 400 + err). */
+const denyUnlessCap = (res, def, op) => {
+  const gate = requireCapability(def, adapterEnv(), op);
+  if (!gate.ok) {
+    sendJSON(res, gate.status, { ok: false, err: gate.err });
+    return true;
+  }
+  return false;
+};
 
 let tmuxHooksVerified = false;
 let tmuxHooksPending = null;
@@ -506,7 +523,7 @@ async function resumeProbe(def, agentId, cwd) {
   let resumeArgs = [];
   try {
     const lc = agentId === "shell" ? null : readJSON(join(ROOT, "data", "launch.json"))[agentId];
-    resumeArgs = (Array.isArray(lc?.resumeArgs) ? lc.resumeArgs : []).filter((a) => typeof a === "string");
+    resumeArgs = parseLaunchConfig(lc).resumeArgs;
   } catch { /* no/invalid launch.json → no resume flags */ }
   if (!resumeArgs.length) return { resumeArgs, alreadyOpen: false, hasHistory: false };
   try {
@@ -620,7 +637,9 @@ async function api(req, res, path) {
   // live read of an agent's tmux pane — capture the rendered screen (with ANSI colors) for the terminal viewer
   if (path === "/api/pane") {
     const paneId = new URL(req.url, "http://x").searchParams.get("id") || "";
-    if (!/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
+    const paneCheck = validatePaneId(paneId);
+    if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
+    if (denyUnlessCap(res, SHELL_DEF, "view")) return;
     const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     // -e keeps colors, -p prints to stdout, -S -1000 ships real scrollback — 200 felt like
@@ -636,11 +655,12 @@ async function api(req, res, path) {
   // sessions default to 80 cols, wasting most of a desktop screen. Never touches a window
   // with a real client attached (kitty/ssh): that client owns the size.
   if (path === "/api/pane-resize" && req.method === "POST") {
-    if (!HAS_TMUX) return sendJSON(res, 400, { ok: false, err: "este host no tiene tmux" });
     const { paneId, cols, rows } = await body(req);
-    if (typeof paneId !== "string" || !/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
+    const paneCheck = validatePaneId(paneId);
+    if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     const c = Math.round(Number(cols)), r = Math.round(Number(rows));
     if (!(c >= 40 && c <= 400) || !(r >= 10 && r <= 200)) return sendJSON(res, 400, { ok: false, err: "tamaño inválido" });
+    if (denyUnlessCap(res, SHELL_DEF, "view")) return;
     const cur = await run("tmux", ["display-message", "-p", "-t", paneId, "#{pane_width} #{pane_height} #{window_width} #{window_height}"], ROOT, 4000);
     if (!cur.ok) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     const [paneW, paneH, winW, winH] = cur.out.trim().split(" ").map(Number);
@@ -662,9 +682,11 @@ async function api(req, res, path) {
   // send text to an agent's tmux pane (tmux-only, LAN-only). text is untrusted input → no shell, literal paste.
   if (path === "/api/send" && req.method === "POST") {
     const { paneId, text, enter = true } = await body(req);
-    if (typeof paneId !== "string" || !/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
+    const paneCheck = validatePaneId(paneId);
+    if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (typeof text !== "string" || !text.trim()) return sendJSON(res, 400, { ok: false, err: "texto vacío" });
     if (text.length > 64000) return sendJSON(res, 400, { ok: false, err: "texto demasiado largo (máx 64000)" }); // long pastes (docs, diffs) are legit — tmux buffers handle them fine
+    if (denyUnlessCap(res, SHELL_DEF, "send")) return;
     // confirm the pane still exists before sending
     const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
@@ -769,6 +791,7 @@ async function api(req, res, path) {
     const { agentId } = await body(req);
     const def = AGENT_DEFS.find((a) => a.id === agentId && a.web && a.webCmd);
     if (!def) return sendJSON(res, 400, { ok: false, err: "ese agente no tiene UI web arrancable" });
+    if (denyUnlessCap(res, def, "launch")) return;
     const r = await startWebTool(def);
     return sendJSON(res, r.ok ? 200 : 500, r);
   }
@@ -778,6 +801,7 @@ async function api(req, res, path) {
     const { agentId } = await body(req);
     const def = AGENT_DEFS.find((a) => a.id === agentId && a.web && a.webCmd);
     if (!def) return sendJSON(res, 400, { ok: false, err: "ese agente no tiene UI web arrancable" });
+    if (denyUnlessCap(res, def, "launch")) return;
     await stopWebTool(def); // best effort — if it wasn't running we just start it
     const r = await startWebTool(def);
     if (r.ok) logEvent(`web-restart · ${def.id}`);
@@ -808,6 +832,7 @@ async function api(req, res, path) {
     const { agentId } = await body(req);
     const def = AGENT_DEFS.find((a) => a.id === agentId && a.web && a.webCmd);
     if (!def) return sendJSON(res, 400, { ok: false, err: "ese agente no tiene UI web" });
+    if (denyUnlessCap(res, def, "kill")) return;
     const stopped = await stopWebTool(def);
     if (stopped) logEvent(`web-stop · ${def.id}`);
     return sendJSON(res, stopped ? 200 : 500, stopped ? { ok: true } : { ok: false, err: "no se pudo detener (¿estaba corriendo?)" });
@@ -942,9 +967,11 @@ async function api(req, res, path) {
   // allowlisted to tmux key names only → never raw shell, never arbitrary keystrokes
   if (path === "/api/key" && req.method === "POST") {
     const { paneId, key } = await body(req);
-    if (typeof paneId !== "string" || !/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
+    const paneCheck = validatePaneId(paneId);
+    if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     const args = keyArgs(key);
     if (!args) return sendJSON(res, 400, { ok: false, err: "tecla no permitida" });
+    if (denyUnlessCap(res, SHELL_DEF, "keys")) return;
     const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     const r = await run("tmux", ["send-keys", "-t", paneId, ...args], ROOT, 5000);
@@ -961,6 +988,7 @@ async function api(req, res, path) {
     if (!HAS_TMUX || !def || (!isShell && (!def.proc?.length || !def.bins.map(absBin).find(Boolean)))) {
       return sendJSON(res, 200, { ok: true, resumable: false, reason: "not-launchable" });
     }
+    if (!isShell && denyUnlessCap(res, def, "resume")) return;
     const target = await resolveLaunchCwd({ projectId: params.get("projectId"), cwd: params.get("cwd") });
     if (target.err) return sendJSON(res, 200, { ok: true, resumable: false, reason: "no-dir" });
     const probe = await resumeProbe(def, agentId, target.cwd);
@@ -976,6 +1004,7 @@ async function api(req, res, path) {
     const def = AGENT_DEFS.find((a) => a.id === agentId);
     const isShell = agentId === "shell";
     if (!def || (!isShell && !(def.proc && def.proc.length))) return sendJSON(res, 400, { ok: false, err: "agente no lanzable" });
+    if (denyUnlessCap(res, def, "launch")) return;
     const bin = isShell ? null : def.bins.map(absBin).find(Boolean);
     if (!isShell && !bin) return sendJSON(res, 400, { ok: false, err: `${def.name} no está instalado` });
     const target = await resolveLaunchCwd({ projectId, cwd: cwdIn });
@@ -988,8 +1017,7 @@ async function api(req, res, path) {
       try { mkdirSync(target.cwd, { recursive: true }); } catch { return sendJSON(res, 500, { ok: false, err: "no se pudo crear la carpeta" }); }
     }
     // readable session name: mt3k-claude-onvacation-x4f (target dir + short suffix for uniqueness)
-    const dirSlug = (basename(cwd) || "home").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 20) || "home";
-    const session = `mt3k-${agentId}-${dirSlug}-${Date.now().toString(36).slice(-3)}`;
+    const session = mt3kSessionName(agentId, basename(cwd) || "home");
     // optional host-local launch flags (data/launch.json, gitignored) — shell aliases don't apply
     // here because we spawn the raw binary, so per-host env/args live in data instead. resumeArgs
     // are appended only when this agent has no live pane in the same working directory.
@@ -1002,8 +1030,7 @@ async function api(req, res, path) {
     try {
       const lc = isShell ? null : readJSON(join(ROOT, "data", "launch.json"))[agentId];
       if (lc) {
-        const envPairs = Object.entries(lc.env || {}).filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === "string").map(([k, v]) => `${k}=${v}`);
-        const args = (Array.isArray(lc.args) ? lc.args : []).filter((a) => typeof a === "string");
+        const { envPairs, args } = parseLaunchConfig(lc);
         const reservationKey = `${agentId}\0${tildify(realDir(cwd))}`;
         if (!resumeLaunchReservations.has(reservationKey)) {
           resumeReservation = reservationKey;
@@ -1018,12 +1045,9 @@ async function api(req, res, path) {
           resumeReservation = null;
           ownsResumeReservation = false;
         }
-        if (decision.resume) {
-          args.push(...probe.resumeArgs);
-          resumed = true;
-        }
-        if (envPairs.length) cmd = ["/usr/bin/env", ...envPairs, bin, ...args];
-        else cmd = [bin, ...args];
+        const launchArgs = decision.resume ? [...args, ...probe.resumeArgs] : args;
+        if (decision.resume) resumed = true;
+        cmd = isShell ? [] : composeTmuxArgv({ bin, envPairs, args: launchArgs });
       }
     } catch {
       if (ownsResumeReservation) resumeLaunchReservations.delete(resumeReservation);
@@ -1031,9 +1055,7 @@ async function api(req, res, path) {
       ownsResumeReservation = false;
       // no/invalid launch.json → plain binary
     }
-    // tmux runs a ONE-word command through `$SHELL -c` (zsh reads ~/.zshenv, which may prepend
-    // /usr/local/bin and bury the PATH set below); 2+ words are exec'd directly → always 2+.
-    if (cmd.length === 1) cmd = ["/usr/bin/env", ...cmd];
+    if (!isShell && cmd.length === 1) cmd = composeTmuxArgv({ bin, envPairs: [], args: [] });
     // a tmux server first started from inside a Claude session carries CLAUDE_CODE_CHILD_SESSION —
     // any claude launched there thinks it's a subagent and stops saving transcripts. Scrub it.
     // PATH (see agentPath): tmux gives a new session the PATH of the CLIENT running `new-session`,
@@ -1081,7 +1103,9 @@ async function api(req, res, path) {
   // kill an agent's tmux pane (its dedicated session dies with its last pane)
   if (path === "/api/kill" && req.method === "POST") {
     const { paneId } = await body(req);
-    if (typeof paneId !== "string" || !/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
+    const paneCheck = validatePaneId(paneId);
+    if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
+    if (denyUnlessCap(res, SHELL_DEF, "kill")) return;
     const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     const r = await run("tmux", ["kill-pane", "-t", paneId], ROOT, 5000);
@@ -1096,7 +1120,9 @@ async function api(req, res, path) {
     const paneId = params.get("id") || "";
     // Opt-in diffs preserve full strings for old bundles and mixed-version federation.
     const lineDiffs = params.get("fmt") === "lines";
-    if (!/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
+    const paneCheck = validatePaneId(paneId);
+    if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
+    if (denyUnlessCap(res, SHELL_DEF, "view")) return;
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
     let last = null, lastAlt = null, idleTicks = 0, closed = false, busy = false;
     const tick = async () => {
@@ -1440,7 +1466,7 @@ const webProbe = (def) => fetch(`http://127.0.0.1:${def.web}/`, { redirect: "man
 
 function readWebToken(def) {
   if (!def.webLog) return null;
-  try { return lastWebToken(readFileSync(expand(def.webLog), "utf8")); } catch { return null; }
+  try { return webTokenFromLogText(readFileSync(expand(def.webLog), "utf8")); } catch { return null; }
 }
 
 async function exchangeWebSession(def) {
@@ -1487,11 +1513,13 @@ async function startWebTool(def) {
   if (await webProbe(def)) return { ok: true, already: true };
   const bin = absBin(def.webCmd[0]);
   if (!bin) return { ok: false, err: `${def.webCmd[0]} no está instalado en este host` };
+  const serviceUnitExists = !!(def.webService && existsSync(`/etc/systemd/system/${def.webService}.service`));
+  const starter = pickWebStarter(def, process.platform, serviceUnitExists);
   let started = false;
-  if (process.platform !== "win32" && def.webService && existsSync(`/etc/systemd/system/${def.webService}.service`)) {
+  if (starter === "systemd") {
     started = (await run("systemctl", ["start", def.webService], ROOT, 10000)).ok;
   }
-  if (!started && process.platform === "win32" && def.webTask) {
+  if (!started && starter === "task") {
     started = (await run("schtasks", ["/run", "/tn", def.webTask], ROOT, 10000)).ok;
   }
   if (!started) {
