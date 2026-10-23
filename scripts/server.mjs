@@ -621,7 +621,10 @@ async function api(req, res, path) {
     // -e keeps colors, -p prints to stdout, -S -1000 ships real scrollback — 200 felt like
     // "no history" on long agent sessions (keep on-screen line breaks → less reflow)
     const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-N", "-S", "-1000"], ROOT, 5000);
-    return sendJSON(res, 200, { ok: r.ok, content: r.out });
+    // alt-screen flag: full-screen TUIs (codex/zcode) have NO scrollback, so the viewer turns
+    // the scroll gesture into PageUp/PageDown keys instead of a dead scrollbar
+    const alt = (await run("tmux", ["display-message", "-p", "-t", paneId, "#{alternate_on}"], ROOT, 4000)).out.trim() === "1";
+    return sendJSON(res, 200, { ok: r.ok, content: r.out, alternate: alt });
   }
 
   // grow a detached tmux window so the CLI reflows to the viewer's width — panel-launched
@@ -1090,7 +1093,7 @@ async function api(req, res, path) {
     const lineDiffs = params.get("fmt") === "lines";
     if (!/^%\d+$/.test(paneId)) return sendJSON(res, 400, { ok: false, err: "paneId inválido" });
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
-    let last = null, closed = false, busy = false;
+    let last = null, lastAlt = null, idleTicks = 0, closed = false, busy = false;
     const tick = async () => {
       // Diffs are relative to `last`: a slow capture-pane must never overlap the next tick,
       // or an out-of-order frame would corrupt the client's line buffer until it reloads.
@@ -1101,13 +1104,24 @@ async function api(req, res, path) {
         if (closed) return;
         if (!r.ok) { res.write(`event: gone\ndata: {}\n\n`); return end(); }
         const lines = r.out.split("\n");
+        let from = 0;
+        while (last !== null && from < last.length && from < lines.length && last[from] === lines[from]) from++;
+        const sameFrame = last !== null && from === last.length && from === lines.length;
+        // alt-screen changes rarely (CLI enters/leaves its full-screen UI); notify as a NAMED
+        // event so old bundles (which only listen to unnamed data) ignore it untouched.
+        // The probe is a whole second tmux process — run it only when the frame changed,
+        // or at most every 10 ticks (~5 s) while the pane sits idle.
+        let alt = lastAlt;
+        if (!sameFrame || ++idleTicks >= 10) {
+          idleTicks = 0;
+          alt = (await run("tmux", ["display-message", "-p", "-t", paneId, "#{alternate_on}"], ROOT, 4000)).out.trim() === "1";
+          if (alt !== lastAlt) { lastAlt = alt; res.write(`event: alt\ndata: ${JSON.stringify({ alt })}\n\n`); }
+        }
+        if (sameFrame) return;
         if (last === null) {
           res.write(`data: ${JSON.stringify(r.out)}\n\n`);
         } else {
-          let from = 0;
-          while (from < last.length && from < lines.length && last[from] === lines[from]) from++;
-          if (from === last.length && from === lines.length) return;
-          res.write(`data: ${JSON.stringify(lineDiffs ? { from, lines: lines.slice(from) } : r.out)}\n\n`);
+          res.write(`data: ${JSON.stringify(lineDiffs ? { from, lines: lines.slice(from), alt } : r.out)}\n\n`);
         }
         last = lines;
       } finally {

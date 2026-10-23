@@ -114,8 +114,14 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   // live view while fullscreen: SSE first (server pushes only when the screen changes),
   // hold live updates while the user is selecting text in the terminal — every re-render
   // nukes the DOM selection, turning copy into a race against the poll. The latest frame
-  // waits in a ref and lands the moment the selection is gone.
+  // waits in a ref and lands the moment the selection is gone. A finger down (long-press
+  // selection on iOS/Android fires selectionchange late or never) holds frames too, with
+  // a 15 s cap so a stuck touch can't freeze the viewer forever.
   const heldTerm = useRef<string[] | null>(null);
+  const holdSince = useRef(0); // 0 = not holding; otherwise the ms timestamp the freeze started
+  const touchDown = useRef(false);
+  const wheelAt = useRef(0); // last wheel→key translation (alt-screen panes): throttles PageUp/Down spam
+  const HOLD_MAX_MS = 15000;
   const selectionInTerm = () => {
     const sel = document.getSelection();
     const el = termRef.current;
@@ -124,31 +130,56 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   const applyTerm = (event: PaneEvent) => {
     const content = applyPaneEvent(latestTerm.current, event);
     latestTerm.current = content;
-    if (selectionInTerm()) { heldTerm.current = content; return; }
+    if (selectionInTerm() || touchDown.current) {
+      if (holdSince.current === 0) holdSince.current = Date.now();
+      if (Date.now() - holdSince.current < HOLD_MAX_MS) { heldTerm.current = content; return; }
+    }
     heldTerm.current = null;
+    holdSince.current = 0;
     setTerm(content);
   };
+  // land whatever was held as soon as neither a selection nor a touch keeps the freeze on
+  const releaseHeld = () => {
+    if (heldTerm.current === null || selectionInTerm() || touchDown.current) return;
+    setTerm(heldTerm.current);
+    heldTerm.current = null;
+    holdSince.current = 0;
+  };
   useEffect(() => {
-    const onSel = () => {
-      if (heldTerm.current === null || selectionInTerm()) return;
-      setTerm(heldTerm.current);
-      heldTerm.current = null;
-    };
+    const onSel = () => releaseHeld();
     document.addEventListener("selectionchange", onSel);
     return () => document.removeEventListener("selectionchange", onSel);
   }, []);
+  const onTermTouchStart = () => { touchDown.current = true; };
+  const onTermTouchEnd = () => {
+    touchDown.current = false;
+    releaseHeld(); // long-press that never produced a selection: resume right away
+  };
 
   // falling back to 900ms polling if the stream errors (old server, proxy, etc.)
+  // `altPane`: the pane lives in tmux's alternate screen (codex/zcode TUIs) → no scrollback
+  // exists, so the viewer maps scroll to PageUp/PageDown keys instead (see onTermWheel).
+  const [altPane, setAltPane] = useState(false);
   useEffect(() => {
     latestTerm.current = [];
     heldTerm.current = null;
+    holdSince.current = 0;
+    touchDown.current = false; // a finger or gesture from the PREVIOUS pane must not leak in
+    wheelAt.current = 0;
     setTerm([]);
+    setAltPane(false);
     if (!paneToWatch || !fullscreen) return;
     let alive = true;
     let iv: ReturnType<typeof setInterval> | undefined;
     let es: EventSource | null = null;
     const poll = () => {
-      const pull = async () => { const r = await getPane(paneToWatch, host); if (alive && r?.ok) applyTerm(r.content ?? ""); };
+      const pull = async () => {
+        const r = await getPane(paneToWatch, host);
+        if (alive && r?.ok) {
+          applyTerm(r.content ?? "");
+          if (typeof r.alternate === "boolean") setAltPane(r.alternate);
+        }
+      };
       pull();
       iv = setInterval(pull, 900);
     };
@@ -156,12 +187,22 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
       const t = getToken(); // EventSource can't send headers → token rides the query string
       const hq = host ? `&host=${encodeURIComponent(host)}` : "";
       es = new EventSource(`/api/pane-stream?id=${encodeURIComponent(paneToWatch)}${hq}${t ? `&t=${encodeURIComponent(t)}` : ""}&fmt=lines`);
-      es.onmessage = (e) => { if (alive) applyTerm(JSON.parse(e.data) as PaneEvent); };
+      es.onmessage = (e) => {
+        if (!alive) return;
+        const ev = JSON.parse(e.data) as PaneEvent;
+        applyTerm(ev);
+        // diffs also carry `alt`: a proxy that drops NAMED events can't leave the alt state stale
+        const alt = (ev as { alt?: unknown }).alt;
+        if (typeof alt === "boolean") setAltPane(alt);
+      };
+      es.addEventListener("alt", (e) => { // named event: old servers never send it, old bundles ignore it
+        try { if (alive) setAltPane(JSON.parse((e as MessageEvent).data).alt === true); } catch { /* bad frame */ }
+      });
       es.onerror = () => { es?.close(); es = null; if (alive && !iv) poll(); };
     } catch {
       poll();
     }
-    return () => { alive = false; es?.close(); if (iv) clearInterval(iv); };
+    return () => { alive = false; es?.close(); if (iv) clearInterval(iv); touchDown.current = false; wheelAt.current = 0; };
   }, [paneToWatch, fullscreen, host]);
 
   // lock body scroll behind the fullscreen overlay
@@ -172,10 +213,11 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     return () => { document.body.style.overflow = prev; };
   }, [fullscreen]);
 
-  // keep the terminal scrolled to the latest output — but only if the user hasn't scrolled up to read
+  // keep the terminal scrolled to the latest output — but only if the user hasn't scrolled up to
+  // read, and never while they're selecting (a re-layout under an active selection is unreadable)
   useEffect(() => {
     const el = termRef.current;
-    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+    if (el && stickToBottom.current && !selectionInTerm() && !touchDown.current) el.scrollTop = el.scrollHeight;
   }, [term]);
 
   // desktop: scale the mono font so the pane's ~80 tmux columns fill the width instead of
@@ -204,7 +246,8 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     const el = termRef.current;
     if (!pane || !el || el.clientWidth < 900) return;
     const t = setTimeout(() => {
-      const cols = Math.min(400, Math.floor((el.clientWidth - 24) / (20 * 0.62)));
+      if (selectionInTerm() || touchDown.current) return; // resizing reflows rows → kills the selection
+      const cols = Math.min(400, Math.floor((el.clientWidth - 24) / (20 * 0.62))));
       const rows = Math.min(200, Math.max(24, Math.floor(el.clientHeight / (20 * 1.375))));
       void paneResize(pane, cols, rows, host);
     }, 600);
@@ -284,6 +327,45 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     if (!activePane) return;
     const r = await sendKey(activePane.paneId, k, host);
     if (!r?.ok) onToast?.(r?.err ? `error: ${r.err}` : "no se pudo enviar la tecla", false);
+  };
+
+  // alt-screen panes (codex/zcode TUIs) have no tmux scrollback: the wheel becomes
+  // PageUp/PageDown so the TUI scrolls ITS transcript. Measured (MEDICIONES.md A2): codex
+  // scrolls on those keys, zcode ignores every key → zcode gets a notice, not dead keys.
+  const altScrollKeys = altPane && agent?.id !== "zcode";
+  const onTermWheel = (e: React.WheelEvent) => {
+    if (!altScrollKeys) return; // (passive listener: no preventDefault — the pre has no overflow in alt mode anyway)
+    const now = Date.now();
+    if (now - wheelAt.current < 220) return; // one page per gesture, not per wheel notch
+    wheelAt.current = now;
+    void key(e.deltaY < 0 ? "PageUp" : "PageDown");
+  };
+
+  // one-tap "copy what I'm looking at" — selecting against a live feed can be unwinnable on a
+  // phone; this grabs the rendered plain text instead. execCommand ONLY counts as a copy
+  // gesture while the tap is still running: pick the path BEFORE any await, and after a
+  // rejected clipboard.writeText just report (execCommand there would run outside the gesture).
+  const copyScreen = () => {
+    const txt = termRef.current?.innerText ?? "";
+    if (!txt.trim()) { onToast?.("no hay nada que copiar", false); return; }
+    if (!window.isSecureContext || !navigator.clipboard?.writeText) {
+      // plain http on the LAN: synchronous textarea + execCommand fallback, still inside the tap
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = txt;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        ta.remove();
+        onToast?.(ok ? "pantalla copiada" : "no se pudo copiar — intenta seleccionar a mano", ok);
+      } catch { onToast?.("no se pudo copiar", false); }
+      return;
+    }
+    navigator.clipboard.writeText(txt)
+      .then(() => onToast?.("pantalla copiada", true))
+      .catch(() => onToast?.("no se pudo copiar — intenta seleccionar a mano", false));
   };
 
   // spin up a fresh tmux session for this agent, then jump straight into its terminal.
@@ -419,12 +501,28 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
 
         {/* sanitized HTML: ansiToHtml escapes all text; spans carry only numeric-derived colors */}
         <div className="relative flex min-h-0 flex-1 flex-col">
-          <pre ref={termRef} onScroll={onTermScroll} style={{ fontSize: termFont }}
+          <pre ref={termRef} onScroll={onTermScroll} onWheel={onTermWheel}
+            onTouchStart={onTermTouchStart} onTouchEnd={onTermTouchEnd} onTouchCancel={onTermTouchEnd}
+            style={{ fontSize: termFont }}
             className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono leading-none text-white/90">
             {term.length > 0 && !(term.length === 1 && term[0] === "")
               ? term.map((line, index) => <TerminalLine key={index} line={line} last={index === term.length - 1} />)
               : <span style={{ opacity: .4 }}>cargando terminal…</span>}
           </pre>
+          {/* alt-screen TUI: no scrollback exists — say so, and (where it works) page the TUI itself */}
+          {altPane && (
+            <div className="pointer-events-none absolute right-2 top-2 rounded-full border border-ink-line bg-ink-900/85 px-2 py-0.5 font-mono text-[9px] text-white/50 backdrop-blur">
+              {altScrollKeys ? "⇅ scroll = teclas del TUI" : "TUI sin scrollback"}
+            </div>
+          )}
+          {altScrollKeys && (
+            <div className="absolute right-2 top-1/2 flex -translate-y-1/2 flex-col gap-1.5">
+              <button onClick={() => key("PageUp")} title="página arriba (la mueve el TUI)"
+                className="rounded-lg border border-ink-line bg-ink-900/85 px-2 py-1.5 font-mono text-xs text-white/70 backdrop-blur transition hover:border-accent/50 hover:text-accent active:bg-accent/20">▲</button>
+              <button onClick={() => key("PageDown")} title="página abajo (la mueve el TUI)"
+                className="rounded-lg border border-ink-line bg-ink-900/85 px-2 py-1.5 font-mono text-xs text-white/70 backdrop-blur transition hover:border-accent/50 hover:text-accent active:bg-accent/20">▼</button>
+            </div>
+          )}
           {/* the live feed keeps growing while you read scrollback — one tap re-engages auto-scroll */}
           {scrolledUp && (
             <button onClick={jumpToBottom}
@@ -447,6 +545,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
             <button onClick={() => key("Tab")} title="Tab" className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-2 font-mono text-[10px] text-white/80 transition active:bg-accent/20 active:text-accent">tab</button>
             <button onClick={() => key("ShiftTab")} title="Shift+Tab: cambia el modo de permisos (yolo / plan / edit…)" className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-2 font-mono text-[10px] text-white/80 transition active:bg-accent/20 active:text-accent">⇧ modo</button>
             {agent?.id === "claude" && <button onClick={() => key("SendNow")} title="Enviar lo encolado ahora (Claude: ctrl+x ctrl+s / ctrl+enter)" className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-2 font-mono text-[10px] text-white/80 transition active:bg-accent/20 active:text-accent">⚡ ya</button>}
+            <button onClick={copyScreen} title="copiar el texto de la pantalla (salida de emergencia si la selección no coopera)" className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-2 font-mono text-[10px] text-white/80 transition active:bg-accent/20 active:text-accent">📋</button>
           </div>
           {/* quick prompts: one tap = sent (data/macros.json or defaults) */}
           {macros.length > 0 && (
