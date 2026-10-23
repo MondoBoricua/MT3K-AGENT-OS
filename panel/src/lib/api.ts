@@ -2,7 +2,16 @@ export interface SkillRow { name: string; slug: string; description: string }
 export interface LogEntry { date: string; content: string }
 export interface PaneRef { paneId: string; label: string; window: string; cwd: string; waiting?: boolean }
 export type PaneEvent = string | { from: number; lines: string[] };
-export interface AgentRow { id: string; name: string; online: boolean; running: boolean; launchable?: boolean; waiting?: boolean; host?: string; panes?: PaneRef[]; webPort?: number; webTls?: boolean; webOff?: boolean }
+export type AdapterCapability = { supported: boolean; reason?: string };
+export type AgentAdapterCapabilities = {
+  discover: AdapterCapability; status: AdapterCapability; launch: AdapterCapability; view: AdapterCapability;
+  send: AdapterCapability; keys: AdapterCapability; resume: AdapterCapability; kill: AdapterCapability;
+};
+export interface AgentRow {
+  id: string; name: string; online: boolean; running: boolean; launchable?: boolean; waiting?: boolean; host?: string;
+  panes?: PaneRef[]; webPort?: number; webTls?: boolean; webOff?: boolean;
+  adapter?: string; adapterVersion?: number; capabilities?: AgentAdapterCapabilities;
+}
 // unique key for an agent across federated hosts (same CLI can exist on several machines)
 export const agentKey = (a: Pick<AgentRow, "id" | "host">) => `${a.host ?? "local"}:${a.id}`;
 // tmux-touching endpoints ride ?host= so the server proxies them to the right federated panel
