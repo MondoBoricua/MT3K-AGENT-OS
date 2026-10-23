@@ -36,3 +36,10 @@ graphify-out/
 # host-specific deploy notes — keep local (contains homelab IPs/hosts)
 DEPLOY.md
 data/tls/
+
+# everything else under data/ is host-local too (briefs, research notes, backups, settings overlays)
+data/*
+!data/*.example.json
+!data/logs/
+data/logs/*
+!data/logs/.gitkeep
