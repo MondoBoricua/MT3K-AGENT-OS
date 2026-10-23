@@ -37,6 +37,7 @@ import {
   composeTmuxArgv,
 } from "./lib/adapters/cli-tmux.mjs";
 import { pickWebStarter, webTokenFromLogText } from "./lib/adapters/web-local.mjs";
+import { mergeLocalAgentDefs, readAgentsLocalFile } from "./lib/agents-local.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -212,7 +213,27 @@ const AGENT_DEFS = [
   // Its panes are matched by session-name prefix, not by process (every pane has a shell).
   { id: "shell", name: "Terminal", bins: [], paths: [], proc: [] },
 ];
-const NORMALIZED_AGENT_DEFS = normalizeAgentDefs(AGENT_DEFS);
+const AGENTS_LOCAL_FILE = join(ROOT, "data", "agents.local.json");
+const warnAgentsLocal = (msg) => console.warn(`[mt3k] ${msg}`);
+let agentsLocalMtime = null;
+let effectiveAgentDefs = AGENT_DEFS;
+let normalizedAgentDefs = normalizeAgentDefs(AGENT_DEFS);
+/** Relee agents.local.json si cambió el mtime (barato: solo stat). */
+function refreshAgentDefsFromLocal() {
+  let mtime = 0;
+  try {
+    if (!existsSync(AGENTS_LOCAL_FILE)) mtime = -1;
+    else mtime = statSync(AGENTS_LOCAL_FILE).mtimeMs;
+  } catch {
+    mtime = -1;
+  }
+  if (mtime === agentsLocalMtime) return;
+  agentsLocalMtime = mtime;
+  const local = mtime >= 0 ? readAgentsLocalFile(AGENTS_LOCAL_FILE, warnAgentsLocal) : [];
+  effectiveAgentDefs = mergeLocalAgentDefs(AGENT_DEFS, local, warnAgentsLocal);
+  normalizedAgentDefs = normalizeAgentDefs(effectiveAgentDefs);
+}
+refreshAgentDefsFromLocal();
 const base = (c) => (c || "").split("/").pop();
 const tildify = (p) => (p && p.startsWith(homedir()) ? "~" + p.slice(homedir().length) : p);
 const procMatches = (comm, proc) => comm.split("/").some((segment) => segment === proc || segment.startsWith(proc + "-"));
@@ -357,16 +378,32 @@ async function discoverPanes(descendants) {
 }
 
 async function detectAgents() {
+  refreshAgentDefsFromLocal();
   const { running, descendants } = await procTree();
   const panes = await discoverPanes(descendants);
   // web-UI agents (def.web = local port): a quick probe tells us whether their server is up
   const webUp = new Set();
-  await Promise.all(NORMALIZED_AGENT_DEFS.filter((a) => a.web).map(async (a) => {
+  await Promise.all(normalizedAgentDefs.filter((a) => a.web).map(async (a) => {
     if (await webProbe(a)) webUp.add(a.id); // same probe as web-start: an auth-walled 401 still means "up"
   }));
   const env = adapterEnv();
-  const rows = NORMALIZED_AGENT_DEFS.map((a) => {
+  const rows = normalizedAgentDefs.map((a) => {
     const adapterMeta = describeAgent(a, env);
+    // Agente SaaS/enlace: configurado en agents.local.json — el panel solo enlaza, sin fetch ni tmux
+    if (a.adapter === "web-external") {
+      const row = {
+        id: a.id,
+        name: a.name,
+        online: true,
+        running: false,
+        launchable: false,
+        panes: [],
+        url: a.url,
+        ...adapterMeta,
+      };
+      if (a.logo) row.logo = a.logo;
+      return row;
+    }
     if (a.id === "shell") {
       const shellPanes = panes.filter((pn) => pn.label.startsWith("mt3k-shell-"))
         .map((pn) => ({ paneId: pn.paneId, label: pn.label, window: pn.window, cwd: pn.cwd }));

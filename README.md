@@ -284,6 +284,27 @@ Graph a repo (`graphify .` inside it), then either:
 - Click **＋ Add a project** in the panel — it auto-discovers graphed repos under `~/Developer`, or
 - Add it to `data/projects.json` and run `node scripts/build-data.mjs`.
 
+### Web agents by config
+
+Copy `data/agents.local.example.json` to `data/agents.local.json` (gitignored) and add entries with
+`adapter: "web-external"` and an `https://` URL. The server merges them into `GET /api/agents` at
+startup and when the file changes; it never fetches those URLs. The panel only links out (`target=_blank`)
+and does not control activity or auth on the external site.
+
+```json
+{
+  "agents": [
+    {
+      "id": "muse",
+      "name": "Muse",
+      "adapter": "web-external",
+      "url": "https://muse.ai",
+      "logo": "muse"
+    }
+  ]
+}
+```
+
 ## API
 
 Las operaciones responden **400** con `err` cuando el adaptador del agente no las soporta (`capabilities` en `GET /api/agents`). En hosts sin tmux, tras validar `paneId`, el gate devuelve 400 «no tmux» en lugar del 404 «ese pane ya no existe» (antes `list-panes` fallaba antes de comprobar el id).

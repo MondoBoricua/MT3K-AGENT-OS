@@ -9,7 +9,7 @@ export type AgentAdapterCapabilities = {
 };
 export interface AgentRow {
   id: string; name: string; online: boolean; running: boolean; launchable?: boolean; waiting?: boolean; host?: string;
-  panes?: PaneRef[]; webPort?: number; webTls?: boolean; webOff?: boolean;
+  panes?: PaneRef[]; webPort?: number; webTls?: boolean; webOff?: boolean; url?: string; logo?: string;
   adapter?: string; adapterVersion?: number; capabilities?: AgentAdapterCapabilities;
 }
 // unique key for an agent across federated hosts (same CLI can exist on several machines)

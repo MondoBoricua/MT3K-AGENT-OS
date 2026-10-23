@@ -8,6 +8,12 @@ const LAPTOP = "/sprites/laptop.png"; // coding-on-laptop strip (6 good frames)
 const CODE_COLORS = ["#34d399", "#e6edf3", "#fb923c", "#60a5fa"];
 const CODE_W = [82, 56, 70, 44];
 
+/** Si el evento viene de un enlace o botón dentro de la tarjeta, no abrir la ficha del agente */
+function eventFromCardControl(e: { target: EventTarget | null }) {
+  const el = e.target instanceof HTMLElement ? e.target : null;
+  return el?.closest("a, button") != null;
+}
+
 type Props = { agents: AgentRow[]; onOpen: (a: AgentRow) => void; onToast?: (text: string, live: boolean) => void; focusPath?: string };
 
 export default function AgentsView({ agents, onOpen, onToast, focusPath }: Props) {
@@ -70,7 +76,7 @@ export default function AgentsView({ agents, onOpen, onToast, focusPath }: Props
               <button key={`${agentKey(a)}-${p.paneId}`} onClick={() => onOpen(a)}
                 className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] transition ${
                   p.waiting ? "border-amber-400/40 bg-amber-400/10 text-amber-200 hover:bg-amber-400/20" : "border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20"}`}>
-                <AgentLogo id={a.id} online className="h-3 w-3" />
+                <AgentLogo id={a.id} logo={a.logo} online className="h-3 w-3" />
                 {a.host && <span className="text-sky-300">{a.host}·</span>}
                 <span className="max-w-[160px] truncate">{p.cwd}</span>
                 {p.waiting && <span>⏳</span>}
@@ -107,13 +113,26 @@ export default function AgentsView({ agents, onOpen, onToast, focusPath }: Props
               const hue = (i * 53) % 360;
               const offline = !a.online;
               const sendable = (a.panes?.length ?? 0) > 0;
-              const openable = sendable || !!a.launchable || !!a.webPort || !!a.webOff; // launchable → spawn; webPort → open its web UI; webOff → the sheet offers to start it
+              const caps = a.capabilities;
+              // Con capacidades (servidor nuevo): acciones por contrato; sin ellas → lógica legada
+              const openable = caps
+                ? sendable
+                  || (caps.launch?.supported && !!a.launchable)
+                  || !!a.webPort
+                  || !!a.webOff
+                  || (caps.view?.supported && !!a.url && !sendable)
+                : sendable || !!a.launchable || !!a.webPort || !!a.webOff;
+              const externalLink = caps?.view?.supported && a.url && !sendable;
+              const showLaunchHint = caps ? caps.launch?.supported && !!a.launchable : !!a.launchable;
               return (
                 <div key={agentKey(a)}
-                  onClick={() => openable && onOpen(a)}
+                  onClick={(e) => { if (eventFromCardControl(e)) return; openable && onOpen(a); }}
                   role={openable ? "button" : undefined}
                   tabIndex={openable ? 0 : undefined}
-                  onKeyDown={openable ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(a); } } : undefined}
+                  onKeyDown={openable ? (e) => {
+                    if (eventFromCardControl(e)) return;
+                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(a); }
+                  } : undefined}
                   className={`station flex shrink-0 snap-center flex-col items-center rounded-xl outline-none transition ${openable ? "cursor-pointer hover:bg-white/[0.03] focus-visible:ring-2 focus-visible:ring-accent/60" : ""}`}>
                   {/* monitor */}
                   <div className={`monitor ${a.running ? "live" : ""}`}>
@@ -143,20 +162,34 @@ export default function AgentsView({ agents, onOpen, onToast, focusPath }: Props
                   {/* nameplate */}
                   <div className="mt-2 rounded-lg border border-ink-line bg-ink-850/70 px-2.5 py-1 text-center backdrop-blur">
                     <div className="flex items-center justify-center gap-1.5">
-                      <AgentLogo id={a.id} online={a.online} className="h-3.5 w-3.5" />
+                      <AgentLogo id={a.id} logo={a.logo} online={a.online} className="h-3.5 w-3.5" />
                       <span className="font-mono text-[11px] font-semibold leading-tight">{a.name}</span>
                       {a.host && <span className="rounded border border-sky-400/30 bg-sky-400/10 px-1 font-mono text-[8px] text-sky-300">{a.host}</span>}
                     </div>
                     <div className={`font-mono text-[9px] uppercase tracking-wider ${a.waiting ? "text-amber-300" : a.running ? "text-emerald-300" : a.online ? "text-white/45" : "text-white/25"}`}>
                       {a.waiting ? "⏳ esperando input" : a.running ? (sendable ? "● codeando" : "● fuera de tmux") : a.online ? "○ listo" : "offline"}
                     </div>
+                    {externalLink && (
+                      <div className="mt-0.5 font-mono text-[8px] normal-case tracking-normal text-white/30">estado no verificado</div>
+                    )}
                   </div>
-                  {/* action hint: live session → write, launchable-only → spawn */}
+                  {/* action hint: live session → write, launchable-only → spawn, web-external → enlace */}
                   {sendable ? (
                     <div className="mt-1 rounded-full border border-accent/40 bg-accent/15 px-2 py-0.5 font-mono text-[9px] text-accent">
                       ✎ escribir{(a.panes?.length ?? 0) > 1 ? ` · ${a.panes!.length}` : ""}
                     </div>
-                  ) : a.launchable ? (
+                  ) : externalLink ? (
+                    <a
+                      href={a.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => e.stopPropagation()}
+                      className="mt-1 rounded-full border border-accent/40 bg-accent/15 px-2 py-0.5 font-mono text-[9px] text-accent transition hover:bg-accent/25"
+                    >
+                      Abrir {a.name} ↗
+                    </a>
+                  ) : showLaunchHint ? (
                     <div className="mt-1 rounded-full border border-accent/40 bg-accent/15 px-2 py-0.5 font-mono text-[9px] text-accent">
                       ▶ abrir
                     </div>
