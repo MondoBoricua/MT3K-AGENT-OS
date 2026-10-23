@@ -1,0 +1,11 @@
+{
+  "agents": [
+    {
+      "id": "muse",
+      "name": "Muse",
+      "adapter": "web-external",
+      "url": "https://muse.ai",
+      "logo": "muse"
+    }
+  ]
+}
