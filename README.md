@@ -297,8 +297,8 @@ Graph a repo (`graphify .` inside it), then either:
 | `GET /api/fs/list\|read\|raw?path=` · `POST /api/fs/write\|upload\|move\|delete` | file browser / manager (`?host=` proxies to a federated host) |
 | `POST /api/send` | types text into an agent's tmux pane (`{ paneId, text, enter? }`) — LAN-only, used by Agents View |
 | `POST /api/key` | sends a single allowlisted key to a pane (`{ paneId, key }`: `Up`/`Down`/`Enter`/`Escape`/`Tab`/`ShiftTab`…) for navigating TUI menus / cycling permission modes (yolo · plan · edit) |
-| `GET /api/pane?id=%N` | live capture of an agent's tmux pane (rendered screen + ANSI colors) for the terminal viewer |
-| `GET /api/pane-stream?id=%N` | SSE stream of the same screen — pushed only when it changes (viewer falls back to polling) |
+| `GET /api/pane?id=%N` | live capture of an agent's tmux pane (rendered screen + ANSI colors) for the terminal viewer — also returns `alternate: true` when the pane is a full-screen TUI with no scrollback (the viewer maps scroll to `PageUp`/`PageDown` keys) |
+| `GET /api/pane-stream?id=%N` | SSE stream of the same screen — pushed only when it changes (viewer falls back to polling); diffs carry `alt`, and an `event: alt` notification fires whenever the pane enters/leaves the alternate screen |
 | `POST /api/kill` | kills a tmux pane/session (`{ paneId }`) |
 | `POST /api/broadcast` | `{ text }` → pasted into every live agent pane, here and on federated hosts |
 | `GET /api/macros` | quick prompts for the compose bar (`data/macros.json` or defaults) |

@@ -39,7 +39,7 @@ export const getAgents = () => jget<{ agents: AgentRow[] }>("/api/agents");
 export const getLogs = () => jget<{ logs: LogEntry[] }>("/api/logs");
 export const askQuery = (projectId: string, q: string) => jpost<{ ok: boolean; answer: string }>("/api/query", { projectId, q });
 export const sendToPane = (paneId: string, text: string, enter = true, host?: string) => jpost<{ ok: boolean; paneId?: string; err?: string }>(`/api/send${hostQ(host)}`, { paneId, text, enter });
-export const getPane = (paneId: string, host?: string) => jget<{ ok: boolean; content: string }>(`/api/pane?id=${encodeURIComponent(paneId)}${host ? `&host=${encodeURIComponent(host)}` : ""}`);
+export const getPane = (paneId: string, host?: string) => jget<{ ok: boolean; content: string; alternate?: boolean }>(`/api/pane?id=${encodeURIComponent(paneId)}${host ? `&host=${encodeURIComponent(host)}` : ""}`);
 export const sendKey = (paneId: string, key: string, host?: string) => jpost<{ ok: boolean; paneId?: string; key?: string; err?: string }>(`/api/key${hostQ(host)}`, { paneId, key });
 export const killPane = (paneId: string, host?: string) => jpost<{ ok: boolean; err?: string }>(`/api/kill${hostQ(host)}`, { paneId });
 export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: string; create?: boolean; firstPrompt?: string; host?: string; fresh?: boolean }) => {
