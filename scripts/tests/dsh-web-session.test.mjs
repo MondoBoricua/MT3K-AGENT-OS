@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { lastWebToken, sessionCookie } from "../lib/web-session.mjs";
+import { webTokenFromLogText } from "../lib/adapters/web-local.mjs";
 
 test("parses a token from a startup log line", () => {
   const token = "aB_9-".repeat(9);
@@ -67,7 +68,7 @@ test("proxy renews sessions, preserves other cookies and never replays a streame
   });
   upstream.listen(0, "127.0.0.1"); await once(upstream, "listening");
   const def = { id: "test", name: "Test", web: upstream.address().port, webProxy: 1, webLog: file };
-  const context = vm.createContext({ ...fs, lastWebToken, sessionCookie, fetch, AbortSignal, URL, Buffer,
+  const context = vm.createContext({ ...fs, lastWebToken, webTokenFromLogText, sessionCookie, fetch, AbortSignal, URL, Buffer,
     setTimeout, clearTimeout, httpRequest, netConnect, process: { env: {} }, console: { log() {} },
     TOKEN: null, AGENT_DEFS: [def], def, expand: (p) => p, authorized: () => true, logEvent() {},
     createServer(handler) {

@@ -5,10 +5,6 @@
 
 export const ADAPTER_PROTOCOL_VERSION = 1;
 
-// Agentes con comprobador explícito en resume-history.mjs (historyChecks).
-// El resto de CLI en tmux se consideran “retoman solos” (hasResumableHistory devuelve true sin probe).
-const RESUME_HISTORY_AGENT_IDS = new Set(["claude", "grok", "cursor", "zcode"]);
-
 /** @typedef {{ supported: boolean, reason?: string }} Capability */
 /** @typedef {{ discover: Capability, status: Capability, launch: Capability, view: Capability, send: Capability, keys: Capability, resume: Capability, kill: Capability }} Capabilities */
 
@@ -31,13 +27,20 @@ export function inferAdapter(def) {
 }
 
 /**
- * Regla resume (cli-tmux): supported=true si el id está en historyChecks (claude, grok, cursor, zcode)
- * o si no está en ese mapa (codex, opencode, … retoman solos — ver hasResumableHistory en resume-history.mjs:104).
- * La comprobación por cwd sigue en el servidor; aquí solo declaramos capacidad del adaptador.
- * @param {string} agentId
+ * Comprueba una operación antes de ejecutarla en el servidor.
+ * @param {Record<string, unknown>|undefined|null} def — fila de AGENT_DEFS (o undefined si agente desconocido)
+ * @param {{ hasTmux: boolean, platform: string }} env
+ * @param {"discover"|"status"|"launch"|"view"|"send"|"keys"|"resume"|"kill"} op
+ * @returns {{ ok: true } | { ok: false, status: 400, err: string }}
  */
-function cliTmuxResumeCapability(agentId) {
-  return RESUME_HISTORY_AGENT_IDS.has(agentId) || !RESUME_HISTORY_AGENT_IDS.has(agentId);
+export function requireCapability(def, env, op) {
+  if (!def) return { ok: false, status: 400, err: "agente no lanzable" };
+  const caps = capabilitiesFor(def, env);
+  const c = caps[op];
+  if (!c?.supported) {
+    return { ok: false, status: 400, err: c?.reason || "operación no soportada" };
+  }
+  return { ok: true };
 }
 
 /**
@@ -103,7 +106,8 @@ export function capabilitiesFor(def, env) {
       kill: noTmux,
     };
   }
-  const resumeOk = cliTmuxResumeCapability(def.id);
+  // resume (cli-tmux + tmux): capacidad potencial para cualquier agente CLI en tmux;
+  // la disponibilidad real por cwd/pane la decide decideResume() en cada llamada.
   return {
     discover: cap(true),
     status: cap(true),
@@ -111,7 +115,7 @@ export function capabilitiesFor(def, env) {
     view: cap(true),
     send: cap(true),
     keys: cap(true),
-    resume: cap(resumeOk),
+    resume: cap(true),
     kill: cap(true),
   };
 }
