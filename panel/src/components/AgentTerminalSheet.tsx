@@ -247,7 +247,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     if (!pane || !el || el.clientWidth < 900) return;
     const t = setTimeout(() => {
       if (selectionInTerm() || touchDown.current) return; // resizing reflows rows → kills the selection
-      const cols = Math.min(400, Math.floor((el.clientWidth - 24) / (20 * 0.62))));
+      const cols = Math.min(400, Math.floor((el.clientWidth - 24) / (20 * 0.62)));
       const rows = Math.min(200, Math.max(24, Math.floor(el.clientHeight / (20 * 1.375))));
       void paneResize(pane, cols, rows, host);
     }, 600);
