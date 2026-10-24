@@ -146,6 +146,7 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
   Its sessions are the ones named `mt3k-shell-*`.
 
 All tmux control is **LAN-only** and goes through `tmux` directly (no shell) — see the API table.
+Each `/api/launch` scrubs agent-contaminating variables (`NO_COLOR`, `CODEX_*`, etc.) from tmux's global environment and sets `COLORTERM=truecolor` on the new session.
 
 Windows enlarged by the panel follow the terminal size again when a client attaches or changes sessions, using appended tmux hooks that preserve existing user hooks.
 

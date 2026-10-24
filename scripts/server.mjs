@@ -35,6 +35,9 @@ import {
   mt3kSessionName,
   parseLaunchConfig,
   composeTmuxArgv,
+  parseTmuxGlobalEnv,
+  tmuxGlobalKeysToUnset,
+  needsGlobalColortermTruecolor,
 } from "./lib/adapters/cli-tmux.mjs";
 import { pickWebStarter, webTokenFromLogText } from "./lib/adapters/web-local.mjs";
 import { mergeLocalAgentDefs, readAgentsLocalFile } from "./lib/agents-local.mjs";
@@ -1093,8 +1096,7 @@ async function api(req, res, path) {
       // no/invalid launch.json → plain binary
     }
     if (!isShell && cmd.length === 1) cmd = composeTmuxArgv({ bin, envPairs: [], args: [] });
-    // a tmux server first started from inside a Claude session carries CLAUDE_CODE_CHILD_SESSION —
-    // any claude launched there thinks it's a subagent and stops saving transcripts. Scrub it.
+    // Un servidor tmux nacido en Codex/Claude/Cursor arrastra su env al global; aquí lo limpiamos en cada launch.
     // PATH (see agentPath): tmux gives a new session the PATH of the CLIENT running `new-session`,
     // so running tmux with tmuxEnv is what sets it (and a server born right here starts with a
     // clean global env too). -e also stores it in the session env for windows opened later in it,
@@ -1102,13 +1104,19 @@ async function api(req, res, path) {
     let r;
     try {
       const tmuxEnv = { PATH: await agentPath() };
-      await run("tmux", ["set-environment", "-gr", "CLAUDE_CODE_CHILD_SESSION"], ROOT, 3000, tmuxEnv);
+      const globalEnv = parseTmuxGlobalEnv((await run("tmux", ["show-environment", "-g"], ROOT, 3000, tmuxEnv)).out);
+      for (const key of tmuxGlobalKeysToUnset(globalEnv)) {
+        await run("tmux", ["set-environment", "-gr", key], ROOT, 3000, tmuxEnv);
+      }
+      if (needsGlobalColortermTruecolor(globalEnv)) {
+        await run("tmux", ["set-environment", "-g", "COLORTERM", "truecolor"], ROOT, 3000, tmuxEnv);
+      }
       // global = the user's PATH + whatever the running server already had (e.g. kitty's own dir
       // for windows opened from kitty), cleaned — never narrower than before
       const curGlobal = (await run("tmux", ["show-environment", "-g", "PATH"], ROOT, 3000, tmuxEnv)).out.replace(/^PATH=/, "");
       await run("tmux", ["set-environment", "-g", "PATH", cleanPath([...tmuxEnv.PATH.split(delimiter), ...(curGlobal ? curGlobal.split(delimiter) : [])])], ROOT, 3000, tmuxEnv);
-      // -d detached · -e PATH · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
-      r = await run("tmux", ["new-session", "-d", "-e", `PATH=${tmuxEnv.PATH}`, "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000, tmuxEnv);
+      // -d detached · -e PATH + COLORTERM · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
+      r = await run("tmux", ["new-session", "-d", "-e", `PATH=${tmuxEnv.PATH}`, "-e", "COLORTERM=truecolor", "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000, tmuxEnv);
       if (r.ok) await ensureTmuxHooks(true);
     } finally {
       // tmux returns before the agent process shows up in the process tree, so a quick second
