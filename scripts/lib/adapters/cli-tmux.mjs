@@ -68,3 +68,41 @@ export function composeTmuxArgv({ bin, envPairs = [], args = [] }) {
   if (cmd.length === 1) cmd = ["/usr/bin/env", ...cmd];
   return cmd;
 }
+
+// tmux hereda el env del proceso que levantó el servidor; Codex/Cursor dejan basura en el global.
+const TMUX_GLOBAL_SCRUB_EXACT = new Set([
+  "CLAUDE_CODE_CHILD_SESSION",
+  "NO_COLOR",
+  "CODEX_CI",
+  "CODEX_SHELL",
+  "CODEX_SESSION_ID",
+  "CODEX_THREAD_ID",
+]);
+const TMUX_GLOBAL_SCRUB_PREFIXES = ["CODEX_", "CURSOR_", "ZCODE_"];
+
+/** Parsea `tmux show-environment -g` (solo vars con valor; ignora líneas `-VAR` ya unset). */
+export function parseTmuxGlobalEnv(text) {
+  const out = new Map();
+  for (const line of String(text || "").split("\n")) {
+    if (!line || (line.startsWith("-") && !line.includes("="))) continue;
+    const eq = line.indexOf("=");
+    if (eq < 1) continue;
+    out.set(line.slice(0, eq), line.slice(eq + 1));
+  }
+  return out;
+}
+
+/** Claves a quitar del global antes de cada `new-session` del panel. */
+export function tmuxGlobalKeysToUnset(globalEnv) {
+  const keys = new Set(TMUX_GLOBAL_SCRUB_EXACT);
+  for (const name of globalEnv.keys()) {
+    if (TMUX_GLOBAL_SCRUB_PREFIXES.some((p) => name.startsWith(p))) keys.add(name);
+  }
+  return [...keys].sort();
+}
+
+/** Si COLORTERM falta o está vacío en el global, el launch lo fija a truecolor. */
+export function needsGlobalColortermTruecolor(globalEnv) {
+  const v = globalEnv.get("COLORTERM");
+  return v === undefined || v === "";
+}
