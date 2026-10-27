@@ -28,6 +28,7 @@ import { sessionCookie } from "./lib/web-session.mjs";
 import { keyArgs } from "./lib/keys.mjs";
 import { missingHooks } from "./lib/tmux-hooks.mjs";
 import { decideResume, hasResumableHistory } from "./lib/resume-history.mjs";
+import { createPasteToPane } from "./lib/tmux-paste.mjs";
 import { buildRunningSet } from "./lib/running-set.mjs";
 import { describeAgent, normalizeAgentDefs, requireCapability } from "./lib/adapters.mjs";
 import {
@@ -435,20 +436,7 @@ async function detectAgents() {
 }
 
 // paste text into a pane via set-buffer/paste-buffer — safe for arbitrary text (no key interpretation)
-async function pasteToPane(paneId, text, enter) {
-  const buf = "mt3k_send";
-  const set = await run("tmux", ["set-buffer", "-b", buf, "--", text], ROOT, 5000);
-  if (!set.ok) return { ok: false, err: set.err || "set-buffer falló" };
-  const paste = await run("tmux", ["paste-buffer", "-d", "-p", "-b", buf, "-t", paneId], ROOT, 5000);
-  if (!paste.ok) return { ok: false, err: paste.err || "paste-buffer falló" };
-  if (enter) {
-    // agent TUIs debounce input right after a bracketed paste — an instant Enter gets
-    // swallowed and the user had to tap ↵ manually. A short pause lets it land.
-    await new Promise((r) => setTimeout(r, 300));
-    await run("tmux", ["send-keys", "-t", paneId, "Enter"], ROOT, 5000);
-  }
-  return { ok: true };
-}
+const pasteToPane = createPasteToPane({ run, cwd: ROOT });
 
 // --- federation: hosts this panel aggregates (data/hosts.json, host-local, NEVER automatic) ---
 // every federation consumer (agents, proxy, broadcast) sees only ENABLED hosts — a disabled
