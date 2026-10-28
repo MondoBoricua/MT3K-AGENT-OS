@@ -76,6 +76,8 @@ export async function runAltWheelDrain(
       const wait = Math.max(0, 40 - (now - session.lastSendAt));
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       if (!isAlive() || session.generation !== gen) break;
+      // Tras la espera, el acumulador pudo cancelarse — no mandar tecla con delta neto bajo umbral.
+      if (session.gestureKeysLeft <= 0 || Math.abs(session.remainder) < lineHeightPx) break;
       const up = session.remainder < 0;
       await sendKey(up ? "WheelUp" : "WheelDown");
       session.remainder += up ? lineHeightPx : -lineHeightPx;
