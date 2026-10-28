@@ -12,6 +12,11 @@ test("existing allowed keys remain single arguments", () => {
   }
 });
 
+test("WheelUp/WheelDown emit SGR mouse wheel literals for tmux send-keys -l", () => {
+  assert.deepEqual(keyArgs("WheelUp"), ["-l", "\x1b[<64;1;1M"]);
+  assert.deepEqual(keyArgs("WheelDown"), ["-l", "\x1b[<65;1;1M"]);
+});
+
 test("rejects arbitrary keys and non-string input", () => {
   for (const key of ["C-s", "C-x", "C-x C-s", "sendnow", "SendNow ", "", "-l", "__proto__", "constructor", null, undefined, 1, ["SendNow"], {}]) {
     assert.equal(keyArgs(key), null);

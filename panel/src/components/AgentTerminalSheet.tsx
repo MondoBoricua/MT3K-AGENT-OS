@@ -122,7 +122,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   const holdSince = useRef(0); // 0 = not holding; otherwise the ms timestamp the freeze started
   const touchDown = useRef(false);
   const wheelAt = useRef(0); // Shift+rueda (página) y gestos viejos: evita spam de PageUp/Down
-  const altWheel = useRef(initialAltWheelState()); // delta acumulado → teclas Up/Down en pantalla alterna
+  const altWheel = useRef(initialAltWheelState()); // delta acumulado → WheelUp/WheelDown (SGR) en pantalla alterna
   const lastPaneResize = useRef<{ cols: number; rows: number } | null>(null);
   const [paneSizeAttached, setPaneSizeAttached] = useState(false); // tmux con cliente pegado: resize ignorado
   const HOLD_MAX_MS = 15000;
@@ -361,9 +361,8 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     if (!r?.ok) onToast?.(r?.err ? `error: ${r.err}` : "no se pudo enviar la tecla", false);
   };
 
-  // alt-screen panes (codex/zcode TUIs) have no tmux scrollback: the wheel becomes
-  // PageUp/PageDown so the TUI scrolls ITS transcript. Measured (MEDICIONES.md A2): codex
-  // scrolls on those keys, zcode ignores every key → zcode gets a notice, not dead keys.
+  // Pantalla alterna (Codex/zcode): sin scrollback de tmux; la rueda va a WheelUp/Down (SGR) o página con Shift.
+  // Medido ronda 2: SGR ~1 línea/notch; PageUp/Down ~15 líneas. zcode ignora teclas → aviso, no teclas muertas.
   const altScrollKeys = altPane && agent?.id !== "zcode";
   const altWheelAlive = useRef(false);
   useEffect(() => { altWheelAlive.current = !!(fullscreen && altScrollKeys); }, [fullscreen, altScrollKeys]);
@@ -384,7 +383,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     const start = { ...altWheel.current };
     const ver = start.drainVersion;
     void (async () => {
-      const sendLine = async (k: "Up" | "Down") => { await key(k); };
+      const sendLine = async (k: "WheelUp" | "WheelDown") => { await key(k); };
       const cur = await drainAltWheel(start, lh, sendLine, () => altWheelAlive.current && altWheel.current.drainVersion === ver);
       if (altWheelAlive.current) altWheel.current = cur;
     })();
