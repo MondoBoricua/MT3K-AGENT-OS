@@ -1,4 +1,4 @@
-// Traduce gestos de rueda del visor en teclas de línea para TUIs en pantalla alterna (Codex).
+// Traduce gestos de rueda del visor en WheelUp/WheelDown (SGR vía /api/key) para TUIs en pantalla alterna (Codex).
 // El delta sobrante se guarda; el drenaje async respeta 40 ms entre teclas y tope 6 por gesto.
 
 export function measuredLineHeightPx(el: HTMLElement, fontPx: number): number {
@@ -38,7 +38,7 @@ export function accumulateWheelDelta(state: AltWheelState, deltaY: number): AltW
 export async function drainAltWheel(
   start: AltWheelState,
   lineHeightPx: number,
-  sendKey: (k: "Up" | "Down") => Promise<void>,
+  sendKey: (k: "WheelUp" | "WheelDown") => Promise<void>,
   isAlive: () => boolean,
 ): Promise<AltWheelState> {
   let cur = start;
@@ -49,7 +49,7 @@ export async function drainAltWheel(
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
     if (!isAlive() || cur.drainVersion !== version) break;
     const up = cur.remainder < 0;
-    await sendKey(up ? "Up" : "Down");
+    await sendKey(up ? "WheelUp" : "WheelDown");
     cur = {
       ...cur,
       remainder: cur.remainder + (up ? lineHeightPx : -lineHeightPx),
