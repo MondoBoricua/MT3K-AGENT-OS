@@ -3,6 +3,7 @@ import type { AgentRow, PaneRef, PaneEvent } from "../lib/api";
 import { sendToPane, getPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import { applyPaneEvent } from "../lib/pane-stream";
+import { accumulateWheelDelta, drainAltWheel, initialAltWheelState, measuredLineHeightPx } from "../lib/alt-pane-wheel";
 import AgentLogo from "./AgentLogo";
 
 type Props = {
@@ -120,7 +121,10 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   const heldTerm = useRef<string[] | null>(null);
   const holdSince = useRef(0); // 0 = not holding; otherwise the ms timestamp the freeze started
   const touchDown = useRef(false);
-  const wheelAt = useRef(0); // last wheel→key translation (alt-screen panes): throttles PageUp/Down spam
+  const wheelAt = useRef(0); // Shift+rueda (página) y gestos viejos: evita spam de PageUp/Down
+  const altWheel = useRef(initialAltWheelState()); // delta acumulado → teclas Up/Down en pantalla alterna
+  const lastPaneResize = useRef<{ cols: number; rows: number } | null>(null);
+  const [paneSizeAttached, setPaneSizeAttached] = useState(false); // tmux con cliente pegado: resize ignorado
   const HOLD_MAX_MS = 15000;
   const selectionInTerm = () => {
     const sel = document.getSelection();
@@ -166,6 +170,9 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     holdSince.current = 0;
     touchDown.current = false; // a finger or gesture from the PREVIOUS pane must not leak in
     wheelAt.current = 0;
+    altWheel.current = initialAltWheelState();
+    lastPaneResize.current = null;
+    setPaneSizeAttached(false);
     setTerm([]);
     setAltPane(false);
     if (!paneToWatch || !fullscreen) return;
@@ -220,10 +227,26 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     if (el && stickToBottom.current && !selectionInTerm() && !touchDown.current) el.scrollTop = el.scrollHeight;
   }, [term]);
 
-  // desktop: scale the mono font so the pane's ~80 tmux columns fill the width instead of
-  // huddling in a corner. tmux hard-wraps at the pane width, so the longest visible line IS
-  // the column count. Mono glyphs are ~0.62 × font-size wide; clamp keeps phones at 11px.
-  const [termFont, setTermFont] = useState(11);
+  // Escritorio (pre ≥900 px): fuente fija 11–18 px (A−/A+, localStorage). Móvil: escala como antes hasta 20 px.
+  const [userTermFont, setUserTermFont] = useState(() => {
+    try {
+      const v = parseInt(localStorage.getItem("mt3k.termFont") ?? "13", 10);
+      if (!Number.isFinite(v)) return 13;
+      return Math.min(18, Math.max(11, v));
+    } catch {
+      return 13;
+    }
+  });
+  const [fittedMobileFont, setFittedMobileFont] = useState(11);
+  const [termWide, setTermWide] = useState(false);
+  const termFont = termWide ? userTermFont : fittedMobileFont;
+  const bumpUserFont = (delta: number) => {
+    setUserTermFont((f) => {
+      const n = Math.min(18, Math.max(11, f + delta));
+      try { localStorage.setItem("mt3k.termFont", String(n)); } catch { /* modo privado */ }
+      return n;
+    });
+  };
   const termCols = useMemo(() => {
     if (!term.length || (term.length === 1 && term[0] === "")) return 80;
     return Math.max(60, ...term.map((line) => line.replace(/\x1b(\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(\x07|\x1b\\))/g, "").length));
@@ -231,26 +254,35 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   useEffect(() => {
     const el = termRef.current;
     if (!el) return;
-    const fit = () => setTermFont(Math.max(11, Math.min(20, Math.floor((el.clientWidth - 24) / (termCols * 0.62)))));
+    const fit = () => {
+      const wide = el.clientWidth >= 900;
+      setTermWide(wide);
+      if (!wide) setFittedMobileFont(Math.max(11, Math.min(20, Math.floor((el.clientWidth - 24) / (termCols * 0.62)))));
+    };
     fit();
     const ro = new ResizeObserver(fit);
     ro.observe(el);
     return () => ro.disconnect();
   }, [termCols, fullscreen]);
 
-  // wide screens: ask tmux for enough columns to fill the width at the 20px font cap, so the
-  // CLI reflows instead of leaving dead space. Server is grow-only + skips attached sessions,
-  // so phones and kitty never fight this. Debounced — window drags fire many resizes.
+  // Escritorio: pide a tmux cols/rows acordes al visor (fuente real + line-height medido). Debounce 300 ms.
   useEffect(() => {
     const pane = paneToWatch;
     const el = termRef.current;
-    if (!pane || !el || el.clientWidth < 900) return;
-    const t = setTimeout(() => {
-      if (selectionInTerm() || touchDown.current) return; // resizing reflows rows → kills the selection
-      const cols = Math.min(400, Math.floor((el.clientWidth - 24) / (20 * 0.62)));
-      const rows = Math.min(200, Math.max(24, Math.floor(el.clientHeight / (20 * 1.375))));
-      void paneResize(pane, cols, rows, host);
-    }, 600);
+    if (!pane || !el || !fullscreen) return;
+    const t = setTimeout(async () => {
+      if (el.clientWidth < 900) return;
+      if (selectionInTerm() || touchDown.current) return;
+      const lh = measuredLineHeightPx(el, termFont);
+      const cols = Math.min(220, Math.max(80, Math.floor((el.clientWidth - 24) / (0.62 * termFont))));
+      const rows = Math.min(80, Math.max(20, Math.floor(el.clientHeight / lh)));
+      const prev = lastPaneResize.current;
+      if (prev && prev.cols === cols && prev.rows === rows) return;
+      lastPaneResize.current = { cols, rows };
+      const r = await paneResize(pane, cols, rows, host);
+      if (r?.skipped === "attached") setPaneSizeAttached(true);
+      else if (r?.ok) setPaneSizeAttached(false);
+    }, 300);
     return () => clearTimeout(t);
   }, [paneToWatch, fullscreen, termFont, host]);
 
@@ -333,12 +365,29 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   // PageUp/PageDown so the TUI scrolls ITS transcript. Measured (MEDICIONES.md A2): codex
   // scrolls on those keys, zcode ignores every key → zcode gets a notice, not dead keys.
   const altScrollKeys = altPane && agent?.id !== "zcode";
+  const altWheelAlive = useRef(false);
+  useEffect(() => { altWheelAlive.current = !!(fullscreen && altScrollKeys); }, [fullscreen, altScrollKeys]);
   const onTermWheel = (e: React.WheelEvent) => {
-    if (!altScrollKeys) return; // (passive listener: no preventDefault — the pre has no overflow in alt mode anyway)
-    const now = Date.now();
-    if (now - wheelAt.current < 220) return; // one page per gesture, not per wheel notch
-    wheelAt.current = now;
-    void key(e.deltaY < 0 ? "PageUp" : "PageDown");
+    if (!altScrollKeys) return;
+    const el = termRef.current;
+    if (!el) return;
+    // Shift+rueda y los botones ▲▼ siguen siendo página entera en el TUI.
+    if (e.shiftKey) {
+      const now = Date.now();
+      if (now - wheelAt.current < 220) return;
+      wheelAt.current = now;
+      void key(e.deltaY < 0 ? "PageUp" : "PageDown");
+      return;
+    }
+    const lh = measuredLineHeightPx(el, termFont);
+    altWheel.current = accumulateWheelDelta(altWheel.current, e.deltaY);
+    const start = { ...altWheel.current };
+    const ver = start.drainVersion;
+    void (async () => {
+      const sendLine = async (k: "Up" | "Down") => { await key(k); };
+      const cur = await drainAltWheel(start, lh, sendLine, () => altWheelAlive.current && altWheel.current.drainVersion === ver);
+      if (altWheelAlive.current) altWheel.current = cur;
+    })();
   };
 
   // one-tap "copy what I'm looking at" — selecting against a live feed can be unwinnable on a
@@ -482,6 +531,15 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
+            {termWide && (
+              <div className="flex items-center gap-0.5 rounded-lg border border-ink-line px-1 py-0.5 font-mono text-[10px] text-white/55">
+                <button type="button" onClick={() => bumpUserFont(-1)} disabled={userTermFont <= 11} title="texto más pequeño"
+                  className="px-1.5 transition hover:text-accent disabled:opacity-30">A−</button>
+                <span className="min-w-[2ch] text-center text-white/70">{userTermFont}</span>
+                <button type="button" onClick={() => bumpUserFont(1)} disabled={userTermFont >= 18} title="texto más grande"
+                  className="px-1.5 transition hover:text-accent disabled:opacity-30">A+</button>
+              </div>
+            )}
             {agent.launchable && (
               <button onClick={() => { setFullscreen(false); setPaneId(null); setShowLaunch(true); }} title="abrir otra sesión"
                 className="rounded-lg border border-ink-line px-2.5 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent">
@@ -511,8 +569,15 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
           </pre>
           {/* alt-screen TUI: no scrollback exists — say so, and (where it works) page the TUI itself */}
           {altPane && (
-            <div className="pointer-events-none absolute right-2 top-2 rounded-full border border-ink-line bg-ink-900/85 px-2 py-0.5 font-mono text-[9px] text-white/50 backdrop-blur">
-              {altScrollKeys ? "⇅ scroll = teclas del TUI" : "TUI sin scrollback"}
+            <div className="pointer-events-none absolute right-2 top-2 flex flex-col items-end gap-1">
+              <div className="rounded-full border border-ink-line bg-ink-900/85 px-2 py-0.5 font-mono text-[9px] text-white/50 backdrop-blur">
+                {altScrollKeys ? "⇅ rueda = líneas · ⇧ = página" : "TUI sin scrollback"}
+              </div>
+              {paneSizeAttached && termWide && (
+                <div className="rounded-full border border-amber-400/30 bg-ink-900/85 px-2 py-0.5 font-mono text-[9px] text-amber-200/80 backdrop-blur">
+                  tamaño fijado por un cliente tmux
+                </div>
+              )}
             </div>
           )}
           {altScrollKeys && (
