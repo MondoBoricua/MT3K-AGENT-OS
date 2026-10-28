@@ -26,6 +26,7 @@ import { homedir, userInfo, networkInterfaces, loadavg, cpus, totalmem, freemem 
 import { spawn, spawnSync } from "node:child_process";
 import { sessionCookie } from "./lib/web-session.mjs";
 import { keyArgs } from "./lib/keys.mjs";
+import { parseAlternateMouseSgr, TMUX_ALT_MOUSE_DISPLAY } from "./lib/tmux-pane-flags.mjs";
 import { missingHooks } from "./lib/tmux-hooks.mjs";
 import { decideResume, hasResumableHistory } from "./lib/resume-history.mjs";
 import { createPasteToPane } from "./lib/tmux-paste.mjs";
@@ -48,7 +49,7 @@ const DIST = join(ROOT, "panel", "dist");
 const LOGS = join(ROOT, "data", "logs");
 const SKILLS_DIR = join(homedir(), ".agents", "skills");
 const GRAPHIFY = [join(homedir(), ".local/bin/graphify"), "graphify"].find((p) => p === "graphify" || existsSync(p));
-const PORT = 4288;
+const PORT = Number(process.env.MT3K_PORT) || 4288;
 const START = Date.now();
 function lanIP() {
   const ifs = networkInterfaces();
@@ -673,10 +674,11 @@ async function api(req, res, path) {
     // -e keeps colors, -p prints to stdout, -S -1000 ships real scrollback — 200 felt like
     // "no history" on long agent sessions (keep on-screen line breaks → less reflow)
     const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-N", "-S", "-1000"], ROOT, 5000);
-    // alt-screen flag: full-screen TUIs (codex/zcode) have NO scrollback, so the viewer turns
-    // the scroll gesture into PageUp/PageDown keys instead of a dead scrollbar
-    const alt = (await run("tmux", ["display-message", "-p", "-t", paneId, "#{alternate_on}"], ROOT, 4000)).out.trim() === "1";
-    return sendJSON(res, 200, { ok: r.ok, content: r.out, alternate: alt });
+    // alt + ratón SGR en un solo display (cero llamadas tmux extra)
+    const flags = parseAlternateMouseSgr(
+      (await run("tmux", ["display-message", "-p", "-t", paneId, TMUX_ALT_MOUSE_DISPLAY], ROOT, 4000)).out,
+    );
+    return sendJSON(res, 200, { ok: r.ok, content: r.out, alternate: flags.alternate, mouse_sgr: flags.mouse_sgr });
   }
 
   // grow a detached tmux window so the CLI reflows to the viewer's width — panel-launched
@@ -697,6 +699,8 @@ async function api(req, res, path) {
     // grow-only: a phone opening the same pane later must never shrink it back. The PANE is
     // what matters — in a split window, grow the window by the pane's shortfall first so the
     // sibling panes keep their size, then claim the new space for this pane.
+    // Dos espectadores del panel en el mismo pane: sin histéresis — gana la última petición grow
+    // que entre en esta rama (comportamiento aceptado para uso personal).
     const dW = Math.max(0, c - paneW), dH = Math.max(0, r - paneH);
     if (!dW && !dH) return sendJSON(res, 200, { ok: true, cols: paneW, rows: paneH });
     await ensureTmuxHooks();
@@ -1157,7 +1161,7 @@ async function api(req, res, path) {
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "view")) return;
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
-    let last = null, lastAlt = null, idleTicks = 0, closed = false, busy = false;
+    let last = null, lastAlt = null, lastMouseSgr = null, idleTicks = 0, closed = false, busy = false;
     const tick = async () => {
       // Diffs are relative to `last`: a slow capture-pane must never overlap the next tick,
       // or an out-of-order frame would corrupt the client's line buffer until it reloads.
@@ -1175,17 +1179,25 @@ async function api(req, res, path) {
         // event so old bundles (which only listen to unnamed data) ignore it untouched.
         // The probe is a whole second tmux process — run it only when the frame changed,
         // or at most every 10 ticks (~5 s) while the pane sits idle.
-        let alt = lastAlt;
+        let alt = lastAlt, mouseSgr = lastMouseSgr;
         if (!sameFrame || ++idleTicks >= 10) {
           idleTicks = 0;
-          alt = (await run("tmux", ["display-message", "-p", "-t", paneId, "#{alternate_on}"], ROOT, 4000)).out.trim() === "1";
-          if (alt !== lastAlt) { lastAlt = alt; res.write(`event: alt\ndata: ${JSON.stringify({ alt })}\n\n`); }
+          const flags = parseAlternateMouseSgr(
+            (await run("tmux", ["display-message", "-p", "-t", paneId, TMUX_ALT_MOUSE_DISPLAY], ROOT, 4000)).out,
+          );
+          alt = flags.alternate;
+          mouseSgr = flags.mouse_sgr;
+          if (alt !== lastAlt || mouseSgr !== lastMouseSgr) {
+            lastAlt = alt;
+            lastMouseSgr = mouseSgr;
+            res.write(`event: alt\ndata: ${JSON.stringify({ alt, mouse_sgr: mouseSgr })}\n\n`);
+          }
         }
         if (sameFrame) return;
         if (last === null) {
           res.write(`data: ${JSON.stringify(r.out)}\n\n`);
         } else {
-          res.write(`data: ${JSON.stringify(lineDiffs ? { from, lines: lines.slice(from), alt } : r.out)}\n\n`);
+          res.write(`data: ${JSON.stringify(lineDiffs ? { from, lines: lines.slice(from), alt, mouse_sgr: mouseSgr } : r.out)}\n\n`);
         }
         last = lines;
       } finally {
@@ -1687,6 +1699,8 @@ async function proxyTlsOptions() {
   try { return { key: readFileSync(key), cert: readFileSync(crt) }; } catch { return null; }
 }
 (async () => {
+  // Servidor auxiliar (MT3K_PORT distinto): solo API + estáticos; no duplicar proxies en 4290.
+  if (process.env.MT3K_PORT) return;
   const defs = AGENT_DEFS.filter((d) => d.web && d.webProxy);
   if (!defs.length) return;
   const wantTls = /^(1|true|yes)$/i.test(process.env.MT3K_PROXY_HTTPS || "");

@@ -3,7 +3,14 @@ import type { AgentRow, PaneRef, PaneEvent } from "../lib/api";
 import { sendToPane, getPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import { applyPaneEvent } from "../lib/pane-stream";
-import { accumulateWheelDelta, drainAltWheel, initialAltWheelState, measuredLineHeightPx } from "../lib/alt-pane-wheel";
+import {
+  accumulateWheelDelta,
+  initialAltWheelSession,
+  measuredLineHeightPx,
+  normalizeWheelDeltaPx,
+  runAltWheelDrain,
+  wheelLineThresholdPx,
+} from "../lib/alt-pane-wheel";
 import AgentLogo from "./AgentLogo";
 
 type Props = {
@@ -122,7 +129,9 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   const holdSince = useRef(0); // 0 = not holding; otherwise the ms timestamp the freeze started
   const touchDown = useRef(false);
   const wheelAt = useRef(0); // Shift+rueda (página) y gestos viejos: evita spam de PageUp/Down
-  const altWheel = useRef(initialAltWheelState()); // delta acumulado → WheelUp/WheelDown (SGR) en pantalla alterna
+  const wheelGeneration = useRef(0); // invalida drenajes viejos al cambiar pane o desmontar
+  const altWheelSession = useRef(initialAltWheelSession(0)); // un solo drenaje comparte este acumulador
+  const paneResizeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastPaneResize = useRef<{ cols: number; rows: number } | null>(null);
   const [paneSizeAttached, setPaneSizeAttached] = useState(false); // tmux con cliente pegado: resize ignorado
   const HOLD_MAX_MS = 15000;
@@ -164,17 +173,20 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   // `altPane`: the pane lives in tmux's alternate screen (codex/zcode TUIs) → no scrollback
   // exists, so the viewer maps scroll to PageUp/PageDown keys instead (see onTermWheel).
   const [altPane, setAltPane] = useState(false);
+  const [mouseSgr, setMouseSgr] = useState<boolean | null>(null); // null = aún no sabemos; SGR solo si true
   useEffect(() => {
     latestTerm.current = [];
     heldTerm.current = null;
     holdSince.current = 0;
     touchDown.current = false; // a finger or gesture from the PREVIOUS pane must not leak in
     wheelAt.current = 0;
-    altWheel.current = initialAltWheelState();
+    wheelGeneration.current += 1;
+    altWheelSession.current = initialAltWheelSession(wheelGeneration.current);
     lastPaneResize.current = null;
     setPaneSizeAttached(false);
     setTerm([]);
     setAltPane(false);
+    setMouseSgr(null);
     if (!paneToWatch || !fullscreen) return;
     let alive = true;
     let iv: ReturnType<typeof setInterval> | undefined;
@@ -185,6 +197,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
         if (alive && r?.ok) {
           applyTerm(r.content ?? "");
           if (typeof r.alternate === "boolean") setAltPane(r.alternate);
+          if (typeof r.mouse_sgr === "boolean") setMouseSgr(r.mouse_sgr);
         }
       };
       pull();
@@ -199,11 +212,17 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
         const ev = JSON.parse(e.data) as PaneEvent;
         applyTerm(ev);
         // diffs also carry `alt`: a proxy that drops NAMED events can't leave the alt state stale
-        const alt = (ev as { alt?: unknown }).alt;
-        if (typeof alt === "boolean") setAltPane(alt);
+        const frame = ev as { alt?: unknown; mouse_sgr?: unknown };
+        if (typeof frame.alt === "boolean") setAltPane(frame.alt);
+        if (typeof frame.mouse_sgr === "boolean") setMouseSgr(frame.mouse_sgr);
       };
       es.addEventListener("alt", (e) => { // named event: old servers never send it, old bundles ignore it
-        try { if (alive) setAltPane(JSON.parse((e as MessageEvent).data).alt === true); } catch { /* bad frame */ }
+        try {
+          if (!alive) return;
+          const frame = JSON.parse((e as MessageEvent).data) as { alt?: boolean; mouse_sgr?: boolean };
+          setAltPane(frame.alt === true);
+          if (typeof frame.mouse_sgr === "boolean") setMouseSgr(frame.mouse_sgr);
+        } catch { /* bad frame */ }
       });
       es.onerror = () => { es?.close(); es = null; if (alive && !iv) poll(); };
     } catch {
@@ -251,6 +270,38 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     if (!term.length || (term.length === 1 && term[0] === "")) return 80;
     return Math.max(60, ...term.map((line) => line.replace(/\x1b(\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(\x07|\x1b\\))/g, "").length));
   }, [term]);
+  // Escritorio: resize tmux desde el <pre> (RO + debounce 300 ms) además de abrir/cambiar fuente.
+  const queuePaneResize = () => {
+    if (paneResizeTimer.current) clearTimeout(paneResizeTimer.current);
+    paneResizeTimer.current = setTimeout(() => {
+      paneResizeTimer.current = null;
+      const pane = paneToWatch;
+      const el = termRef.current;
+      if (!pane || !el || !fullscreen || el.clientWidth < 900) return;
+      if (selectionInTerm() || touchDown.current) return;
+      const lh = measuredLineHeightPx(el, termFont);
+      const cols = Math.min(220, Math.max(80, Math.floor((el.clientWidth - 24) / (0.62 * termFont))));
+      const rows = Math.min(80, Math.max(20, Math.floor(el.clientHeight / lh)));
+      const prev = lastPaneResize.current;
+      if (prev && prev.cols === cols && prev.rows === rows) return;
+      void (async () => {
+        const r = await paneResize(pane, cols, rows, host);
+        if (r?.skipped === "attached") setPaneSizeAttached(true);
+        else if (r?.ok && !r.skipped) {
+          lastPaneResize.current = { cols, rows };
+          setPaneSizeAttached(false);
+        }
+      })();
+    }, 300);
+  };
+
+  useEffect(() => {
+    queuePaneResize();
+    return () => {
+      if (paneResizeTimer.current) clearTimeout(paneResizeTimer.current);
+    };
+  }, [paneToWatch, fullscreen, termFont, host]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     const el = termRef.current;
     if (!el) return;
@@ -258,33 +309,13 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
       const wide = el.clientWidth >= 900;
       setTermWide(wide);
       if (!wide) setFittedMobileFont(Math.max(11, Math.min(20, Math.floor((el.clientWidth - 24) / (termCols * 0.62)))));
+      if (wide && fullscreen) queuePaneResize();
     };
     fit();
     const ro = new ResizeObserver(fit);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [termCols, fullscreen]);
-
-  // Escritorio: pide a tmux cols/rows acordes al visor (fuente real + line-height medido). Debounce 300 ms.
-  useEffect(() => {
-    const pane = paneToWatch;
-    const el = termRef.current;
-    if (!pane || !el || !fullscreen) return;
-    const t = setTimeout(async () => {
-      if (el.clientWidth < 900) return;
-      if (selectionInTerm() || touchDown.current) return;
-      const lh = measuredLineHeightPx(el, termFont);
-      const cols = Math.min(220, Math.max(80, Math.floor((el.clientWidth - 24) / (0.62 * termFont))));
-      const rows = Math.min(80, Math.max(20, Math.floor(el.clientHeight / lh)));
-      const prev = lastPaneResize.current;
-      if (prev && prev.cols === cols && prev.rows === rows) return;
-      lastPaneResize.current = { cols, rows };
-      const r = await paneResize(pane, cols, rows, host);
-      if (r?.skipped === "attached") setPaneSizeAttached(true);
-      else if (r?.ok) setPaneSizeAttached(false);
-    }, 300);
-    return () => clearTimeout(t);
-  }, [paneToWatch, fullscreen, termFont, host]);
+  }, [termCols, fullscreen, paneToWatch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // re-stick whenever a different pane opens in fullscreen
   useEffect(() => { stickToBottom.current = true; setScrolledUp(false); }, [paneToWatch, fullscreen]);
@@ -361,13 +392,21 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     if (!r?.ok) onToast?.(r?.err ? `error: ${r.err}` : "no se pudo enviar la tecla", false);
   };
 
-  // Pantalla alterna (Codex/zcode): sin scrollback de tmux; la rueda va a WheelUp/Down (SGR) o página con Shift.
-  // Medido ronda 2: SGR ~1 línea/notch; PageUp/Down ~15 líneas. zcode ignora teclas → aviso, no teclas muertas.
-  const altScrollKeys = altPane && agent?.id !== "zcode";
+  // Pantalla alterna: SGR solo con mouse_sgr confirmado; si no, PageUp/Down. zcode: aviso sin teclas.
+  const altTui = altPane && agent?.id !== "zcode";
+  const useSgrWheel = altTui && mouseSgr === true;
+  const usePageWheel = altTui && mouseSgr !== true;
   const altWheelAlive = useRef(false);
-  useEffect(() => { altWheelAlive.current = !!(fullscreen && altScrollKeys); }, [fullscreen, altScrollKeys]);
+  useEffect(() => {
+    altWheelAlive.current = !!(fullscreen && useSgrWheel);
+    return () => {
+      wheelGeneration.current += 1;
+      altWheelSession.current.generation = wheelGeneration.current;
+      altWheelAlive.current = false;
+    };
+  }, [fullscreen, useSgrWheel, paneToWatch]);
   const onTermWheel = (e: React.WheelEvent) => {
-    if (!altScrollKeys) return;
+    if (!altTui) return;
     const el = termRef.current;
     if (!el) return;
     // Shift+rueda y los botones ▲▼ siguen siendo página entera en el TUI.
@@ -378,15 +417,25 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
       void key(e.deltaY < 0 ? "PageUp" : "PageDown");
       return;
     }
-    const lh = measuredLineHeightPx(el, termFont);
-    altWheel.current = accumulateWheelDelta(altWheel.current, e.deltaY);
-    const start = { ...altWheel.current };
-    const ver = start.drainVersion;
-    void (async () => {
-      const sendLine = async (k: "WheelUp" | "WheelDown") => { await key(k); };
-      const cur = await drainAltWheel(start, lh, sendLine, () => altWheelAlive.current && altWheel.current.drainVersion === ver);
-      if (altWheelAlive.current) altWheel.current = cur;
-    })();
+    if (usePageWheel) {
+      const now = Date.now();
+      if (now - wheelAt.current < 220) return;
+      wheelAt.current = now;
+      void key(e.deltaY < 0 ? "PageUp" : "PageDown");
+      return;
+    }
+    if (!useSgrWheel) return;
+    const lhRows = measuredLineHeightPx(el, termFont);
+    const lhWheel = wheelLineThresholdPx(el, termFont);
+    const delta = normalizeWheelDeltaPx(e.deltaY, e.deltaMode, lhRows, el.clientHeight);
+    const session = altWheelSession.current;
+    accumulateWheelDelta(session, delta);
+    void runAltWheelDrain(
+      session,
+      lhWheel,
+      async (k) => { await key(k); },
+      () => altWheelAlive.current && session.generation === wheelGeneration.current,
+    );
   };
 
   // one-tap "copy what I'm looking at" — selecting against a live feed can be unwinnable on a
@@ -570,7 +619,9 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
           {altPane && (
             <div className="pointer-events-none absolute right-2 top-2 flex flex-col items-end gap-1">
               <div className="rounded-full border border-ink-line bg-ink-900/85 px-2 py-0.5 font-mono text-[9px] text-white/50 backdrop-blur">
-                {altScrollKeys ? "⇅ rueda = líneas · ⇧ = página" : "TUI sin scrollback"}
+                {altTui
+                  ? (useSgrWheel ? "⇅ rueda = líneas · ⇧ = página" : "⇅ scroll = páginas (TUI sin ratón)")
+                  : "TUI sin scrollback"}
               </div>
               {paneSizeAttached && termWide && (
                 <div className="rounded-full border border-amber-400/30 bg-ink-900/85 px-2 py-0.5 font-mono text-[9px] text-amber-200/80 backdrop-blur">
@@ -579,7 +630,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
               )}
             </div>
           )}
-          {altScrollKeys && (
+          {altTui && (
             <div className="absolute right-2 top-1/2 flex -translate-y-1/2 flex-col gap-1.5">
               <button onClick={() => key("PageUp")} title="página arriba (la mueve el TUI)"
                 className="rounded-lg border border-ink-line bg-ink-900/85 px-2 py-1.5 font-mono text-xs text-white/70 backdrop-blur transition hover:border-accent/50 hover:text-accent active:bg-accent/20">▲</button>
