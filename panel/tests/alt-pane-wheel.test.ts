@@ -52,6 +52,21 @@ test("cupo por gesto: dos eventos separados 150ms reinician las 6 teclas", () =>
   assert.equal(session.gestureKeysLeft, 6);
 });
 
+test("drenaje: delta neto cero tras espera no envía teclas", async () => {
+  const session = initialAltWheelSession(0);
+  session.lastSendAt = Date.now();
+  const keys: ("WheelUp" | "WheelDown")[] = [];
+  const sendKey = async (k: "WheelUp" | "WheelDown") => {
+    keys.push(k);
+  };
+  accumulateWheelDelta(session, 20);
+  void runAltWheelDrain(session, 20, sendKey, () => true);
+  await new Promise((r) => setTimeout(r, 5));
+  accumulateWheelDelta(session, -20);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(keys.length, 0, "remainder neto 0 antes del envío → sin WheelUp/Down");
+});
+
 test("normalizeWheelDeltaPx convierte líneas y páginas", () => {
   assert.equal(normalizeWheelDeltaPx(3, 0, 16, 800), 3);
   assert.equal(normalizeWheelDeltaPx(2, 1, 13, 800), 26);

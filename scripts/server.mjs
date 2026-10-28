@@ -49,7 +49,7 @@ const DIST = join(ROOT, "panel", "dist");
 const LOGS = join(ROOT, "data", "logs");
 const SKILLS_DIR = join(homedir(), ".agents", "skills");
 const GRAPHIFY = [join(homedir(), ".local/bin/graphify"), "graphify"].find((p) => p === "graphify" || existsSync(p));
-const PORT = Number(process.env.MT3K_PORT) || 4288;
+const PORT = 4288;
 const START = Date.now();
 function lanIP() {
   const ifs = networkInterfaces();
@@ -1699,8 +1699,6 @@ async function proxyTlsOptions() {
   try { return { key: readFileSync(key), cert: readFileSync(crt) }; } catch { return null; }
 }
 (async () => {
-  // Servidor auxiliar (MT3K_PORT distinto): solo API + estáticos; no duplicar proxies en 4290.
-  if (process.env.MT3K_PORT) return;
   const defs = AGENT_DEFS.filter((d) => d.web && d.webProxy);
   if (!defs.length) return;
   const wantTls = /^(1|true|yes)$/i.test(process.env.MT3K_PROXY_HTTPS || "");

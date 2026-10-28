@@ -259,6 +259,11 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   const [fittedMobileFont, setFittedMobileFont] = useState(11);
   const [termWide, setTermWide] = useState(false);
   const termFont = termWide ? userTermFont : fittedMobileFont;
+  // Refs para que el debounce del RO no use fuente/host viejos si el efecto no se re-montó.
+  const termFontLive = useRef(termFont);
+  const hostLive = useRef(host);
+  termFontLive.current = termFont;
+  hostLive.current = host;
   const bumpUserFont = (delta: number) => {
     setUserTermFont((f) => {
       const n = Math.min(18, Math.max(11, f + delta));
@@ -279,13 +284,15 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
       const el = termRef.current;
       if (!pane || !el || !fullscreen || el.clientWidth < 900) return;
       if (selectionInTerm() || touchDown.current) return;
-      const lh = measuredLineHeightPx(el, termFont);
-      const cols = Math.min(220, Math.max(80, Math.floor((el.clientWidth - 24) / (0.62 * termFont))));
+      const font = termFontLive.current;
+      const h = hostLive.current;
+      const lh = measuredLineHeightPx(el, font);
+      const cols = Math.min(220, Math.max(80, Math.floor((el.clientWidth - 24) / (0.62 * font))));
       const rows = Math.min(80, Math.max(20, Math.floor(el.clientHeight / lh)));
       const prev = lastPaneResize.current;
       if (prev && prev.cols === cols && prev.rows === rows) return;
       void (async () => {
-        const r = await paneResize(pane, cols, rows, host);
+        const r = await paneResize(pane, cols, rows, h);
         if (r?.skipped === "attached") setPaneSizeAttached(true);
         else if (r?.ok && !r.skipped) {
           lastPaneResize.current = { cols, rows };
