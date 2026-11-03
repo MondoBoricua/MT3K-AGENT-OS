@@ -316,7 +316,7 @@ Las operaciones responden **400** con `err` cuando el adaptador del agente no la
 | `POST /api/refresh` | `graphify update` + re-ingest |
 | `POST /api/add-project` | track a repo (graphs it if needed) + ingest |
 | `GET /api/discover` | graphed repos not yet tracked |
-| `GET /api/agents` | detects installed agent CLIs (Claude Code, Codex, OpenCode, Grok, Antigravity `agy`, Cursor `cursor-agent`, ZCode `zcode`), their live tmux panes, and whether each is `launchable` (a real binary found on PATH, `~/.local/bin` or any nvm node's bin dir, not just a config dir); each row also includes `adapter`, `adapterVersion`, and `capabilities` (adapter contract v1) |
+| `GET /api/agents` | detects installed agent CLIs (Claude Code, Codex, OpenCode, Grok, GitHub Copilot `copilot`, Antigravity `agy`, Cursor `cursor-agent`, ZCode `zcode`), their live tmux panes, and whether each is `launchable` (a real binary found on PATH, `~/.local/bin` or any nvm node's bin dir, not just a config dir); each row also includes `adapter`, `adapterVersion`, and `capabilities` (adapter contract v1) |
 | `POST /api/launch` | spawns a fresh detached tmux session running an agent's CLI (`{ agentId, projectId? \| cwd? }`) and returns the new `paneId` — binary comes from an allowlist, cwd is a tracked project or a real path like `~` |
 | `GET /api/fs/list\|read\|raw?path=` · `POST /api/fs/write\|upload\|move\|delete` | file browser / manager (`?host=` proxies to a federated host) |
 | `POST /api/send` | types text into an agent's tmux pane (`{ paneId, text, enter? }`) — LAN-only, used by Agents View |
