@@ -31,6 +31,7 @@ import { missingHooks } from "./lib/tmux-hooks.mjs";
 import { decideResume, hasResumableHistory } from "./lib/resume-history.mjs";
 import { createPasteToPane } from "./lib/tmux-paste.mjs";
 import { buildRunningSet } from "./lib/running-set.mjs";
+import { nvmBinDirs } from "./lib/bin-dirs.mjs";
 import { describeAgent, normalizeAgentDefs, requireCapability } from "./lib/adapters.mjs";
 import {
   validatePaneId,
@@ -191,9 +192,11 @@ function readLogs() {
 }
 
 // --- agent detection: which CLIs / agents are actually installed on this machine ---
-// dirname(process.execPath): wherever OUR node lives (nvm, brew, …), its npm-global siblings
-// (dsh, claude, …) live too — a launchd/systemd service PATH usually misses that dir
-const PATH_DIRS = [dirname(process.execPath), join(homedir(), ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", ...(process.env.PATH || "").split(delimiter)];
+// npm globals (opencode, dsh, …) live in the bin dir of the node they were installed with, which is
+// often NOT the node running this server (launchd may start a newer nvm node than nvm's default).
+// So search: our own node's dir, ~/.local/bin, every nvm node bin (default alias first), then brew/system/PATH.
+const NVM_BIN_DIRS = nvmBinDirs({ home: homedir(), env: process.env, exists: existsSync, readdir: readdirSync, readFile: (p) => readFileSync(p, "utf8") });
+const PATH_DIRS = [dirname(process.execPath), join(homedir(), ".local/bin"), ...NVM_BIN_DIRS, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", ...(process.env.PATH || "").split(delimiter)];
 // Windows binaries carry extensions (claude.cmd, dsh.ps1, ollama.exe) — probe those too
 const BIN_EXTS = process.platform === "win32" ? ["", ".exe", ".cmd", ".ps1", ".bat"] : [""];
 const onPath = (bin) => PATH_DIRS.some((d) => d && BIN_EXTS.some((e) => existsSync(join(d, bin + e))));
@@ -426,7 +429,7 @@ async function detectAgents() {
       : [];
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)
     const web = a.web && webUp.has(a.id) ? a.web : undefined;
-    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: HAS_TMUX && installed && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : a.web && installed && a.webCmd ? { webOff: true } : {}), ...adapterMeta };
+    return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: HAS_TMUX && a.bins.some(onPath) && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : a.web && installed && a.webCmd ? { webOff: true } : {}), ...adapterMeta };
   });
   await updateWaiting(rows.flatMap((r) => r.panes.map((p) => ({ ...p, agentName: r.name }))));
   for (const r of rows) {
