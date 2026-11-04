@@ -3,6 +3,7 @@ import type { AgentRow, PaneRef, PaneEvent } from "../lib/api";
 import { sendToPane, getPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { ansiToHtml } from "../lib/ansi";
 import { applyPaneEvent } from "../lib/pane-stream";
+import { attachKind } from "../lib/attach-kind";
 import {
   accumulateWheelDelta,
   initialAltWheelSession,
@@ -19,7 +20,7 @@ type Props = {
   focusProjectId?: string; // Focus mode: preselect this project when opening a new session
   focusPath?: string; // Focus mode: scope the visible sessions to this path and auto-launch into it
   onClose: () => void;
-  onToast?: (text: string, live: boolean) => void;
+  onToast?: (text: string, live: boolean, ms?: number) => void;
 };
 
 // Memoized by raw line: unchanged rows keep their HTML and DOM, including selection.
@@ -364,14 +365,39 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   // lands in the compose box, ready to send (agent CLIs read images/PDFs by path). Works for
   // federated hosts too — ?host= makes the remote panel save the file where ITS agents read it.
   const attachFile = async (file: File) => {
-    const isPdf = file.type === "application/pdf";
-    const isAudio = file.type.startsWith("audio/");
-    if ((!file.type.startsWith("image/") && !isPdf && !isAudio) || uploading) return;
-    if (file.size > UPLOAD_MAX_MB * 1024 * 1024) { onToast?.(`archivo demasiado grande (máx ${UPLOAD_MAX_MB}MB)`, false); return; }
+    if (uploading) {
+      onToast?.("espera, hay una subida en curso", false);
+      return;
+    }
+    const kind = attachKind(file.name, file.type);
+    if (kind === null) {
+      onToast?.(`formato no soportado: ${file.name || file.type || "archivo sin nombre"}`, false, 10000);
+      return;
+    }
+    const isPdf = kind === "pdf";
+    const isAudio = kind === "audio";
+    if (file.size > UPLOAD_MAX_MB * 1024 * 1024) {
+      onToast?.(`archivo demasiado grande (máx ${UPLOAD_MAX_MB}MB)`, false, 10000);
+      return;
+    }
     setUploading(true);
     // the File streams as raw bytes — no FileReader/base64, so 500MB works even on a phone.
     // The server validates the type by extension, so a nameless clipboard paste gets one here.
-    const fallbackExt = isPdf ? ".pdf" : isAudio ? ".m4a" : file.type === "image/jpeg" ? ".jpg" : ".png";
+    const fallbackExt = isPdf
+      ? ".pdf"
+      : isAudio
+        ? ".m4a"
+        : file.type === "image/jpeg"
+          ? ".jpg"
+          : file.type === "image/heic"
+            ? ".heic"
+            : file.type === "image/heif"
+              ? ".heif"
+              : file.type === "image/webp"
+                ? ".webp"
+                : file.type === "image/gif"
+                  ? ".gif"
+                  : ".png";
     const name = /\.[^.]+$/.test(file.name) ? file.name : `${file.name || (isPdf ? "documento" : isAudio ? "audio" : "screenshot")}${fallbackExt}`;
     const r = await uploadFile(name, file, host);
     setUploading(false);
@@ -381,7 +407,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
       setText((t) => (t.trim() ? `${t.trimEnd()}\n${r.path}` : `${intro}: ${r.path}`));
       onToast?.(`${ready} — envía el mensaje para que ${agent?.name} lo lea`, true);
     } else {
-      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir el archivo", false);
+      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo subir el archivo", false, 10000);
     }
   };
 
