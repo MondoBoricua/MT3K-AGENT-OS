@@ -80,10 +80,14 @@ export default function App() {
     window.dispatchEvent(new Event("mt3k:refresh-change")); // re-kick the status poll with the new token
   };
 
-  const pushToast = (text: string, live: boolean) => {
+  const pushToast = (text: string, live: boolean, ms = 4500) => {
     const id = Date.now() + Math.random();
     setToasts((t) => [...t.slice(-3), { id, text, live }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4500);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), ms);
+  };
+
+  const dismissToast = (id: number) => {
+    setToasts((t) => t.filter((x) => x.id !== id));
   };
 
   // daemon: poll system status on an interval (configurable in Settings) → live agent status
@@ -385,7 +389,15 @@ export default function App() {
       <div className="pointer-events-none fixed right-4 z-[70] flex flex-col gap-2"
         style={{ top: "calc(1rem + env(safe-area-inset-top))" }}>
         {toasts.map((t) => (
-          <div key={t.id} className={`pointer-events-auto flex items-center gap-2 rounded-xl border px-3 py-2 text-sm shadow-2xl backdrop-blur ${t.live ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200" : "border-ink-line bg-ink-800/90 text-white/70"}`}>
+          <div
+            key={t.id}
+            title="toca para cerrar"
+            role="button"
+            tabIndex={0}
+            onClick={() => dismissToast(t.id)}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); dismissToast(t.id); } }}
+            className={`pointer-events-auto flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm shadow-2xl backdrop-blur ${t.live ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200" : "border-ink-line bg-ink-800/90 text-white/70"}`}
+          >
             <span className={`h-1.5 w-1.5 rounded-full ${t.live ? "animate-pulse bg-emerald-400" : "bg-white/30"}`} /> {t.text}
           </div>
         ))}
