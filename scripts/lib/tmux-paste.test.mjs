@@ -235,3 +235,32 @@ test("integración: 100 pares concurrentes sin cruces (tmux real)", async (t) =>
 // Control negativo documentado: con buffer fijo `mt3k_send`, 100 pares concurrentes suelen cruzar o fallar paste
 // (ver data/research/2026-10-27-mt3k-send-race.md). No se ejecuta para no hacer flaky la suite en CI.
 test.skip("NEGATIVO: nombre fijo mt3k_send bajo concurrencia — reproducir con harness mt3k-send-repro", () => {});
+
+test("tmuxBin: todas las llamadas usan la ruta indicada (default tmux)", async () => {
+  const custom = captureRun();
+  await createPasteToPane({ run: custom.run, cwd: "/x", tmuxBin: "C:\\Tools\\psmux.exe" })("%1", "hola", false);
+  assert.ok(custom.calls.length >= 2);
+  assert.ok(custom.calls.every((c) => c.cmd === "C:\\Tools\\psmux.exe"));
+  const def = captureRun();
+  await createPasteToPane({ run: def.run, cwd: "/x" })("%1", "hola", false);
+  assert.ok(def.calls.every((c) => c.cmd === "tmux"));
+});
+
+test("targetBuffers: set-buffer y delete-buffer llevan -t pane; sin la opcion el argv no cambia", async () => {
+  const on = captureRun((n, { args }) => (args[0] === "paste-buffer" ? { ok: false, out: "", err: "boom" } : { ok: true, out: "", err: "" }));
+  await createPasteToPane({ run: on.run, cwd: "/x", targetBuffers: true })("s:0.0", "hola", false);
+  const buf = on.calls[0].args[4];
+  assert.deepEqual(on.calls.map((c) => c.args), [
+    ["set-buffer", "-t", "s:0.0", "-b", buf, "--", "hola"],
+    ["paste-buffer", "-d", "-p", "-b", buf, "-t", "s:0.0"],
+    ["delete-buffer", "-t", "s:0.0", "-b", buf],
+  ]);
+  const off = captureRun((n, { args }) => (args[0] === "paste-buffer" ? { ok: false, out: "", err: "boom" } : { ok: true, out: "", err: "" }));
+  await createPasteToPane({ run: off.run, cwd: "/x" })("%1", "hola", false);
+  const b2 = off.calls[0].args[2];
+  assert.deepEqual(off.calls.map((c) => c.args), [
+    ["set-buffer", "-b", b2, "--", "hola"],
+    ["paste-buffer", "-d", "-p", "-b", b2, "-t", "%1"],
+    ["delete-buffer", "-b", b2],
+  ]);
+});
