@@ -23,7 +23,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendF
 import { join, dirname, extname, basename, resolve, isAbsolute, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, userInfo, networkInterfaces, loadavg, cpus, totalmem, freemem } from "node:os";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, execFile } from "node:child_process";
 import { sessionCookie } from "./lib/web-session.mjs";
 import { keyArgs } from "./lib/keys.mjs";
 import { parseAlternateMouseSgr, TMUX_ALT_MOUSE_DISPLAY } from "./lib/tmux-pane-flags.mjs";
@@ -744,6 +744,22 @@ async function api(req, res, path) {
       "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/ogg": ".ogg", "audio/webm": ".webm",
       "audio/aac": ".aac", "audio/flac": ".flac",
     };
+    const RAW_EXT = new Set([
+      ".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".heif",
+      ".pdf", ".mp3", ".m4a", ".wav", ".ogg", ".webm", ".aac", ".flac",
+    ]);
+    const SIPS_BIN = "/usr/bin/sips";
+    const canConvertHeic = process.platform === "darwin" && existsSync(SIPS_BIN);
+    const uploadNombre = (raw) => basename(typeof raw === "string" ? raw : "").replace(/[\x00-\x1f\x7f]+/g, " ").trim().slice(0, 80) || "(sin nombre)";
+    const rejectUpload = (status, err, rawName) => {
+      logEvent(`upload-rechazado · ${uploadNombre(rawName)} · ${err}`);
+      return sendJSON(res, status, { ok: false, err });
+    };
+    const heicToJpeg = (tmp, outJpg) => new Promise((resolve) => {
+      execFile(SIPS_BIN, ["-s", "format", "jpeg", tmp, "--out", outJpg], { timeout: 30000 }, (err) => {
+        resolve(!err && existsSync(outJpg));
+      });
+    });
     mkdirSync(UPLOADS_DIR, { recursive: true });
     // sanitized original name (for humans) + ms timestamp (uniqueness) — never trust the client's filename
     const cleanBase = (raw) => (typeof raw === "string" ? basename(raw) : "").replace(/\.[^.]*$/, "").replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 40) || "screenshot";
@@ -752,23 +768,42 @@ async function api(req, res, path) {
     if (isRawUpload(req)) {
       const rawName = new URL(req.url, "http://x").searchParams.get("name") || "";
       const ext = extname(basename(rawName)).toLowerCase();
-      if (!Object.values(EXT).includes(ext)) return sendJSON(res, 400, { ok: false, err: "formato no soportado (png/jpeg/webp/gif/pdf/audio)" });
-      const file = join(UPLOADS_DIR, `${Date.now()}-${cleanBase(rawName)}${ext}`);
+      const errExt = "formato no soportado (png/jpg/jpeg/heic/webp/gif/pdf/audio)";
+      if (!RAW_EXT.has(ext)) return rejectUpload(400, errExt, rawName);
+      const isHeic = ext === ".heic" || ext === ".heif";
+      if (isHeic && !canConvertHeic) {
+        return rejectUpload(415, "este host no convierte HEIC: en el iPhone pon Ajustes › Cámara › Formatos › Más compatible", rawName);
+      }
+      const outExt = ext === ".jpeg" || isHeic ? ".jpg" : ext;
+      const file = join(UPLOADS_DIR, `${Date.now()}-${cleanBase(rawName)}${outExt}`);
       const tmp = `${file}.mt3k-tmp-${process.pid}`;
       const r = await streamUploadToFile(req, tmp);
-      if (!r.ok) { try { unlinkSync(tmp); } catch { /* none */ } return sendJSON(res, r.err?.includes("grande") ? 413 : 400, { ok: false, err: r.err }); }
+      if (!r.ok) {
+        try { unlinkSync(tmp); } catch { /* none */ }
+        return rejectUpload(r.err?.includes("grande") ? 413 : 400, r.err, rawName);
+      }
+      if (isHeic) {
+        const converted = await heicToJpeg(tmp, file);
+        try { unlinkSync(tmp); } catch { /* none */ }
+        if (!converted) {
+          try { unlinkSync(file); } catch { /* none */ }
+          return rejectUpload(415, "HEIC inválido o no convertible", rawName);
+        }
+        logEvent(`upload · ${basename(file)} · ${Math.round(r.size / 1024)}KB`);
+        return sendJSON(res, 200, { ok: true, path: file });
+      }
       renameSync(tmp, file);
       logEvent(`upload · ${basename(file)} · ${Math.round(r.size / 1024)}KB`);
       return sendJSON(res, 200, { ok: true, path: file });
     }
     // legacy base64-in-JSON branch (old federated panels) — small files only
     const { name, data } = await body(req);
-    if (typeof data !== "string" || !data) return sendJSON(res, 400, { ok: false, err: "imagen vacía" });
+    if (typeof data !== "string" || !data) return rejectUpload(400, "imagen vacía", name);
     const m = data.match(/^data:(image\/(?:png|jpeg|webp|gif)|application\/pdf|audio\/(?:mpeg|mp3|mp4|x-m4a|wav|x-wav|ogg|webm|aac|flac));base64,([A-Za-z0-9+/=]+)$/);
-    if (!m) return sendJSON(res, 400, { ok: false, err: "formato no soportado (png/jpeg/webp/gif/pdf/audio)" });
+    if (!m) return rejectUpload(400, "formato no soportado (png/jpg/jpeg/heic/webp/gif/pdf/audio)", name);
     const buf = Buffer.from(m[2], "base64");
-    if (!buf.length) return sendJSON(res, 400, { ok: false, err: "archivo vacío" });
-    if (buf.length > 25 * 1024 * 1024) return sendJSON(res, 400, { ok: false, err: "archivo demasiado grande (máx 25MB)" });
+    if (!buf.length) return rejectUpload(400, "archivo vacío", name);
+    if (buf.length > 25 * 1024 * 1024) return rejectUpload(400, "archivo demasiado grande (máx 25MB)", name);
     const file = join(UPLOADS_DIR, `${Date.now()}-${cleanBase(name)}${EXT[m[1]]}`);
     writeFileSync(file, buf);
     logEvent(`upload · ${basename(file)} · ${Math.round(buf.length / 1024)}KB`);
