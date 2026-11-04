@@ -33,3 +33,16 @@ test("needsGlobalColortermTruecolor cuando falta o está vacío", () => {
   assert.equal(needsGlobalColortermTruecolor(parseTmuxGlobalEnv("COLORTERM=")), true);
   assert.equal(needsGlobalColortermTruecolor(parseTmuxGlobalEnv("COLORTERM=truecolor")), false);
 });
+
+test("parseTmuxGlobalEnv tolerates psmux: Path= capitalization and CRLF", () => {
+  const env = parseTmuxGlobalEnv("ALLUSERSPROFILE=C:\\ProgramData\r\nComSpec=C:\\Windows\\system32\\cmd.exe\r\nPath=C:\\Windows;C:\\Tools\r\nCODEX_CI=1\r\n");
+  assert.equal(env.get("Path"), "C:\\Windows;C:\\Tools");
+  assert.equal(env.get("CODEX_CI"), "1");
+});
+
+test("tmuxGlobalKeysToUnset never touches Windows system variables", () => {
+  const env = parseTmuxGlobalEnv("ALLUSERSPROFILE=C:\\ProgramData\nAPPDATA=C:\\x\nComSpec=cmd\nPath=C:\\Windows\nUSERNAME=mondo\nCURSOR_AGENT=1");
+  const keys = tmuxGlobalKeysToUnset(env);
+  for (const k of ["ALLUSERSPROFILE", "APPDATA", "ComSpec", "Path", "USERNAME"]) assert.ok(!keys.includes(k), k);
+  assert.ok(keys.includes("CURSOR_AGENT"));
+});

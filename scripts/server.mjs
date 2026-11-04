@@ -31,6 +31,7 @@ import { missingHooks } from "./lib/tmux-hooks.mjs";
 import { decideResume, hasResumableHistory } from "./lib/resume-history.mjs";
 import { createPasteToPane } from "./lib/tmux-paste.mjs";
 import { buildRunningSet } from "./lib/running-set.mjs";
+import { WIN32_PS_COMMAND, createWin32ProcessSource, withoutWindowsApps } from "./lib/proc-tree-win32.mjs";
 import { nvmBinDirs } from "./lib/bin-dirs.mjs";
 import { describeAgent, normalizeAgentDefs, requireCapability } from "./lib/adapters.mjs";
 import {
@@ -38,6 +39,9 @@ import {
   mt3kSessionName,
   parseLaunchConfig,
   composeTmuxArgv,
+  envPairsToTmuxFlags,
+  resolveTmuxBin,
+  hasTmuxBinary,
   parseTmuxGlobalEnv,
   tmuxGlobalKeysToUnset,
   needsGlobalColortermTruecolor,
@@ -102,15 +106,20 @@ function streamUploadToFile(req, tmp) {
   });
 }
 const isRawUpload = (req) => (req.headers["content-type"] || "").includes("octet-stream");
+const IS_WIN = process.platform === "win32";
 function run(cmd, args, cwd, timeoutMs = 60000, envOverride = null) {
   return new Promise((resolve) => {
-    const env = envOverride ? { ...process.env, ...envOverride } : { ...process.env, PATH: `${join(homedir(), ".local/bin")}:${process.env.PATH}` };
+    const env = envOverride ? { ...process.env, ...envOverride } : { ...process.env, PATH: `${join(homedir(), ".local/bin")}${delimiter}${process.env.PATH}` };
+    // Windows env names are case-insensitive: process.env has `Path`, so an added `PATH` would become a second key
+    if (IS_WIN) for (const k of Object.keys(env)) if (k !== "PATH" && k.toUpperCase() === "PATH" && env.PATH !== undefined) delete env[k];
     const ch = spawn(cmd, args, { cwd, env });
     let out = "", err = "";
     const t = setTimeout(() => { ch.kill("SIGKILL"); resolve({ ok: false, out, err: err + "\n[timeout]" }); }, timeoutMs);
     ch.stdout.on("data", (d) => (out += d));
     ch.stderr.on("data", (d) => (err += d));
-    ch.on("close", (code) => { clearTimeout(t); resolve({ ok: code === 0, out: out.trim(), err: err.trim() }); });
+    // Windows tools print CRLF; every caller splits on "\n" and compares ids exactly
+    const clean = (x) => (IS_WIN ? x.replace(/\r\n/g, "\n") : x).trim();
+    ch.on("close", (code) => { clearTimeout(t); resolve({ ok: code === 0, out: clean(out), err: clean(err) }); });
     ch.on("error", (e) => { clearTimeout(t); resolve({ ok: false, out, err: String(e) }); });
   });
 }
@@ -254,8 +263,14 @@ const realDir = (p) => { try { return realpathSync(p); } catch { return resolve(
 // resume only where their per-project transcript/session/chat exists. Other agents: allowed.
 // absolute path of a binary from our search dirs (so tmux launches it regardless of the server env's PATH)
 const absBin = (name) => { for (const d of PATH_DIRS) for (const e of BIN_EXTS) { if (d && existsSync(join(d, name + e))) return join(d, name + e); } return null; };
-// no tmux (Windows) → nothing is launchable-in-tmux; web-UI agents and Files still work
-const HAS_TMUX = !!absBin("tmux");
+// tmux, or psmux (the native tmux clone on Windows). Every tmux call uses this absolute path, so it
+// does not depend on the PATH this service was started with. No binary → nothing is
+// launchable-in-tmux; web-UI agents and Files still work.
+const HAS_TMUX = hasTmuxBinary({ absBin });
+const TMUX_BIN = resolveTmuxBin({ absBin });
+// psmux runs one server per session, so its %N pane ids repeat across sessions: on Windows a pane is
+// identified by session:window.pane (unique, accepted by -t). POSIX keeps tmux's #{pane_id}.
+const PANE_KEY_FMT = IS_WIN ? "#{session_name}:#{window_index}.#{pane_index}" : "#{pane_id}";
 const adapterEnv = () => ({ hasTmux: HAS_TMUX, platform: process.platform });
 const SHELL_DEF = AGENT_DEFS.find((a) => a.id === "shell");
 /** Corta el handler si el adaptador no soporta la operación (respuesta uniforme 400 + err). */
@@ -280,11 +295,11 @@ async function ensureTmuxHooks(force = false) {
     if (tmuxHooksVerified) return;
     if (tmuxHooksPending) return await tmuxHooksPending;
     tmuxHooksPending = (async () => {
-      const hooks = await run("tmux", ["show-hooks", "-g"], ROOT, 3000);
+      const hooks = await run(TMUX_BIN, ["show-hooks", "-g"], ROOT, 3000);
       if (!hooks.ok) return;
       // tmux manual: resize-window "will automatically set window-size to manual in the window options".
       for (const hook of missingHooks(hooks.out)) {
-        const added = await run("tmux", ["set-hook", "-ga", hook, "set -w window-size latest"], ROOT, 3000);
+        const added = await run(TMUX_BIN, ["set-hook", "-ga", hook, "set -w window-size latest"], ROOT, 3000);
         if (!added.ok) return;
       }
       tmuxHooksVerified = true;
@@ -292,7 +307,7 @@ async function ensureTmuxHooks(force = false) {
     try { await tmuxHooksPending; } finally { tmuxHooksPending = null; }
   } catch { /* tmux absent, stopped or unavailable: retry on the next call */ }
 }
-if (HAS_TMUX && (await run("tmux", ["list-sessions"], ROOT, 3000)).ok) await ensureTmuxHooks();
+if (HAS_TMUX && (await run(TMUX_BIN, ["list-sessions"], ROOT, 3000)).ok) await ensureTmuxHooks();
 
 // PATH for everything the panel launches inside tmux. A new tmux session takes the env of the
 // CLIENT that runs `new-session` — this service, whose launchd/systemd PATH has no nvm — not
@@ -330,30 +345,39 @@ function fishPath() {
 }
 async function agentPath() {
   if (agentPathCache.value && Date.now() - agentPathCache.at < 60000) return agentPathCache.value;
-  // no fish, fish failed or timed out → PATH_DIRS (Debian hosts, Windows never reaches tmux)
+  // no fish, fish failed or timed out → PATH_DIRS (Debian hosts, Windows)
   agentPathCache = { at: Date.now(), value: cleanPath((await fishPath()) || PATH_DIRS) };
   return agentPathCache.value;
 }
 
-// one ps snapshot → process tree (pid → ppid → comm). Used for both "is running" and pane discovery.
-async function procTree() {
-  const out = (await run("ps", ["-axo", "pid=,ppid=,comm="], ROOT, 5000)).out;
-  const byPid = new Map(), childrenOf = new Map(), rows = [];
+function parsePsRows(out) {
+  const rows = [];
   for (const line of out.split("\n")) {
     const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
-    if (!m) continue;
-    const pid = +m[1], ppid = +m[2], comm = m[3];
+    if (m) rows.push({ pid: +m[1], ppid: +m[2], comm: m[3] });
+  }
+  return rows;
+}
+// Windows has no `ps`: PowerShell/CIM snapshot, comm normalized to POSIX-style paths, cached 3 s
+const win32ProcessRows = createWin32ProcessSource({
+  exec: async () => (await run(WIN32_PS_COMMAND[0], WIN32_PS_COMMAND.slice(1), ROOT, 15000)).out,
+});
+
+// one ps snapshot → process tree (pid → ppid → comm). Used for both "is running" and pane discovery.
+async function procTree() {
+  const rows = IS_WIN ? await win32ProcessRows() : parsePsRows((await run("ps", ["-axo", "pid=,ppid=,comm="], ROOT, 5000)).out);
+  const byPid = new Map(), childrenOf = new Map();
+  for (const { pid, ppid, comm } of rows) {
     byPid.set(pid, comm);
     if (!childrenOf.has(ppid)) childrenOf.set(ppid, []);
     childrenOf.get(ppid).push(pid);
-    rows.push({ pid, ppid, comm });
   }
   // index every path segment, not just the basename: cursor-agent's process is
   // ".../cursor-agent/versions/x.y/node" — the agent's name only appears as a directory.
   // GUI-app internals stay excluded (e.g. Codex.app/Resources/codex ≠ the codex CLI running)
   // — including bundle workers whose .app/ origin only survives in their ancestry
   // (buildRunningSet, ./lib/running-set.mjs).
-  const running = buildRunningSet(rows);
+  const running = buildRunningSet(IS_WIN ? withoutWindowsApps(rows) : rows);
   // basenames of a pid's process AND all its descendants (the agent may BE the pane's root process
   // — tmux runs the binary directly on launch — or live under a kitty/shell wrapper)
   const descendants = (pid) => {
@@ -372,13 +396,14 @@ async function procTree() {
 // map each tmux pane to the agent CLI actually running inside it (auto-discovery, nothing hardcoded)
 async function discoverPanes(descendants) {
   const fmt = "#{pane_id}|#{pane_pid}|#{session_name}:#{window_index}.#{pane_index}|#{window_name}|#{pane_current_path}|#{pane_current_command}";
-  const r = await run("tmux", ["list-panes", "-a", "-F", fmt], ROOT, 5000);
+  const r = await run(TMUX_BIN, ["list-panes", "-a", "-F", fmt], ROOT, 5000);
   if (!r.ok || !r.out) return []; // no tmux server / not installed → degrade quietly
   const panes = [];
   for (const line of r.out.split("\n")) {
     const parts = line.split("|");
     if (parts.length < 6) continue;
-    const [paneId, panePid, label, window, cwd, command] = parts;
+    const [tmuxPaneId, panePid, label, window, cwd, command] = parts;
+    const paneId = IS_WIN ? label : tmuxPaneId;
     const comms = descendants(+panePid);
     comms.add(base(command)); // also count the pane's own foreground command
     panes.push({ paneId, label, window, cwd: tildify(cwd), command, comms: [...comms] });
@@ -441,7 +466,7 @@ async function detectAgents() {
 }
 
 // paste text into a pane via set-buffer/paste-buffer — safe for arbitrary text (no key interpretation)
-const pasteToPane = createPasteToPane({ run, cwd: ROOT });
+const pasteToPane = createPasteToPane({ run, cwd: ROOT, tmuxBin: TMUX_BIN, targetBuffers: IS_WIN });
 
 // --- federation: hosts this panel aggregates (data/hosts.json, host-local, NEVER automatic) ---
 // every federation consumer (agents, proxy, broadcast) sees only ENABLED hosts — a disabled
@@ -476,7 +501,7 @@ async function updateWaiting(panes) {
   const seen = new Set();
   for (const pn of panes) {
     seen.add(pn.paneId);
-    const r = await run("tmux", ["capture-pane", "-t", pn.paneId, "-p"], ROOT, 4000);
+    const r = await run(TMUX_BIN, ["capture-pane", "-t", pn.paneId, "-p"], ROOT, 4000);
     if (!r.ok) continue;
     const screen = r.out.trimEnd();
     const st = paneWatch.get(pn.paneId) ?? { hash: null, changedAt: now, waiting: false, notifiedAt: 0 };
@@ -673,14 +698,14 @@ async function api(req, res, path) {
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "view")) return;
-    const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
+    const live = (await run(TMUX_BIN, ["list-panes", "-a", "-F", PANE_KEY_FMT], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     // -e keeps colors, -p prints to stdout, -S -1000 ships real scrollback — 200 felt like
     // "no history" on long agent sessions (keep on-screen line breaks → less reflow)
-    const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-N", "-S", "-1000"], ROOT, 5000);
+    const r = await run(TMUX_BIN, ["capture-pane", "-t", paneId, "-p", "-e", "-N", "-S", "-1000"], ROOT, 5000);
     // alt + ratón SGR en un solo display (cero llamadas tmux extra)
     const flags = parseAlternateMouseSgr(
-      (await run("tmux", ["display-message", "-p", "-t", paneId, TMUX_ALT_MOUSE_DISPLAY], ROOT, 4000)).out,
+      (await run(TMUX_BIN, ["display-message", "-p", "-t", paneId, TMUX_ALT_MOUSE_DISPLAY], ROOT, 4000)).out,
     );
     return sendJSON(res, 200, { ok: r.ok, content: r.out, alternate: flags.alternate, mouse_sgr: flags.mouse_sgr });
   }
@@ -695,10 +720,10 @@ async function api(req, res, path) {
     const c = Math.round(Number(cols)), r = Math.round(Number(rows));
     if (!(c >= 40 && c <= 400) || !(r >= 10 && r <= 200)) return sendJSON(res, 400, { ok: false, err: "tamaño inválido" });
     if (denyUnlessCap(res, SHELL_DEF, "view")) return;
-    const cur = await run("tmux", ["display-message", "-p", "-t", paneId, "#{pane_width} #{pane_height} #{window_width} #{window_height}"], ROOT, 4000);
+    const cur = await run(TMUX_BIN, ["display-message", "-p", "-t", paneId, "#{pane_width} #{pane_height} #{window_width} #{window_height}"], ROOT, 4000);
     if (!cur.ok) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     const [paneW, paneH, winW, winH] = cur.out.trim().split(" ").map(Number);
-    const attached = (await run("tmux", ["list-clients", "-t", paneId], ROOT, 4000)).out.trim();
+    const attached = (await run(TMUX_BIN, ["list-clients", "-t", paneId], ROOT, 4000)).out.trim();
     if (attached) return sendJSON(res, 200, { ok: true, skipped: "attached", cols: paneW, rows: paneH });
     // grow-only: a phone opening the same pane later must never shrink it back. The PANE is
     // what matters — in a split window, grow the window by the pane's shortfall first so the
@@ -708,9 +733,9 @@ async function api(req, res, path) {
     const dW = Math.max(0, c - paneW), dH = Math.max(0, r - paneH);
     if (!dW && !dH) return sendJSON(res, 200, { ok: true, cols: paneW, rows: paneH });
     await ensureTmuxHooks();
-    const rz = await run("tmux", ["resize-window", "-t", paneId, "-x", String(Math.min(400, winW + dW)), "-y", String(Math.min(200, winH + dH))], ROOT, 5000);
+    const rz = await run(TMUX_BIN, ["resize-window", "-t", paneId, "-x", String(Math.min(400, winW + dW)), "-y", String(Math.min(200, winH + dH))], ROOT, 5000);
     if (!rz.ok) return sendJSON(res, 500, { ok: false, err: rz.err || "no se pudo redimensionar" });
-    await run("tmux", ["resize-pane", "-t", paneId, "-x", String(c), "-y", String(r)], ROOT, 5000);
+    await run(TMUX_BIN, ["resize-pane", "-t", paneId, "-x", String(c), "-y", String(r)], ROOT, 5000);
     logEvent(`pane-resize · ${paneId} · ${paneW}x${paneH} → ${c}x${r}`);
     return sendJSON(res, 200, { ok: true, cols: c, rows: r });
   }
@@ -724,7 +749,7 @@ async function api(req, res, path) {
     if (text.length > 64000) return sendJSON(res, 400, { ok: false, err: "texto demasiado largo (máx 64000)" }); // long pastes (docs, diffs) are legit — tmux buffers handle them fine
     if (denyUnlessCap(res, SHELL_DEF, "send")) return;
     // confirm the pane still exists before sending
-    const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
+    const live = (await run(TMUX_BIN, ["list-panes", "-a", "-F", PANE_KEY_FMT], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     const r = await pasteToPane(paneId, text, enter);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err });
@@ -1008,9 +1033,9 @@ async function api(req, res, path) {
     const args = keyArgs(key);
     if (!args) return sendJSON(res, 400, { ok: false, err: "tecla no permitida" });
     if (denyUnlessCap(res, SHELL_DEF, "keys")) return;
-    const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
+    const live = (await run(TMUX_BIN, ["list-panes", "-a", "-F", PANE_KEY_FMT], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
-    const r = await run("tmux", ["send-keys", "-t", paneId, ...args], ROOT, 5000);
+    const r = await run(TMUX_BIN, ["send-keys", "-t", paneId, ...args], ROOT, 5000);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "send-keys falló" });
     logEvent(`key · ${paneId} · ${key}`);
     return sendJSON(res, 200, { ok: true, paneId, key });
@@ -1059,6 +1084,7 @@ async function api(req, res, path) {
     // are appended only when this agent has no live pane in the same working directory.
     // shell → NO command: tmux spawns the user's default shell, so rc files and aliases apply
     let cmd = isShell ? [] : [bin];
+    let launchEnvPairs = [];
     let resumed = false;
     let reason = "no-args";
     let resumeReservation = null;
@@ -1067,6 +1093,7 @@ async function api(req, res, path) {
       const lc = isShell ? null : readJSON(join(ROOT, "data", "launch.json"))[agentId];
       if (lc) {
         const { envPairs, args } = parseLaunchConfig(lc);
+        launchEnvPairs = envPairs;
         const reservationKey = `${agentId}\0${tildify(realDir(cwd))}`;
         if (!resumeLaunchReservations.has(reservationKey)) {
           resumeReservation = reservationKey;
@@ -1100,19 +1127,19 @@ async function api(req, res, path) {
     let r;
     try {
       const tmuxEnv = { PATH: await agentPath() };
-      const globalEnv = parseTmuxGlobalEnv((await run("tmux", ["show-environment", "-g"], ROOT, 3000, tmuxEnv)).out);
+      const globalEnv = parseTmuxGlobalEnv((await run(TMUX_BIN, ["show-environment", "-g"], ROOT, 3000, tmuxEnv)).out);
       for (const key of tmuxGlobalKeysToUnset(globalEnv)) {
-        await run("tmux", ["set-environment", "-gr", key], ROOT, 3000, tmuxEnv);
+        await run(TMUX_BIN, ["set-environment", "-gr", key], ROOT, 3000, tmuxEnv);
       }
       if (needsGlobalColortermTruecolor(globalEnv)) {
-        await run("tmux", ["set-environment", "-g", "COLORTERM", "truecolor"], ROOT, 3000, tmuxEnv);
+        await run(TMUX_BIN, ["set-environment", "-g", "COLORTERM", "truecolor"], ROOT, 3000, tmuxEnv);
       }
       // global = the user's PATH + whatever the running server already had (e.g. kitty's own dir
       // for windows opened from kitty), cleaned — never narrower than before
-      const curGlobal = (await run("tmux", ["show-environment", "-g", "PATH"], ROOT, 3000, tmuxEnv)).out.replace(/^PATH=/, "");
-      await run("tmux", ["set-environment", "-g", "PATH", cleanPath([...tmuxEnv.PATH.split(delimiter), ...(curGlobal ? curGlobal.split(delimiter) : [])])], ROOT, 3000, tmuxEnv);
+      const curGlobal = (await run(TMUX_BIN, ["show-environment", "-g", "PATH"], ROOT, 3000, tmuxEnv)).out.replace(/^PATH=/i, "");
+      await run(TMUX_BIN, ["set-environment", "-g", "PATH", cleanPath([...tmuxEnv.PATH.split(delimiter), ...(curGlobal ? curGlobal.split(delimiter) : [])])], ROOT, 3000, tmuxEnv);
       // -d detached · -e PATH + COLORTERM · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
-      r = await run("tmux", ["new-session", "-d", "-e", `PATH=${tmuxEnv.PATH}`, "-e", "COLORTERM=truecolor", "-P", "-F", "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}", "-s", session, "-c", cwd, ...cmd], ROOT, 8000, tmuxEnv);
+      r = await run(TMUX_BIN, ["new-session", "-d", "-e", `PATH=${tmuxEnv.PATH}`, "-e", "COLORTERM=truecolor", ...(IS_WIN ? envPairsToTmuxFlags(launchEnvPairs) : []), "-P", "-F", `${PANE_KEY_FMT}|#{session_name}:#{window_index}.#{pane_index}`, "-s", session, "-c", cwd, ...cmd], ROOT, 8000, tmuxEnv);
       if (r.ok) await ensureTmuxHooks(true);
     } finally {
       // tmux returns before the agent process shows up in the process tree, so a quick second
@@ -1120,7 +1147,8 @@ async function api(req, res, path) {
       if (ownsResumeReservation) setTimeout(() => resumeLaunchReservations.delete(resumeReservation), RESUME_HOLD_MS);
     }
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "tmux new-session falló (¿tmux instalado?)" });
-    const [paneId, label] = (r.out || "").split("|");
+    const [rawPaneId, label] = (r.out || "").split("|");
+    const paneId = IS_WIN ? label : rawPaneId;
     // optional first message: wait for the CLI to boot (screen settles), then paste + enter.
     // fire-and-forget — the client already has its pane and is watching it live.
     if (typeof firstPrompt === "string" && firstPrompt.trim() && firstPrompt.length <= 64000) {
@@ -1128,7 +1156,7 @@ async function api(req, res, path) {
         let prev = "";
         for (let i = 0; i < 10; i++) {
           await new Promise((ok) => setTimeout(ok, 2000));
-          const cap = await run("tmux", ["capture-pane", "-t", paneId, "-p"], ROOT, 4000);
+          const cap = await run(TMUX_BIN, ["capture-pane", "-t", paneId, "-p"], ROOT, 4000);
           if (!cap.ok) return; // pane died before boot
           if (cap.out.trim() && cap.out === prev) break; // two identical captures → CLI is idle at its prompt
           prev = cap.out;
@@ -1147,9 +1175,9 @@ async function api(req, res, path) {
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "kill")) return;
-    const live = (await run("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], ROOT, 5000)).out.split("\n");
+    const live = (await run(TMUX_BIN, ["list-panes", "-a", "-F", PANE_KEY_FMT], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
-    const r = await run("tmux", ["kill-pane", "-t", paneId], ROOT, 5000);
+    const r = await run(TMUX_BIN, ["kill-pane", "-t", paneId], ROOT, 5000);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "kill-pane falló" });
     logEvent(`kill · ${paneId}`);
     return sendJSON(res, 200, { ok: true, paneId });
@@ -1172,7 +1200,7 @@ async function api(req, res, path) {
       if (closed || busy) return;
       busy = true;
       try {
-        const r = await run("tmux", ["capture-pane", "-t", paneId, "-p", "-e", "-N", "-S", "-1000"], ROOT, 5000);
+        const r = await run(TMUX_BIN, ["capture-pane", "-t", paneId, "-p", "-e", "-N", "-S", "-1000"], ROOT, 5000);
         if (closed) return;
         if (!r.ok) { res.write(`event: gone\ndata: {}\n\n`); return end(); }
         const lines = r.out.split("\n");
@@ -1187,7 +1215,7 @@ async function api(req, res, path) {
         if (!sameFrame || ++idleTicks >= 10) {
           idleTicks = 0;
           const flags = parseAlternateMouseSgr(
-            (await run("tmux", ["display-message", "-p", "-t", paneId, TMUX_ALT_MOUSE_DISPLAY], ROOT, 4000)).out,
+            (await run(TMUX_BIN, ["display-message", "-p", "-t", paneId, TMUX_ALT_MOUSE_DISPLAY], ROOT, 4000)).out,
           );
           alt = flags.alternate;
           mouseSgr = flags.mouse_sgr;
