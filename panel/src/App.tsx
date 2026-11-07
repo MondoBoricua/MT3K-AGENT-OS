@@ -38,7 +38,7 @@ const SOCIALS = [
 ];
 
 export default function App() {
-  const [page, setPage] = useState<Page>("Knowledge Graph");
+  const [page, setPage] = useState<Page>("Agents View"); // the room is the home screen (Mondo, 2026-11-07)
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [selected, setSelected] = useState("");
   const [data, setData] = useState<ProjectData | null>(null);

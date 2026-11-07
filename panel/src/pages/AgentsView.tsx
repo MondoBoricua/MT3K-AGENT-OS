@@ -59,9 +59,23 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
 
   return (
     <div className="room relative flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="z-20 px-6 pt-6">
-        <h1 className="text-xl font-semibold tracking-tight">Agents View</h1>
-        <p className="font-mono text-xs text-white/45">{live} codeando · {ready} listos · toca un agente para escribirle o abrirle una sesión en tmux</p>
+      <div className="z-20 flex items-start justify-between gap-4 px-6 pt-6">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Agents View</h1>
+          <p className="font-mono text-xs text-white/45">{live} codeando · {ready} listos · toca un agente para escribirle o abrirle una sesión en tmux</p>
+        </div>
+        {/* desktop only: the 2x2 mosaic entry point, big enough to be seen from across the room */}
+        {onOpenMosaic && (
+          <button
+            type="button"
+            onClick={onOpenMosaic}
+            disabled={sessions.length === 0}
+            title={sessions.length === 0 ? "abre una sesión primero" : "ver hasta 4 terminales a la vez"}
+            className="shrink-0 rounded-xl border border-accent/60 bg-accent/20 px-4 py-2 font-mono text-sm font-semibold text-accent shadow-[0_0_24px_-6px] shadow-accent/60 transition hover:bg-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            ⊞ Mosaico 2x2
+          </button>
+        )}
       </div>
 
       <div className="room-body relative flex-1">

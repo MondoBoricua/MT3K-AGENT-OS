@@ -107,7 +107,14 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
   }, [onClose]);
 
   const placedIds = new Set(slots.filter((s): s is Session => s !== null).map(sessionUid));
-  const freeSessions = sessions.filter((s) => !placedIds.has(sessionUid(s)));
+  // Picker order: by agent name, then host, then folder, so every agent and every machine is reachable
+  // without hunting through a wall of same-agent rows (14 sessions across hosts is normal here).
+  const freeSessions = sessions
+    .filter((s) => !placedIds.has(sessionUid(s)))
+    .sort((a, b) =>
+      a.agent.name.localeCompare(b.agent.name)
+      || (a.agent.host ?? "").localeCompare(b.agent.host ?? "")
+      || a.pane.cwd.localeCompare(b.pane.cwd));
   const focusedSession = focus !== null ? slots[focus] ?? null : null;
 
   const placeInSlot = (idx: number, s: Session) => {
@@ -243,7 +250,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
             >
               <div className="mb-2 flex items-center justify-between">
                 <span className="font-mono text-[10px] uppercase tracking-wider text-white/35">
-                  Slot {idx + 1} · elegir sesión
+                  Slot {idx + 1} · elegir sesión · {freeSessions.length} {freeSessions.length === 1 ? "libre" : "libres"}
                 </span>
               </div>
               {freeSessions.length === 0 ? (
@@ -251,7 +258,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
                   sin sesiones libres
                 </div>
               ) : (
-                <div className="flex flex-1 flex-col gap-1.5 overflow-y-auto">
+                <div className="grid flex-1 grid-cols-2 content-start gap-1.5 overflow-y-auto">
                   {freeSessions.map((s) => {
                     const st = paneStatus(s.pane);
                     const tone = statusTone(st);
@@ -260,7 +267,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
                         key={sessionUid(s)}
                         type="button"
                         onClick={() => placeInSlot(idx, s)}
-                        className="flex items-center justify-between gap-2 rounded-lg border border-ink-line bg-ink-850/60 px-3 py-2 text-left font-mono text-xs transition hover:border-accent/50 hover:bg-ink-850"
+                        className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-ink-line bg-ink-850/60 px-2.5 py-1 text-left font-mono text-[11px] transition hover:border-accent/50 hover:bg-ink-850"
                       >
                         <div className="flex min-w-0 items-center gap-2">
                           <AgentLogo id={s.agent.id} logo={s.agent.logo} online={s.agent.online} className="h-4 w-4 shrink-0" />
