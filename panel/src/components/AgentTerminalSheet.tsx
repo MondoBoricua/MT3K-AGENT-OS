@@ -1,8 +1,8 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentRow, PaneRef, PaneEvent } from "../lib/api";
-import { sendToPane, getPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
-import { ansiToHtml } from "../lib/ansi";
+import { sendToPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { applyPaneEvent } from "../lib/pane-stream";
+import { usePaneStream } from "../lib/use-pane-stream";
 import { attachKind } from "../lib/attach-kind";
 import {
   accumulateWheelDelta,
@@ -13,9 +13,11 @@ import {
   wheelLineThresholdPx,
 } from "../lib/alt-pane-wheel";
 import AgentLogo from "./AgentLogo";
+import { TerminalLine } from "./TerminalLines";
 
 type Props = {
   agent: AgentRow | null; // the agent whose terminal/compose sheet is open (null = closed)
+  initialPaneId?: string; // optional paneId to jump straight into fullscreen (e.g. from Mosaic)
   projects?: { id: string; name: string }[]; // tracked repos, offered as launch targets
   focusProjectId?: string; // Focus mode: preselect this project when opening a new session
   focusPath?: string; // Focus mode: scope the visible sessions to this path and auto-launch into it
@@ -23,16 +25,10 @@ type Props = {
   onToast?: (text: string, live: boolean, ms?: number) => void;
 };
 
-// Memoized by raw line: unchanged rows keep their HTML and DOM, including selection.
-const TerminalLine = memo(function TerminalLine({ line, last }: { line: string; last: boolean }) {
-  const html = useMemo(() => ansiToHtml(line), [line]);
-  return <span className="whitespace-pre-wrap break-words" dangerouslySetInnerHTML={{ __html: html + (last ? "" : "\n") }} />;
-});
-
 // Shared sheet: session picker → fullscreen terminal (live view + docked compose).
 // Used from both Agents View (the room) and the sidebar quick-access list.
 // One session → opens straight into fullscreen; many → pick one, then fullscreen.
-export default function AgentTerminalSheet({ agent, projects = [], focusProjectId, focusPath, onClose, onToast }: Props) {
+export default function AgentTerminalSheet({ agent, initialPaneId, projects = [], focusProjectId, focusPath, onClose, onToast }: Props) {
   const [paneId, setPaneId] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [enterOnSend, setEnterOnSend] = useState(true);
@@ -83,9 +79,10 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
   // launch target is remembered per agent+host (localStorage) so repeat opens are one tap.
   const aKey = agent ? agentKey(agent) : undefined;
   useEffect(() => {
+    const hasInitial = !!(initialPaneId && agent?.panes?.some((p) => p.paneId === initialPaneId));
     const single = !!agent && agent.panes?.length === 1;
-    setPaneId(single ? agent!.panes![0].paneId : null);
-    setText(""); setFullscreen(single); setTerm([]);
+    setPaneId(hasInitial ? initialPaneId! : single ? agent!.panes![0].paneId : null);
+    setText(""); setFullscreen(hasInitial || single); setTerm([]);
     let proj = "", cwd = "~";
     try {
       const saved = JSON.parse(localStorage.getItem(`mt3k.launch.${aKey}`) ?? "{}");
@@ -96,7 +93,7 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     // Focus mode wins over the remembered target: new sessions land in the focused project
     if (!agent?.host && focusProjectId && projects.some((p) => p.id === focusProjectId)) proj = focusProjectId;
     setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false); setShowLaunch(false); setKilled([]); setFirstPrompt("");
-  }, [aKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [aKey, initialPaneId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const launchVisible = !!agent?.launchable && !fullscreen && (showLaunch || panes.length === 0);
   const agentId = agent?.id;
@@ -188,49 +185,19 @@ export default function AgentTerminalSheet({ agent, projects = [], focusProjectI
     setTerm([]);
     setAltPane(false);
     setMouseSgr(null);
-    if (!paneToWatch || !fullscreen) return;
-    let alive = true;
-    let iv: ReturnType<typeof setInterval> | undefined;
-    let es: EventSource | null = null;
-    const poll = () => {
-      const pull = async () => {
-        const r = await getPane(paneToWatch, host);
-        if (alive && r?.ok) {
-          applyTerm(r.content ?? "");
-          if (typeof r.alternate === "boolean") setAltPane(r.alternate);
-          if (typeof r.mouse_sgr === "boolean") setMouseSgr(r.mouse_sgr);
-        }
-      };
-      pull();
-      iv = setInterval(pull, 900);
-    };
-    try {
-      const t = getToken(); // EventSource can't send headers → token rides the query string
-      const hq = host ? `&host=${encodeURIComponent(host)}` : "";
-      es = new EventSource(`/api/pane-stream?id=${encodeURIComponent(paneToWatch)}${hq}${t ? `&t=${encodeURIComponent(t)}` : ""}&fmt=lines`);
-      es.onmessage = (e) => {
-        if (!alive) return;
-        const ev = JSON.parse(e.data) as PaneEvent;
-        applyTerm(ev);
-        // diffs also carry `alt`: a proxy that drops NAMED events can't leave the alt state stale
-        const frame = ev as { alt?: unknown; mouse_sgr?: unknown };
-        if (typeof frame.alt === "boolean") setAltPane(frame.alt);
-        if (typeof frame.mouse_sgr === "boolean") setMouseSgr(frame.mouse_sgr);
-      };
-      es.addEventListener("alt", (e) => { // named event: old servers never send it, old bundles ignore it
-        try {
-          if (!alive) return;
-          const frame = JSON.parse((e as MessageEvent).data) as { alt?: boolean; mouse_sgr?: boolean };
-          setAltPane(frame.alt === true);
-          if (typeof frame.mouse_sgr === "boolean") setMouseSgr(frame.mouse_sgr);
-        } catch { /* bad frame */ }
-      });
-      es.onerror = () => { es?.close(); es = null; if (alive && !iv) poll(); };
-    } catch {
-      poll();
-    }
-    return () => { alive = false; es?.close(); if (iv) clearInterval(iv); touchDown.current = false; wheelAt.current = 0; };
+    return () => { touchDown.current = false; wheelAt.current = 0; };
   }, [paneToWatch, fullscreen, host]);
+
+  usePaneStream({
+    paneId: paneToWatch ?? null,
+    host,
+    enabled: !!(paneToWatch && fullscreen),
+    onEvent: applyTerm,
+    onAlt: (alt, sgr) => {
+      if (alt !== null) setAltPane(alt);
+      if (sgr !== null) setMouseSgr(sgr);
+    },
+  });
 
   // lock body scroll behind the fullscreen overlay
   useEffect(() => {

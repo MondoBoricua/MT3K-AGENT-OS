@@ -12,7 +12,9 @@ import Settings from "./pages/Settings";
 import AgentsView from "./pages/AgentsView";
 import Files from "./pages/Files";
 import AgentTerminalSheet from "./components/AgentTerminalSheet";
+import Mosaic from "./components/Mosaic";
 import AgentLogo from "./components/AgentLogo";
+import { DESKTOP_QUERY, useMediaQuery } from "./lib/use-media-query";
 
 const BASE = import.meta.env.BASE_URL;
 const NAV = [
@@ -44,6 +46,9 @@ export default function App() {
   const [agents, setAgents] = useState<AgentRow[]>([]);
   const [navOpen, setNavOpen] = useState(false);
   const [sheetAgentId, setSheetAgentId] = useState<string | null>(null);
+  const [sheetInitialPaneId, setSheetInitialPaneId] = useState<string | undefined>(undefined);
+  const [mosaicOpen, setMosaicOpen] = useState(false);
+  const isDesktop = useMediaQuery(DESKTOP_QUERY);
   const [toasts, setToasts] = useState<{ id: number; text: string; live: boolean }[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pendingSel, setPendingSel] = useState<{ project: string; id: string } | null>(null);
@@ -73,6 +78,10 @@ export default function App() {
     window.addEventListener("mt3k:unauthorized", onUnauthorized);
     return () => window.removeEventListener("mt3k:unauthorized", onUnauthorized);
   }, []);
+
+  useEffect(() => {
+    if (!isDesktop && mosaicOpen) setMosaicOpen(false);
+  }, [isDesktop, mosaicOpen]);
   const saveToken = () => {
     if (!tokenDraft.trim()) return;
     setToken(tokenDraft.trim());
@@ -184,8 +193,10 @@ export default function App() {
   const runningCount = agents.filter((a) => a.running).length;
   // open the shared terminal sheet (from the room or the sidebar). We key by host:id so the sheet
   // tracks the live agent (panes refresh on each poll) even across federated hosts.
-  const openAgent = (a: AgentRow) => { setSheetAgentId(agentKey(a)); setNavOpen(false); };
+  const openAgent = (a: AgentRow) => { setSheetInitialPaneId(undefined); setSheetAgentId(agentKey(a)); setNavOpen(false); };
+  const expandFromMosaic = (a: AgentRow, paneId: string) => { setMosaicOpen(false); setSheetInitialPaneId(paneId); setSheetAgentId(agentKey(a)); };
   const sheetAgent = sheetAgentId ? agents.find((a) => agentKey(a) === sheetAgentId) ?? null : null;
+  const viewSessions = viewAgents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
 
   return (
     <div className="relative flex h-screen overflow-hidden text-white">
@@ -326,7 +337,7 @@ export default function App() {
         {page === "Memory" && <Memory />}
         {page === "Activity" && <Activity />}
         {page === "Files" && <Files onToast={pushToast} focusPath={focus?.path} />}
-        {page === "Agents View" && <AgentsView agents={viewAgents} onOpen={openAgent} onToast={pushToast} focusPath={focus?.path} />}
+        {page === "Agents View" && <AgentsView agents={viewAgents} onOpen={openAgent} onOpenMosaic={isDesktop ? () => setMosaicOpen(true) : undefined} onToast={pushToast} focusPath={focus?.path} />}
         {page === "Settings" && <Settings manifest={manifest} onChanged={() => loadManifest(`?t=${Date.now()}`)} />}
       </main>
 
@@ -338,7 +349,9 @@ export default function App() {
       )}
 
       {/* shared terminal/compose sheet — opened from Agents View or the sidebar quick-access list */}
-      <AgentTerminalSheet agent={sheetAgent} projects={manifest?.projects ?? []} focusProjectId={focus?.id} focusPath={focus?.path} onClose={() => setSheetAgentId(null)} onToast={pushToast} />
+      <AgentTerminalSheet agent={sheetAgent} initialPaneId={sheetInitialPaneId} projects={manifest?.projects ?? []} focusProjectId={focus?.id} focusPath={focus?.path} onClose={() => { setSheetAgentId(null); setSheetInitialPaneId(undefined); }} onToast={pushToast} />
+
+      <Mosaic open={mosaicOpen && isDesktop} sessions={viewSessions} onClose={() => setMosaicOpen(false)} onExpand={expandFromMosaic} onToast={pushToast} />
 
       {/* Focus picker — mobile first-visit asks here; the header chip reopens it anywhere */}
       {focusPickerOpen && (
