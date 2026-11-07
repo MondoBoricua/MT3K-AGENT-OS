@@ -8,7 +8,8 @@
  *   POST /api/send     { paneId, text, enter? } → types text into an agent's tmux pane (LAN-only)
  *   POST /api/upload   { name, data }       → saves a base64 image to data/uploads/, returns its path
  *   GET  /api/fs/list|read|raw ?path=  +  POST /api/fs/write|upload|move|delete → file browser / manager
- *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered)
+ *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered, with status: working|blocked|idle)
+ *   GET  /api/pane-stream ?id=&fmt=lines&tick= → SSE live terminal stream (clamped tick ms, default 500)
  *   GET  /api/logs                        → data/logs/*.md (Memory / Activity pages)
  *   GET  /api/skills                      → reads ~/.agents/skills SKILL.md frontmatter (Skills page)
  *   GET  /api/manifest                    → current panel manifest
@@ -48,6 +49,7 @@ import {
 } from "./lib/adapters/cli-tmux.mjs";
 import { pickWebStarter, webTokenFromLogText } from "./lib/adapters/web-local.mjs";
 import { mergeLocalAgentDefs, readAgentsLocalFile } from "./lib/agents-local.mjs";
+import { clampTick, paneStatusFor } from "./lib/pane-status.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -458,8 +460,13 @@ async function detectAgents() {
     return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: HAS_TMUX && a.bins.some(onPath) && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : a.web && installed && a.webCmd ? { webOff: true } : {}), ...adapterMeta };
   });
   await updateWaiting(rows.flatMap((r) => r.panes.map((p) => ({ ...p, agentName: r.name }))));
+  const now = Date.now();
   for (const r of rows) {
-    for (const p of r.panes) p.waiting = paneWatch.get(p.paneId)?.waiting ?? false;
+    for (const p of r.panes) {
+      const watch = paneWatch.get(p.paneId);
+      p.waiting = watch?.waiting ?? false;
+      p.status = paneStatusFor(watch, now);
+    }
     r.waiting = r.panes.some((p) => p.waiting);
   }
   return rows;
@@ -1222,6 +1229,7 @@ async function api(req, res, path) {
   if (path === "/api/pane-stream") {
     const params = new URL(req.url, "http://x").searchParams;
     const paneId = params.get("id") || "";
+    const tickMs = clampTick(params.get("tick"));
     // Opt-in diffs preserve full strings for old bundles and mixed-version federation.
     const lineDiffs = params.get("fmt") === "lines";
     const paneCheck = validatePaneId(paneId);
@@ -1271,7 +1279,7 @@ async function api(req, res, path) {
         busy = false;
       }
     };
-    const iv = setInterval(tick, 500);
+    const iv = setInterval(tick, tickMs);
     const end = () => { if (!closed) { closed = true; clearInterval(iv); try { res.end(); } catch { /* gone */ } } };
     req.on("close", end);
     tick();

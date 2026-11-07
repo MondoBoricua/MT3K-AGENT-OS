@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AgentRow } from "../lib/api";
 import { getLogs, broadcast, agentKey } from "../lib/api";
+import { paneStatus, statusTone } from "../lib/pane-status";
 import AgentLogo from "../components/AgentLogo";
 
 const HACKER = "/sprites/hacker.webp"; // standing/idle (row 2 = running-left, full frames)
@@ -14,9 +15,15 @@ function eventFromCardControl(e: { target: EventTarget | null }) {
   return el?.closest("a, button") != null;
 }
 
-type Props = { agents: AgentRow[]; onOpen: (a: AgentRow) => void; onToast?: (text: string, live: boolean) => void; focusPath?: string };
+type Props = {
+  agents: AgentRow[];
+  onOpen: (a: AgentRow) => void;
+  onOpenMosaic?: () => void;
+  onToast?: (text: string, live: boolean) => void;
+  focusPath?: string;
+};
 
-export default function AgentsView({ agents, onOpen, onToast, focusPath }: Props) {
+export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focusPath }: Props) {
   const live = agents.filter((a) => a.running).length;
   const ready = agents.filter((a) => a.online).length;
   const sessions = agents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
@@ -65,23 +72,43 @@ export default function AgentsView({ agents, onOpen, onToast, focusPath }: Props
         <div className="wallscreen absolute left-1/2 top-[6%] z-20 w-[min(620px,92%)] -translate-x-1/2 px-4 py-3">
           <div className="flex items-center justify-between gap-3">
             <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-accent">◉ Sala de operaciones</span>
-            <span className="font-mono text-[10px] text-white/45">
-              {live} codeando · {sessions.length} {sessions.length === 1 ? "sesión" : "sesiones"}
-              {waitingCount > 0 && <span className="text-amber-300"> · ⏳ {waitingCount} esperando</span>}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[10px] text-white/45">
+                {live} codeando · {sessions.length} {sessions.length === 1 ? "sesión" : "sesiones"}
+                {waitingCount > 0 && <span className="text-amber-300"> · ⏳ {waitingCount} esperando</span>}
+              </span>
+              {onOpenMosaic && sessions.length > 0 && (
+                <button
+                  type="button"
+                  onClick={onOpenMosaic}
+                  className="rounded-lg border border-ink-line bg-ink-850/60 px-2 py-0.5 font-mono text-[10px] text-accent transition hover:border-accent/50 hover:bg-accent/15"
+                >
+                  ⊞ mosaico
+                </button>
+              )}
+            </div>
           </div>
-          {/* live tmux sessions as tappable chips (amber = waiting for your input) */}
+          {/* live tmux sessions as tappable chips (amber = blocked, emerald = working, muted = idle/unknown) */}
           <div className="mt-2 flex max-h-[72px] flex-wrap gap-1.5 overflow-y-auto sm:max-h-none">
-            {sessions.map(({ agent: a, pane: p }) => (
-              <button key={`${agentKey(a)}-${p.paneId}`} onClick={() => onOpen(a)}
-                className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] transition ${
-                  p.waiting ? "border-amber-400/40 bg-amber-400/10 text-amber-200 hover:bg-amber-400/20" : "border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20"}`}>
-                <AgentLogo id={a.id} logo={a.logo} online className="h-3 w-3" />
-                {a.host && <span className="text-sky-300">{a.host}·</span>}
-                <span className="max-w-[160px] truncate">{p.cwd}</span>
-                {p.waiting && <span>⏳</span>}
-              </button>
-            ))}
+            {sessions.map(({ agent: a, pane: p }) => {
+              const st = paneStatus(p);
+              const tone = statusTone(st);
+              const chipCls =
+                tone === "amber"
+                  ? "border-amber-400/40 bg-amber-400/10 text-amber-200 hover:bg-amber-400/20"
+                  : tone === "emerald"
+                    ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20"
+                    : "border-ink-line bg-ink-850/60 text-white/60 hover:border-accent/40 hover:text-white";
+              return (
+                <button key={`${agentKey(a)}-${p.paneId}`} onClick={() => onOpen(a)}
+                  className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] transition ${chipCls}`}>
+                  <AgentLogo id={a.id} logo={a.logo} online className="h-3 w-3" />
+                  {a.host && <span className="text-sky-300">{a.host}·</span>}
+                  <span className="max-w-[160px] truncate">{p.cwd}</span>
+                  {st === "blocked" && <span>⏳</span>}
+                </button>
+              );
+            })}
             {sessions.length === 0 && <span className="font-mono text-[10px] text-white/30">sin sesiones en tmux — toca un agente y dale ▶ abrir</span>}
           </div>
           {/* broadcast: one line → every live session everywhere */}

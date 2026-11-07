@@ -1,6 +1,6 @@
 export interface SkillRow { name: string; slug: string; description: string }
 export interface LogEntry { date: string; content: string }
-export interface PaneRef { paneId: string; label: string; window: string; cwd: string; waiting?: boolean }
+export interface PaneRef { paneId: string; label: string; window: string; cwd: string; waiting?: boolean; status?: "working" | "blocked" | "idle" }
 export type PaneEvent = string | { from: number; lines: string[] };
 export type AdapterCapability = { supported: boolean; reason?: string };
 export type AgentAdapterCapabilities = {
