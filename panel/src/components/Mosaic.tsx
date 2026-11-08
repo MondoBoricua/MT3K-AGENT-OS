@@ -9,9 +9,12 @@ import {
   type MosaicPreset,
   type Session,
 } from "../lib/mosaic-presets";
-import { loadLastSlots, loadPresets, saveLastSlots, savePresets } from "../lib/mosaic-storage";
+import { pickActiveSlot, slotForKey, type MosaicLayout } from "../lib/mosaic-layout";
+import { loadLastSlots, loadLayout, loadPresets, saveLastSlots, saveLayout, savePresets } from "../lib/mosaic-storage";
 import { paneStatus, statusLabel, statusTone } from "../lib/pane-status";
 import AgentLogo from "./AgentLogo";
+import MosaicLayoutSwitch from "./MosaicLayoutSwitch";
+import MosaicSlotStrip from "./MosaicSlotStrip";
 import PaneTile from "./PaneTile";
 
 type Props = {
@@ -43,6 +46,8 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
     const idx = initial.findIndex((s) => s !== null);
     return idx >= 0 ? idx : null;
   });
+  const [layout, setLayout] = useState<MosaicLayout>(() => loadLayout());
+  const [active, setActive] = useState<number>(() => pickActiveSlot(resolveSlots(loadLastSlots(), sessions), null));
   const [presets, setPresets] = useState<MosaicPreset[]>(() => loadPresets());
   const [selectedPreset, setSelectedPreset] = useState("");
   const [text, setText] = useState("");
@@ -85,6 +90,29 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
     setFocus((prev) => (prev !== null && !slots[prev] ? null : prev));
   }, [slots]);
 
+  // 1x1 shows the slot that has focus: focus moves the active slot, never the other way round
+  useEffect(() => {
+    if (focus !== null) setActive(focus);
+  }, [focus]);
+
+  // Keys 1-4 pick the active slot in 1x1 (ignored while typing or with modifiers)
+  useEffect(() => {
+    if (layout !== "1x1") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return;
+      const idx = slotForKey(e.key);
+      if (idx === null) return;
+      e.preventDefault();
+      e.stopPropagation(); // App.tsx binds 1-9 to "switch project" on window: capture first so it never sees these
+      setActive(idx);
+      setFocus(slots[idx] ? idx : null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [layout, slots]);
+
   // Lock body scroll while open
   useEffect(() => {
     const prev = document.body.style.overflow;
@@ -118,6 +146,19 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
       || a.pane.cwd.localeCompare(b.pane.cwd));
   const focusedSession = focus !== null ? slots[focus] ?? null : null;
 
+  const changeLayout = (next: MosaicLayout) => {
+    setLayout(next);
+    saveLayout(next);
+    if (next === "1x1") setActive((cur) => (focus !== null ? focus : cur));
+  };
+
+  const selectSlot = (idx: number) => {
+    setActive(idx);
+    setFocus(slots[idx] ? idx : null);
+  };
+
+  const visibleIdx = layout === "1x1" ? [active] : slots.map((_, i) => i);
+
   const placeInSlot = (idx: number, s: Session) => {
     setSlots((prev) => prev.map((cur, i) => (i === idx ? s : cur)));
     setFocus(idx);
@@ -136,6 +177,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
     setSlots(resolved);
     const firstFilled = resolved.findIndex((s) => s !== null);
     setFocus(firstFilled >= 0 ? firstFilled : null);
+    setActive(pickActiveSlot(resolved, null));
   };
 
   const handleSavePreset = () => {
@@ -195,6 +237,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
         </div>
 
         <div className="flex items-center gap-2">
+          <MosaicLayoutSwitch layout={layout} onChange={changeLayout} />
           <select
             value={selectedPreset}
             onChange={(e) => handleLoadPreset(e.target.value)}
@@ -232,9 +275,11 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
         </div>
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-cols-2 grid-rows-2 gap-2 p-2">
-        {slots.map((slot, idx) =>
-          slot ? (
+      {layout === "1x1" && <MosaicSlotStrip slots={slots} active={active} onSelect={selectSlot} />}
+      <div className={`grid min-h-0 flex-1 gap-2 p-2 ${layout === "1x1" ? "grid-cols-1 grid-rows-1" : "grid-cols-2 grid-rows-2"}`}>
+        {visibleIdx.map((idx) => {
+          const slot = slots[idx];
+          return slot ? (
             <PaneTile
               key={`${idx}-${sessionUid(slot)}`}
               session={slot}
@@ -291,8 +336,8 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
                 </div>
               )}
             </div>
-          ),
-        )}
+          );
+        })}
       </div>
 
       <footer

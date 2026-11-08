@@ -149,7 +149,7 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
             title={sessions.length === 0 ? "abre una sesión primero" : "ver hasta 4 terminales a la vez"}
             className="shrink-0 rounded-xl border border-accent/60 bg-accent/20 px-4 py-2 font-mono text-sm font-semibold text-accent shadow-[0_0_24px_-6px] shadow-accent/60 transition hover:bg-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            ⊞ Mosaico 2x2
+            ⊞ Mosaico
           </button>
         )}
       </div>
