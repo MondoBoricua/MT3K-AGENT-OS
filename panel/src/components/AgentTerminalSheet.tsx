@@ -4,6 +4,7 @@ import { sendToPane, sendKey, launchAgent, resumableFor, killPane, getToken, get
 import { applyPaneEvent } from "../lib/pane-stream";
 import { usePaneStream } from "../lib/use-pane-stream";
 import { attachKind } from "../lib/attach-kind";
+import { paneStatus, statusLabel, statusTone } from "../lib/pane-status";
 import {
   accumulateWheelDelta,
   initialAltWheelSession,
@@ -24,6 +25,14 @@ type Props = {
   onClose: () => void;
   onToast?: (text: string, live: boolean, ms?: number) => void;
 };
+
+// status pill palette in the session picker (same as PaneTile)
+const PICKER_TONE_CLS = {
+  emerald: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
+  amber: "border-amber-400/40 bg-amber-400/10 text-amber-200",
+  sky: "border-sky-400/40 bg-sky-400/10 text-sky-200",
+  muted: "border-ink-line bg-ink-850/60 text-white/50",
+} as const;
 
 // Shared sheet: session picker → fullscreen terminal (live view + docked compose).
 // Used from both Agents View (the room) and the sidebar quick-access list.
@@ -900,16 +909,23 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
           // session picker — pick which tmux pane to open in fullscreen
           <div className="flex flex-col gap-2">
             <p className="mb-1 font-mono text-[11px] text-white/45">¿a cuál sesión?</p>
-            {panes.map((p) => (
+            {panes.map((p) => {
+              const st = paneStatus(p);
+              const tone = statusTone(st);
+              const rowCls = tone === "amber" ? "border-amber-400/40 bg-amber-400/5" : tone === "emerald" ? "border-emerald-400/30 bg-emerald-400/5" : tone === "sky" ? "border-sky-400/40 bg-sky-400/5" : "border-ink-line bg-ink-850/50";
+              return (
               <div key={p.paneId} className="flex items-stretch gap-1.5">
                 <button onClick={() => { setPaneId(p.paneId); setFullscreen(true); }}
-                  className={`min-w-0 flex-1 rounded-xl border px-3 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink-850 ${p.waiting ? "border-amber-400/40 bg-amber-400/5" : "border-ink-line bg-ink-850/50"}`}>
-                  <div className="truncate font-mono text-xs text-white">
-                    {p.waiting && <span className="mr-1 text-amber-300">⏳</span>}
-                    {p.name && <span className="mr-1.5 font-semibold text-accent">{p.name}</span>}
-                    <span>{p.cwd}</span>
+                  className={`min-w-0 flex-1 rounded-xl border px-3 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink-850 ${rowCls}`}>
+                  <div className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1 truncate font-mono text-xs text-white">
+                      {p.name && <span className="mr-1.5 font-semibold text-accent">{p.name}</span>}
+                      <span>{p.cwd}</span>
+                    </div>
+                    {/* same state pill as the mosaic tiles: trabajando / esperando input / terminó / idle */}
+                    <span title={p.statusRule} className={`shrink-0 rounded-full border px-2 py-0.5 font-mono text-[9px] ${PICKER_TONE_CLS[tone]}`}>{statusLabel(st)}</span>
                   </div>
-                  <div className="font-mono text-[10px] text-white/40">{p.label} · {p.paneId}{p.waiting ? " · esperando input" : ""}</div>
+                  <div className="font-mono text-[10px] text-white/40">{p.label} · {p.paneId}</div>
                 </button>
                 {/* rename from the picker too: on the phone this list is where sessions are chosen */}
                 <button onClick={() => renamePane(p)} title={p.name ? "cambiar el nombre de la sesión" : "ponerle nombre a la sesión"}
@@ -921,7 +937,8 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                   ✕
                 </button>
               </div>
-            ))}
+              );
+            })}
             {agent.launchable && (
               <button onClick={() => setShowLaunch(true)}
                 className="rounded-xl border border-dashed border-ink-line px-3 py-2.5 text-left font-mono text-xs text-white/50 transition hover:border-accent/50 hover:text-accent">
