@@ -28,6 +28,7 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
   const ready = agents.filter((a) => a.online).length;
   const sessions = agents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
   const waitingCount = sessions.filter((s) => s.pane.waiting).length;
+  const doneCount = sessions.filter((s) => paneStatus(s.pane) === "done").length;
 
   // broadcast: one message → every live session on every federated host
   const [bcText, setBcText] = useState("");
@@ -90,6 +91,7 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
               <span className="font-mono text-[10px] text-white/45">
                 {live} codeando · {sessions.length} {sessions.length === 1 ? "sesión" : "sesiones"}
                 {waitingCount > 0 && <span className="text-amber-300"> · ⏳ {waitingCount} esperando</span>}
+                {doneCount > 0 && <span className="text-sky-300"> · ✓ {doneCount} terminados</span>}
               </span>
               {onOpenMosaic && sessions.length > 0 && (
                 <button
@@ -102,7 +104,7 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
               )}
             </div>
           </div>
-          {/* live tmux sessions as tappable chips (amber = blocked, emerald = working, muted = idle/unknown) */}
+          {/* live tmux sessions as tappable chips (amber = blocked, emerald = working, sky = done, muted = idle/unknown) */}
           <div className="mt-2 flex max-h-[72px] flex-wrap gap-1.5 overflow-y-auto sm:max-h-none">
             {sessions.map(({ agent: a, pane: p }) => {
               const st = paneStatus(p);
@@ -112,14 +114,17 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
                   ? "border-amber-400/40 bg-amber-400/10 text-amber-200 hover:bg-amber-400/20"
                   : tone === "emerald"
                     ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20"
-                    : "border-ink-line bg-ink-850/60 text-white/60 hover:border-accent/40 hover:text-white";
+                    : tone === "sky"
+                      ? "border-sky-400/40 bg-sky-400/10 text-sky-200 hover:bg-sky-400/20"
+                      : "border-ink-line bg-ink-850/60 text-white/60 hover:border-accent/40 hover:text-white";
               return (
-                <button key={`${agentKey(a)}-${p.paneId}`} onClick={() => onOpen(a)}
+                <button key={`${agentKey(a)}-${p.paneId}`} onClick={() => onOpen(a)} title={p.statusRule}
                   className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] transition ${chipCls}`}>
                   <AgentLogo id={a.id} logo={a.logo} online className="h-3 w-3" />
                   {a.host && <span className="text-sky-300">{a.host}·</span>}
                   <span className="max-w-[160px] truncate">{p.cwd}</span>
                   {st === "blocked" && <span>⏳</span>}
+                  {st === "done" && <span>✓</span>}
                 </button>
               );
             })}

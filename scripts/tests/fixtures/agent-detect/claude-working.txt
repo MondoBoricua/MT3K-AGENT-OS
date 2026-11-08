@@ -1,0 +1,9 @@
+⏺ Bash(git status --short && node --test 'scripts/tests/*.test.mjs')
+  ⎿  Running…
+
+✻ Baking… (14s · ↑ 1.8k tokens · esc to interrupt)
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+   📂 MT3K-AGENT-OS (master)   🤖 Fable 5.1 
+  ⏵⏵ bypass permissions on · esc to interrupt

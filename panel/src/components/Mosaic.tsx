@@ -25,6 +25,7 @@ type Props = {
 const TONE_CLS = {
   emerald: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
   amber: "border-amber-400/40 bg-amber-400/10 text-amber-200",
+  sky: "border-sky-400/40 bg-sky-400/10 text-sky-200",
   muted: "border-ink-line bg-ink-850/60 text-white/50",
 } as const;
 
@@ -279,7 +280,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
                           )}
                           <span className="truncate text-[11px] text-white/50">{s.pane.cwd}</span>
                         </div>
-                        <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[9px] ${TONE_CLS[tone]}`}>
+                        <span title={s.pane.statusRule} className={`shrink-0 rounded-full border px-2 py-0.5 text-[9px] ${TONE_CLS[tone]}`}>
                           {statusLabel(st)}
                         </span>
                       </button>
