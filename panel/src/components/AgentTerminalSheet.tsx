@@ -911,6 +911,11 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                   </div>
                   <div className="font-mono text-[10px] text-white/40">{p.label} · {p.paneId}{p.waiting ? " · esperando input" : ""}</div>
                 </button>
+                {/* rename from the picker too: on the phone this list is where sessions are chosen */}
+                <button onClick={() => renamePane(p)} title={p.name ? "cambiar el nombre de la sesión" : "ponerle nombre a la sesión"}
+                  className="shrink-0 rounded-xl border border-ink-line px-3 font-mono text-xs text-white/55 transition hover:border-accent/50 hover:text-accent">
+                  ✎
+                </button>
                 <button onClick={() => kill(p.paneId)} title="matar esta sesión"
                   className="shrink-0 rounded-xl border border-red-400/25 px-3 font-mono text-xs text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200">
                   ✕
