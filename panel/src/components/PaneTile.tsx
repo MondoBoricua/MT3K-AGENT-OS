@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { paneResize, type PaneEvent } from "../lib/api";
+import { paneResize, setPaneLabel, type PaneEvent } from "../lib/api";
 import { measuredLineHeightPx } from "../lib/alt-pane-wheel";
 import type { Session } from "../lib/mosaic-presets";
 import { paneStatus, statusLabel, statusTone } from "../lib/pane-status";
@@ -15,6 +15,7 @@ type Props = {
   onFocus: () => void;
   onExpand: () => void;
   onRemove: () => void;
+  onToast?: (text: string, live: boolean, ms?: number) => void;
 };
 
 const TONE_CLS = {
@@ -26,10 +27,11 @@ const TONE_CLS = {
 
 const TILE_FONT_PX = 12;
 
-export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, onRemove }: Props) {
+export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, onRemove, onToast }: Props) {
   const { agent, pane } = session;
   const host = agent.host;
   const [term, setTerm] = useState<string[]>([]);
+  const [localName, setLocalName] = useState<string | null>(null);
   const latestTerm = useRef<string[]>([]);
   const termRef = useRef<HTMLPreElement>(null);
   const stickToBottom = useRef(true);
@@ -40,10 +42,30 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
   useEffect(() => {
     latestTerm.current = [];
     setTerm([]);
+    setLocalName(null);
     stickToBottom.current = true;
     setScrolledUp(false);
     lastResize.current = null;
   }, [pane.paneId, host]);
+
+  useEffect(() => {
+    setLocalName(null);
+  }, [pane.name]);
+
+  const displayName = localName !== null ? (localName || undefined) : pane.name;
+
+  const handleRename = async () => {
+    const next = window.prompt("Nombre de la sesión", displayName ?? "");
+    if (next === null) return;
+    const r = await setPaneLabel(pane.paneId, next.trim(), host);
+    if (r?.ok) {
+      setLocalName(r.name ?? "");
+      window.dispatchEvent(new Event("mt3k:refresh-change"));
+      onToast?.(r.name ? `sesión renombrada a «${r.name}»` : "nombre de sesión borrado", true);
+    } else {
+      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo renombrar la sesión", false);
+    }
+  };
 
   const onEvent = (ev: PaneEvent) => {
     const next = applyPaneEvent(latestTerm.current, ev);
@@ -131,6 +153,11 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
               {host}
             </span>
           )}
+          {displayName && (
+            <span className="shrink-0 font-mono text-[11px] font-semibold text-accent" title={displayName}>
+              {displayName}
+            </span>
+          )}
           <span className="truncate font-mono text-[10px] text-white/45" title={pane.cwd}>
             {pane.cwd}
           </span>
@@ -139,6 +166,17 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
           <span title={pane.statusRule} className={`rounded-full border px-2 py-0.5 font-mono text-[9px] ${TONE_CLS[tone]}`}>
             {statusLabel(st)}
           </span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              void handleRename();
+            }}
+            title="renombrar sesión"
+            className="rounded border border-ink-line px-1.5 py-0.5 font-mono text-[10px] text-white/60 transition hover:border-accent/50 hover:text-accent"
+          >
+            ✎
+          </button>
           <button
             type="button"
             onClick={(e) => {

@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import type { AgentRow } from "../lib/api";
-import { getLogs, broadcast, agentKey } from "../lib/api";
+import type { AgentRow, RestoreMissingItem, RestoreState } from "../lib/api";
+import { getLogs, broadcast, agentKey, getRestore, restoreSessions } from "../lib/api";
 import { paneStatus, statusTone } from "../lib/pane-status";
 import AgentLogo from "../components/AgentLogo";
+
+const RESTORE_DISMISS_KEY = "mt3k.restore.dismissed";
 
 const HACKER = "/sprites/hacker.webp"; // standing/idle (row 2 = running-left, full frames)
 const LAPTOP = "/sprites/laptop.png"; // coding-on-laptop strip (6 good frames)
@@ -57,6 +59,79 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
     const id = setInterval(pull, 30000);
     return () => { alive = false; clearInterval(id); };
   }, []);
+
+  const [restoreState, setRestoreState] = useState<RestoreState | null>(null);
+  const [restoringKey, setRestoringKey] = useState<string | null>(null);
+  const [dismissedSavedAt, setDismissedSavedAt] = useState<string>(() => {
+    try { return localStorage.getItem(RESTORE_DISMISS_KEY) ?? ""; } catch { return ""; }
+  });
+
+  useEffect(() => {
+    let alive = true;
+    getRestore().then((r) => {
+      if (alive && r?.ok) setRestoreState(r);
+    });
+    return () => { alive = false; };
+  }, [sessions.length]);
+
+  const missingSessions = restoreState?.missing ?? [];
+  const restoreVisible =
+    missingSessions.length > 0 &&
+    !!restoreState?.savedAt &&
+    restoreState.savedAt !== dismissedSavedAt;
+
+  const dismissRestore = async () => {
+    if (restoringKey) return;
+    const sa = restoreState?.savedAt ?? "";
+    setDismissedSavedAt(sa);
+    try { if (sa) localStorage.setItem(RESTORE_DISMISS_KEY, sa); } catch { /* private mode */ }
+    setRestoringKey("dismiss");
+    const r = await restoreSessions({ dismissAll: true });
+    setRestoringKey(null);
+    if (r?.ok) {
+      const fresh = await getRestore();
+      if (fresh?.ok) setRestoreState(fresh);
+      else setRestoreState(null);
+    } else if (r?.err) {
+      onToast?.(`error: ${r.err}`, false);
+    }
+  };
+
+  const handleRestoreAll = async () => {
+    if (restoringKey) return;
+    setRestoringKey("all");
+    const r = await restoreSessions({ all: true });
+    setRestoringKey(null);
+    const okCount = r?.results?.filter((x) => x.ok).length ?? 0;
+    if (r?.ok) {
+      onToast?.(`↻ ${okCount} ${okCount === 1 ? "sesión restaurada" : "sesiones restauradas"}`, true);
+      window.dispatchEvent(new Event("mt3k:refresh-change"));
+      const fresh = await getRestore();
+      if (fresh?.ok) setRestoreState(fresh);
+      else setRestoreState(null);
+    } else {
+      onToast?.(r?.err ? `error: ${r.err}` : "no se pudieron restaurar las sesiones", false);
+    }
+  };
+
+  const handleRestoreOne = async (item: RestoreMissingItem) => {
+    const key = item.sessionName ?? `${item.agentId}|${item.cwd}`;
+    if (restoringKey || item.reason === "missing-dir" || item.reason === "ambiguous-owner") return;
+    setRestoringKey(key);
+    const r = await restoreSessions({
+      items: [{ agentId: item.agentId, cwd: item.cwd, ...(item.sessionName ? { sessionName: item.sessionName } : {}) }],
+    });
+    setRestoringKey(null);
+    const res = r?.results?.[0];
+    if (r?.ok && res?.ok) {
+      onToast?.(`↻ ${item.agentName} restaurado en ${item.cwd}`, true);
+      window.dispatchEvent(new Event("mt3k:refresh-change"));
+      const fresh = await getRestore();
+      if (fresh?.ok) setRestoreState(fresh);
+    } else {
+      onToast?.(res?.err ?? r?.err ?? "no se pudo restaurar la sesión", false);
+    }
+  };
 
   return (
     <div className="room relative flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -122,6 +197,7 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
                   className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] transition ${chipCls}`}>
                   <AgentLogo id={a.id} logo={a.logo} online className="h-3 w-3" />
                   {a.host && <span className="text-sky-300">{a.host}·</span>}
+                  {p.name && <span className="font-semibold text-accent">{p.name}</span>}
                   <span className="max-w-[160px] truncate">{p.cwd}</span>
                   {st === "blocked" && <span>⏳</span>}
                   {st === "done" && <span>✓</span>}
@@ -148,6 +224,73 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
               {feed.map((l, i) => (
                 <div key={i} className="truncate font-mono text-[9px] text-white/35" style={{ opacity: 1 - i * 0.18 }}>{l}</div>
               ))}
+            </div>
+          )}
+          {restoreVisible && (
+            <div className="mt-2 rounded-lg border border-amber-400/35 bg-amber-400/10 px-2.5 py-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleRestoreAll()}
+                    disabled={restoringKey !== null}
+                    className="font-mono text-[10px] font-semibold text-amber-200 transition hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {restoringKey === "all"
+                      ? "↻ restaurando sesiones…"
+                      : `↻ ${missingSessions.length} ${missingSessions.length === 1 ? "sesión" : "sesiones"} de antes del reinicio · restaurar todas`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void dismissRestore()}
+                    disabled={restoringKey !== null}
+                    className="rounded border border-ink-line bg-ink-850/60 px-2 py-0.5 font-mono text-[10px] text-white/60 transition hover:border-white/30 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    descartar
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void dismissRestore()}
+                  disabled={restoringKey !== null}
+                  title="descartar sesiones pendientes"
+                  className="font-mono text-[10px] text-white/45 transition hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {missingSessions.map((m) => {
+                  // unique even if a server ever sends one session twice (one entry per session+agent)
+                  const itemKey = `${m.sessionName ?? m.cwd}|${m.agentId}`;
+                  const missingDir = m.reason === "missing-dir";
+                  const ambiguous = m.reason === "ambiguous-owner";
+                  return (
+                    <button
+                      key={itemKey}
+                      type="button"
+                      disabled={restoringKey !== null || missingDir || ambiguous}
+                      onClick={() => void handleRestoreOne(m)}
+                      title={
+                        missingDir
+                          ? "la carpeta ya no existe"
+                          : ambiguous
+                            ? `varios agentes reclaman esta sesión (${(m.claimants ?? []).join(", ")}): ábrela a mano o descártala`
+                            : `restaurar ${m.agentName} en ${m.cwd}`
+                      }
+                      className="flex items-center gap-1.5 rounded-full border border-ink-line bg-ink-850/75 px-2.5 py-0.5 font-mono text-[10px] text-white/75 transition hover:border-accent/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <AgentLogo id={m.agentId} online className="h-3 w-3" />
+                      <span className="font-semibold text-white">{m.agentName}</span>
+                      {m.name && <span className="font-semibold text-accent">{m.name}</span>}
+                      <span className="max-w-[140px] truncate text-white/55">{m.cwd}</span>
+                      <span className={m.resumable ? "text-emerald-300" : "text-white/45"}>
+                        {missingDir ? "⊘ sin carpeta" : ambiguous ? "? dueño dudoso" : m.resumable ? "↺ reanuda" : "○ nueva"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>

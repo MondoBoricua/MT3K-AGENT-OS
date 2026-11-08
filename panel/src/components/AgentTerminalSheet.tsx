@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentRow, PaneRef, PaneEvent } from "../lib/api";
-import { sendToPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
+import { sendToPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, setPaneLabel, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { applyPaneEvent } from "../lib/pane-stream";
 import { usePaneStream } from "../lib/use-pane-stream";
 import { attachKind } from "../lib/attach-kind";
@@ -51,6 +51,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
   const [missingDir, setMissingDir] = useState(false); // free-form path doesn't exist → offer to create it
   const [showLaunch, setShowLaunch] = useState(false); // force the launch form even when sessions exist (＋ nueva sesión)
   const [killed, setKilled] = useState<string[]>([]); // panes we killed but the status poll hasn't dropped yet
+  const [labelOverrides, setLabelOverrides] = useState<Record<string, string>>({}); // immediate rename feedback before next status poll
   const [firstPrompt, setFirstPrompt] = useState(""); // optional first message pasted once the CLI boots
   const [macros, setMacros] = useState<string[]>([]); // one-tap quick prompts for the compose bar
   const [fedHosts, setFedHosts] = useState<FedHost[]>([]); // to build web-UI links for federated agents
@@ -71,7 +72,12 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
   // Under Focus the sheet only surfaces this project's sessions (same rule as the wall).
   const inFocusCwd = (cwd: string) => !focusPath || cwd === focusPath || cwd.startsWith(focusPath + "/");
   const basePanes: PaneRef[] = (agent?.panes ?? []).filter((p) => !killed.includes(p.paneId) && inFocusCwd(p.cwd));
-  const panes: PaneRef[] = launched && !basePanes.some((p) => p.paneId === launched.paneId) ? [...basePanes, launched] : basePanes;
+  const rawPanes: PaneRef[] = launched && !basePanes.some((p) => p.paneId === launched.paneId) ? [...basePanes, launched] : basePanes;
+  const panes: PaneRef[] = rawPanes.map((p) =>
+    Object.prototype.hasOwnProperty.call(labelOverrides, p.paneId)
+      ? { ...p, name: labelOverrides[p.paneId] || undefined }
+      : p,
+  );
   const activePane = panes.find((p) => p.paneId === paneId) ?? (panes.length === 1 ? panes[0] : null);
   const paneToWatch = activePane?.paneId;
 
@@ -92,7 +98,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
     } catch { /* corrupt/absent → defaults */ }
     // Focus mode wins over the remembered target: new sessions land in the focused project
     if (!agent?.host && focusProjectId && projects.some((p) => p.id === focusProjectId)) proj = focusProjectId;
-    setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false); setShowLaunch(false); setKilled([]); setFirstPrompt("");
+    setLaunched(null); setLaunching(false); setLaunchProject(proj); setLaunchCwd(cwd); setMissingDir(false); setShowLaunch(false); setKilled([]); setLabelOverrides({}); setFirstPrompt("");
   }, [aKey, initialPaneId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const launchVisible = !!agent?.launchable && !fullscreen && (showLaunch || panes.length === 0);
@@ -549,6 +555,20 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
     else onClose();
   };
 
+  const renamePane = async (pane: PaneRef) => {
+    const next = window.prompt("Nombre de la sesión", pane.name ?? "");
+    if (next === null) return;
+    const trimmed = next.trim();
+    const r = await setPaneLabel(pane.paneId, trimmed, host);
+    if (r?.ok) {
+      setLabelOverrides((prev) => ({ ...prev, [pane.paneId]: r.name ?? "" }));
+      window.dispatchEvent(new Event("mt3k:refresh-change"));
+      onToast?.(r.name ? `sesión renombrada a «${r.name}»` : "nombre de sesión borrado", true);
+    } else {
+      onToast?.(r?.err ? `error: ${r.err}` : "no se pudo renombrar la sesión", false);
+    }
+  };
+
   if (!agent) return null;
 
   // web-UI link target: local agents use the address the browser reached the panel with; a
@@ -575,10 +595,17 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                 {agent.name} <span className="text-emerald-400">●</span>
                 {host && <span className="rounded border border-sky-400/30 bg-sky-400/10 px-1 text-[9px] font-normal text-sky-300">{host}</span>}
               </div>
-              <div className="truncate font-mono text-[10px] text-white/40">{activePane.cwd} ({activePane.label})</div>
+              <div className="flex items-center gap-1.5 truncate font-mono text-[10px] text-white/40">
+                {activePane.name && <span className="font-semibold text-accent">{activePane.name}</span>}
+                <span className="truncate">{activePane.cwd} ({activePane.label})</span>
+              </div>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
+            <button type="button" onClick={() => void renamePane(activePane)} title="renombrar esta sesión"
+              className="rounded-lg border border-ink-line px-2 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent">
+              ✎
+            </button>
             {termWide && (
               <div className="flex items-center gap-0.5 rounded-lg border border-ink-line px-1 py-0.5 font-mono text-[10px] text-white/55">
                 <button type="button" onClick={() => bumpUserFont(-1)} disabled={userTermFont <= 11} title="texto más pequeño"
@@ -877,7 +904,11 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
               <div key={p.paneId} className="flex items-stretch gap-1.5">
                 <button onClick={() => { setPaneId(p.paneId); setFullscreen(true); }}
                   className={`min-w-0 flex-1 rounded-xl border px-3 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink-850 ${p.waiting ? "border-amber-400/40 bg-amber-400/5" : "border-ink-line bg-ink-850/50"}`}>
-                  <div className="truncate font-mono text-xs text-white">{p.waiting && <span className="mr-1 text-amber-300">⏳</span>}{p.cwd}</div>
+                  <div className="truncate font-mono text-xs text-white">
+                    {p.waiting && <span className="mr-1 text-amber-300">⏳</span>}
+                    {p.name && <span className="mr-1.5 font-semibold text-accent">{p.name}</span>}
+                    <span>{p.cwd}</span>
+                  </div>
                   <div className="font-mono text-[10px] text-white/40">{p.label} · {p.paneId}{p.waiting ? " · esperando input" : ""}</div>
                 </button>
                 <button onClick={() => kill(p.paneId)} title="matar esta sesión"

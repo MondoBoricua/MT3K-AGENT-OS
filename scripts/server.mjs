@@ -8,9 +8,25 @@
  *   POST /api/send     { paneId, text, enter? } → types text into an agent's tmux pane (LAN-only)
  *   POST /api/upload   { name, data }       → saves a base64 image to data/uploads/, returns its path
  *   GET  /api/fs/list|read|raw ?path=  +  POST /api/fs/write|upload|move|delete → file browser / manager
- *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered, with status: working|blocked|idle|done)
+ *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered, with status: working|blocked|idle|done, optional name)
  *   GET  /api/pane-explain ?id=           → rule, region, matched snippet & tail explaining a pane's state
  *   GET  /api/pane-stream ?id=&fmt=lines&tick= → SSE live terminal stream (clamped tick ms, default 500)
+ *   GET  /api/wait ?id=&until=&timeout=&baseline=&sawWorking= → long-poll until pane reaches state (blocked|idle|done|not-working|changed);
+ *                                         timeout is a wall-clock deadline: a refresh finishing after it returns `timeout`
+ *   POST /api/prompt-wait { paneId, text, enter?, until?, timeout? } → send prompt then wait for turn (mt3k-wait / mt3k-prompt CLIs);
+ *                                         the gate opens on a manifest `working` sampled after the send, or after 10 s
+ *   POST /api/pane-label  { paneId, name } → set/clear sanitized free-text label on a session (data/pane-labels.json, max 40 chars)
+ *   GET|POST /api/restore                 → inspect, relaunch, or dismiss missing sessions from ledger data/session-snapshot.json
+ *                                         (one owner per session: panel launch wins, else first claimant; two unknown
+ *                                         claimants → `ambiguous`, skipped as "ambiguous-owner"; TTL checked on read;
+ *                                         max 12 real launches, missing-dir skips do not count)
+ *   POST /api/kill { paneId }             → kill-pane; acknowledges at once (ledger + generation tombstone written
+ *                                         before the answer), full detect reconciles in the background
+ *   (ledger)                              every ledger change goes through ledger.mutate (scripts/lib/ledger-store.mjs):
+ *                                         one queue, latest state, atomic write; discovery first, then mutate; scans
+ *                                         carry a start sequence and a scan older than the last kill is rejected;
+ *                                         tombstones accumulate pane ids + pane_pid (Windows label reuse)
+ *   GET|POST /api/restore-config          → read/toggle automatic session restore on startup (data/restore.json)
  *   GET  /api/logs                        → data/logs/*.md (Memory / Activity pages)
  *   GET  /api/skills                      → reads ~/.agents/skills SKILL.md frontmatter (Skills page)
  *   GET  /api/manifest                    → current panel manifest
@@ -52,13 +68,33 @@ import { pickWebStarter, webTokenFromLogText } from "./lib/adapters/web-local.mj
 import { mergeLocalAgentDefs, readAgentsLocalFile } from "./lib/agents-local.mjs";
 import { clampTick, paneStatusFor } from "./lib/pane-status.mjs";
 import { detectState, loadManifests } from "./lib/agent-detect.mjs";
+import { parseWaitBaseline, parseWaitCondition, parseWaitTimeout } from "./lib/wait-until.mjs";
+import { runWait } from "./lib/wait-loop.mjs";
+import { runChunkedWait } from "./lib/wait-cli.mjs";
+import { applyLabels, labelKey, readLabels, sanitizePaneLabel, sessionNameOf, writeLabels } from "./lib/pane-labels.mjs";
+import {
+  buildSnapshot,
+  diffSnapshot,
+  dismissSnapshotSessions,
+  readSnapshot,
+  removeSnapshotSession,
+  replaceRestoredSession,
+  writeSnapshot,
+} from "./lib/session-snapshot.mjs";
+import { runRestore as runRestoreWithLock } from "./lib/restore-run.mjs";
+import { tmuxServerAbsent } from "./lib/tmux-absent.mjs";
+import { createKillTombstones } from "./lib/kill-tombstones.mjs";
+import { createLedgerStore } from "./lib/ledger-store.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
 const LOGS = join(ROOT, "data", "logs");
+const PANE_LABELS_FILE = join(ROOT, "data", "pane-labels.json");
+const SNAPSHOT_FILE = join(ROOT, "data", "session-snapshot.json");
+const RESTORE_CFG_FILE = join(ROOT, "data", "restore.json");
 const SKILLS_DIR = join(homedir(), ".agents", "skills");
 const GRAPHIFY = [join(homedir(), ".local/bin/graphify"), "graphify"].find((p) => p === "graphify" || existsSync(p));
-const PORT = 4288;
+const PORT = Number(process.env.MT3K_PORT) || 4288;
 const START = Date.now();
 
 let AGENT_MANIFESTS = null;
@@ -408,11 +444,53 @@ async function procTree() {
   return { running, descendants };
 }
 
+let lastListPanesOk = false;
+let transientTmuxFailureLogged = false;
+let lastDiscoveredPaneIds = new Set();
+let lastDiscoveredSessionNames = new Set();
+let lastDetectAt = 0;
+let lastDetectRows = [];
+let detectAgentsInFlight = null;
+// discovery generations: each detectAgents() run takes `++discoverySeqCounter` at its START and tags
+// its rows with it (non-enumerable `discoverySeq`); kills record the counter, so ledger writes from a
+// scan that began before a kill are rejected (scripts/lib/ledger-store.mjs, kill-tombstones.mjs)
+let discoverySeqCounter = 0;
+const scanSeqOf = (rows) => (Number.isFinite(rows?.discoverySeq) ? rows.discoverySeq : null);
+const withScanSeq = (rows, seq) => {
+  if (Number.isFinite(seq)) Object.defineProperty(rows, "discoverySeq", { value: seq, configurable: true });
+  return rows;
+};
+const killTombstones = createKillTombstones();
+const markSessionKilled = (sessionName, paneIds, opts) => killTombstones.mark(sessionName, paneIds, opts);
+const withoutRecentlyKilled = (snapshot, rows, seq) => killTombstones.filter(snapshot, rows, seq);
+// the one in-memory session ledger; every change goes through ledger.mutate (serialized, atomic)
+const ledger = createLedgerStore({ file: SNAPSHOT_FILE, readSnapshot, writeSnapshot, log: (m) => logEvent(m) });
+
+// tmux exits 1 when no server is running (the last session closed): that is a real, empty answer,
+// not a transient failure. Only the confirmed absence shapes count (scripts/lib/tmux-absent.mjs);
+// permission/busy/timeout/unknown errors stay transient and keep the previous names.
+const tmuxNoServer = (r) => !r.ok && tmuxServerAbsent(r.err || "");
+
 // map each tmux pane to the agent CLI actually running inside it (auto-discovery, nothing hardcoded)
 async function discoverPanes(descendants) {
   const fmt = "#{pane_id}|#{pane_pid}|#{session_name}:#{window_index}.#{pane_index}|#{window_name}|#{pane_current_path}|#{pane_current_command}|#{pane_title}";
   const r = await run(TMUX_BIN, ["list-panes", "-a", "-F", fmt], ROOT, 5000);
-  if (!r.ok || !r.out) return []; // no tmux server / not installed → degrade quietly
+  if (tmuxNoServer(r)) {
+    lastListPanesOk = true;
+    transientTmuxFailureLogged = false;
+    return [];
+  }
+  if (!r.ok) {
+    lastListPanesOk = false;
+    if (!transientTmuxFailureLogged) {
+      transientTmuxFailureLogged = true;
+      console.warn(`[mt3k] transient tmux list-panes failure: ${r.err || "unknown error"}`);
+    }
+    return [];
+  }
+  lastListPanesOk = true;
+  transientTmuxFailureLogged = false;
+  if (!r.out) return [];
   const panes = [];
   for (const line of r.out.split("\n")) {
     const parts = line.split("|");
@@ -422,15 +500,46 @@ async function discoverPanes(descendants) {
     const paneId = IS_WIN ? label : tmuxPaneId;
     const comms = descendants(+panePid);
     comms.add(base(command)); // also count the pane's own foreground command
-    panes.push({ paneId, label, window, cwd: tildify(cwd), command, title, comms: [...comms] });
+    panes.push({ paneId, panePid: Number(panePid) || null, label, window, cwd: tildify(cwd), command, title, comms: [...comms] });
   }
   return panes;
 }
 
-async function detectAgents() {
+// live tmux session names: a successful list-sessions is authoritative; when it fails (or there is
+// no tmux) fall back to the last successful pane discovery so a transient error never reads as "gone"
+async function listLiveTmuxSessionNames() {
+  if (!HAS_TMUX) return new Set(lastDiscoveredSessionNames);
+  const r = await run(TMUX_BIN, ["list-sessions", "-F", "#{session_name}"], ROOT, 4000);
+  if (tmuxNoServer(r)) return new Set();
+  if (!r.ok) return new Set(lastDiscoveredSessionNames);
+  const names = new Set();
+  for (const line of (r.out || "").split("\n")) {
+    const clean = sessionNameOf(line);
+    if (clean) names.add(clean);
+  }
+  return names;
+}
+
+const activeWaitPaneCounts = new Map(); // paneId → active /api/wait count
+function incWaitPane(paneId) {
+  activeWaitPaneCounts.set(paneId, (activeWaitPaneCounts.get(paneId) || 0) + 1);
+}
+function decWaitPane(paneId) {
+  const next = (activeWaitPaneCounts.get(paneId) || 0) - 1;
+  if (next <= 0) activeWaitPaneCounts.delete(paneId);
+  else activeWaitPaneCounts.set(paneId, next);
+}
+
+async function detectAgentsImpl() {
+  const seq = ++discoverySeqCounter; // taken at the START: a kill during this scan makes it stale
   refreshAgentDefsFromLocal();
   const { running, descendants } = await procTree();
   const panes = await discoverPanes(descendants);
+  if (lastListPanesOk) {
+    lastDiscoveredPaneIds = new Set(panes.map((pn) => pn.paneId));
+    lastDiscoveredSessionNames = new Set(panes.map((pn) => sessionNameOf(pn.label)).filter(Boolean));
+    killTombstones.observe([{ panes }], seq); // accumulate every pane id/pid each session ever had
+  }
   const titleByPaneId = new Map(panes.map((pn) => [pn.paneId, pn.title || ""]));
   // web-UI agents (def.web = local port): a quick probe tells us whether their server is up
   const webUp = new Set();
@@ -457,7 +566,7 @@ async function detectAgents() {
     }
     if (a.id === "shell") {
       const shellPanes = panes.filter((pn) => pn.label.startsWith("mt3k-shell-"))
-        .map((pn) => ({ paneId: pn.paneId, label: pn.label, window: pn.window, cwd: pn.cwd }));
+        .map((pn) => ({ paneId: pn.paneId, panePid: pn.panePid, label: pn.label, window: pn.window, cwd: pn.cwd }));
       return { id: a.id, name: a.name, online: true, running: shellPanes.length > 0, launchable: HAS_TMUX, panes: shellPanes, ...adapterMeta };
     }
     const installed = a.bins.some(onPath) || a.paths.some((p) => existsSync(expand(p)));
@@ -468,22 +577,33 @@ async function detectAgents() {
     // or a directory in the executable's path (".../cursor-agent/versions/x.y/node").
     const agentPanes = proc.length
       ? panes.filter((pn) => pn.comms.some((comm) => proc.some((name) => procMatches(comm, name))))
-          .map((pn) => ({ paneId: pn.paneId, label: pn.label, window: pn.window, cwd: pn.cwd }))
+          .map((pn) => ({ paneId: pn.paneId, panePid: pn.panePid, label: pn.label, window: pn.window, cwd: pn.cwd }))
       : [];
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)
     const web = a.web && webUp.has(a.id) ? a.web : undefined;
     return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: HAS_TMUX && a.bins.some(onPath) && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : a.web && installed && a.webCmd ? { webOff: true } : {}), ...adapterMeta };
   });
-  await updateWaiting(
-    rows.flatMap((r) =>
-      r.panes.map((p) => ({
-        ...p,
-        agentId: r.id,
-        agentName: r.name,
-        title: titleByPaneId.get(p.paneId) || "",
-      }))
-    )
+  const rowPanes = rows.flatMap((r) =>
+    r.panes.map((p) => ({
+      ...p,
+      agentId: r.id,
+      agentName: r.name,
+      title: titleByPaneId.get(p.paneId) || "",
+    }))
   );
+  const rowPaneIds = new Set(rowPanes.map((p) => p.paneId));
+  const extraWaitPanes = panes
+    .filter((pn) => activeWaitPaneCounts.has(pn.paneId) && !rowPaneIds.has(pn.paneId))
+    .map((pn) => ({
+      paneId: pn.paneId,
+      label: pn.label,
+      window: pn.window,
+      cwd: pn.cwd,
+      agentId: "shell",
+      agentName: "Terminal",
+      title: pn.title || "",
+    }));
+  await updateWaiting([...rowPanes, ...extraWaitPanes]);
   const now = Date.now();
   for (const r of rows) {
     for (const p of r.panes) {
@@ -498,7 +618,29 @@ async function detectAgents() {
     }
     r.waiting = r.panes.some((p) => p.waiting);
   }
-  return rows;
+  applyLabels(rows, readLabels(PANE_LABELS_FILE));
+  return withScanSeq(rows, seq);
+}
+
+async function detectAgents() {
+  if (detectAgentsInFlight) return detectAgentsInFlight;
+  detectAgentsInFlight = detectAgentsImpl()
+    .then((rows) => {
+      lastDetectAt = Date.now();
+      lastDetectRows = rows;
+      return rows;
+    })
+    .finally(() => {
+      detectAgentsInFlight = null;
+    });
+  return detectAgentsInFlight;
+}
+
+async function refreshForWait(force = false) {
+  if (!force && lastDetectAt > 0 && Date.now() - lastDetectAt < 2000 && !detectAgentsInFlight) {
+    return lastDetectRows;
+  }
+  return detectAgents();
 }
 
 // paste text into a pane via set-buffer/paste-buffer — safe for arbitrary text (no key interpretation)
@@ -639,6 +781,7 @@ async function sampleWatch(panes, partial) {
       const det = detectState(manifest, { screen, oscTitle: pn.title || "" }, st.prevDetect);
       st.source = "manifest";
       st.state = det.state;
+      st.sampledAt = now; // when this manifest state was observed (the prompt gate needs a post-send sample)
       st.ruleId = det.ruleId;
       st.region = det.region;
       st.matched = det.matched;
@@ -781,7 +924,85 @@ function notifyDone(pn) {
 }
 // keep watching even when no browser is polling — otherwise notifications only fire while the panel is open
 // 5 s (was 15): a turn shorter than the sampling gap never shows `working`, so `done` would be missed
+detectAgents().catch(() => {});
 setInterval(() => detectAgents().catch(() => {}), 5000);
+
+// ledger writer from one discovery: every await (detect, list-sessions) finishes BEFORE the mutation,
+// which then rebuilds against the latest ledger; a scan older than the last kill is rejected
+async function saveCurrentSnapshot(rowsIn = null) {
+  try {
+    const rows = rowsIn || (await detectAgents());
+    const seq = scanSeqOf(rows);
+    const liveSessionNames = await listLiveTmuxSessionNames();
+    const res = await ledger.mutate(
+      "writer",
+      (cur) => withoutRecentlyKilled(buildSnapshot(rows, cur, new Date().toISOString(), { liveSessionNames }), rows, seq),
+      { scanSeq: seq }
+    );
+    return res.applied ? res.state : null;
+  } catch {
+    return null;
+  }
+}
+
+function recordLaunchInSnapshot({ agentId, cwd, sessionName, name, replacesSessionName }) {
+  killTombstones.clear(sessionName);
+  if (!agentId || agentId === "shell") return Promise.resolve({ applied: false, reason: "not-tracked" });
+  const launchMutation = (prev) => {
+    const nowIso = new Date().toISOString();
+    if (replacesSessionName) {
+      return replaceRestoredSession(
+        prev,
+        replacesSessionName,
+        {
+          agentId,
+          cwd,
+          sessionName,
+          ...(name ? { name } : {}),
+        },
+        nowIso
+      );
+    }
+    const sessions = Array.isArray(prev?.sessions) ? [...prev.sessions] : [];
+    const existingIdx = sessions.findIndex((s) => sessionNameOf(s?.sessionName) === sessionNameOf(sessionName));
+    const entry = {
+      agentId,
+      cwd,
+      sessionName: sessionNameOf(sessionName),
+      ...(name ? { name } : {}),
+      launched: true, // the panel launched it with this agent: it owns the session (one-owner rule)
+      firstSeen: existingIdx >= 0 && sessions[existingIdx].firstSeen ? sessions[existingIdx].firstSeen : nowIso,
+      lastSeen: nowIso,
+    };
+    if (existingIdx >= 0) sessions[existingIdx] = entry;
+    else sessions.push(entry);
+    return {
+      savedAt: nowIso,
+      host: typeof prev?.host === "string" && prev.host ? prev.host : buildSnapshot([], prev, nowIso).host,
+      sessions,
+    };
+  };
+  return ledger.mutate("launch", launchMutation, { retry: true });
+}
+
+function readRestoreConfig() {
+  try {
+    if (!existsSync(RESTORE_CFG_FILE)) return { auto: false };
+    const raw = readJSON(RESTORE_CFG_FILE);
+    return { auto: Boolean(raw?.auto) };
+  } catch {
+    return { auto: false };
+  }
+}
+
+function writeRestoreConfig(auto) {
+  mkdirSync(dirname(RESTORE_CFG_FILE), { recursive: true });
+  const tmp = `${RESTORE_CFG_FILE}.mt3k-tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify({ auto: Boolean(auto) }, null, 2) + "\n", "utf8");
+  renameSync(tmp, RESTORE_CFG_FILE);
+}
+
+setInterval(() => { saveCurrentSnapshot().catch(() => {}); }, 60000).unref();
 
 // scan for graphified repos that aren't tracked yet: ~/Developer (deep) + home top-level (shallow,
 // catches repos graphed outside Developer, e.g. ~/.proxmox or ~/.agent-forge-skills)
@@ -847,6 +1068,260 @@ async function resumeProbe(def, agentId, cwd) {
   } catch {
     return { resumeArgs, alreadyOpen: false, hasHistory: false };
   }
+}
+
+async function captureTail(paneId) {
+  const cap = await run(TMUX_BIN, ["capture-pane", "-t", paneId, "-p"], ROOT, 4000);
+  if (!cap.ok) return [];
+  return cap.out
+    .trimEnd()
+    .split(/\r?\n/)
+    .filter((l) => l.trim().length > 0)
+    .slice(-12);
+}
+
+function readPaneWaitStatus(paneId) {
+  if (!paneWatch.has(paneId)) return null;
+  const now = Date.now();
+  const watch = paneWatch.get(paneId);
+  const status = paneStatusFor(watch, now);
+  const statusRule =
+    watch?.ruleId ??
+    (status === "blocked" ? "stillness_waiting" : status === "working" ? "recent_output" : "stillness_idle");
+  return {
+    status,
+    statusRule,
+    source: watch?.source ?? "heuristic",
+    sampledAt: typeof watch?.sampledAt === "number" ? watch.sampledAt : 0,
+  };
+}
+
+async function waitOnPane({ res, paneId, until, timeoutSec, baseline = null, sawWorkingBefore = false, isPromptWait = false, sentAt = null }) {
+  if (res.writableEnded || res.destroyed) return;
+  incWaitPane(paneId);
+  try {
+    const result = await runWait({
+      cond: until,
+      timeoutMs: timeoutSec * 1000,
+      baseline,
+      sawWorkingBefore,
+      isPromptWait,
+      sentAt,
+      refresh: async (force = false) => {
+        const mustForce =
+          Boolean(force) ||
+          lastDetectAt === 0 ||
+          !lastListPanesOk ||
+          !lastDiscoveredPaneIds.has(paneId) ||
+          !paneWatch.has(paneId);
+        await refreshForWait(mustForce);
+      },
+      readStatus: () => readPaneWaitStatus(paneId),
+      isAlive: () => (!lastListPanesOk ? true : lastDiscoveredPaneIds.has(paneId)),
+      onAbort: (abort) => {
+        const onClose = () => abort();
+        res.on("close", onClose);
+        if (res.writableEnded || res.destroyed) abort();
+        return () => res.removeListener("close", onClose);
+      },
+    });
+    if (result.reason === "aborted" || res.writableEnded || res.destroyed) {
+      logEvent(`wait-abort · ${paneId} · ${result.waitedMs}ms`);
+      return;
+    }
+    const tail = result.reason === "gone" ? [] : await captureTail(paneId);
+    if (res.writableEnded || res.destroyed) return;
+    return sendJSON(res, 200, {
+      ok: true,
+      paneId,
+      status: result.status,
+      statusRule: result.statusRule,
+      reason: result.reason,
+      waitedMs: result.waitedMs,
+      sawWorking: Boolean(result.sawWorking),
+      tail,
+      ...(result.baseline ? { baseline: result.baseline } : {}),
+    });
+  } finally {
+    decWaitPane(paneId);
+  }
+}
+
+async function launchLocalSession(
+  { agentId, projectId, cwd: cwdIn, create, firstPrompt, fresh } = {},
+  { internalLabelName = "", replacesSessionName = "" } = {}
+) {
+  if (!HAS_TMUX) return { ok: false, status: 400, err: "tmux no está instalado en este host" };
+  const def = AGENT_DEFS.find((a) => a.id === agentId);
+  const isShell = agentId === "shell";
+  if (!def || (!isShell && !(def.proc && def.proc.length))) return { ok: false, status: 400, err: "agente no lanzable" };
+  const gate = requireCapability(def, adapterEnv(), "launch");
+  if (!gate.ok) return { ok: false, status: gate.status, err: gate.err };
+  const bin = isShell ? null : def.bins.map(absBin).find(Boolean);
+  if (!isShell && !bin) return { ok: false, status: 400, err: `${def.name} no está instalado` };
+  const target = await resolveLaunchCwd({ projectId, cwd: cwdIn });
+  if (target.err && !(target.missingDir && create)) {
+    const { status, cwd: _cwd, ...error } = target;
+    return { ok: false, status, ...error };
+  }
+  const cwd = target.cwd;
+  if (target.missingDir) {
+    try { mkdirSync(target.cwd, { recursive: true }); } catch { return { ok: false, status: 500, err: "no se pudo crear la carpeta" }; }
+  }
+  const session = mt3kSessionName(agentId, basename(cwd) || "home");
+  let cmd = isShell ? [] : [bin];
+  let launchEnvPairs = [];
+  let resumed = false;
+  let reason = "no-args";
+  let resumeReservation = null;
+  let ownsResumeReservation = false;
+  try {
+    const lc = isShell ? null : readJSON(join(ROOT, "data", "launch.json"))[agentId];
+    if (lc) {
+      const { envPairs, args } = parseLaunchConfig(lc);
+      launchEnvPairs = envPairs;
+      const reservationKey = `${agentId}\0${tildify(realDir(cwd))}`;
+      if (!resumeLaunchReservations.has(reservationKey)) {
+        resumeReservation = reservationKey;
+        ownsResumeReservation = true;
+        resumeLaunchReservations.add(resumeReservation);
+      }
+      const probe = await resumeProbe(def, agentId, cwd);
+      const decision = decideResume({ ...probe, fresh: fresh === true, alreadyOpen: probe.alreadyOpen || !ownsResumeReservation });
+      reason = decision.reason;
+      if (!decision.resume && ownsResumeReservation) {
+        resumeLaunchReservations.delete(resumeReservation);
+        resumeReservation = null;
+        ownsResumeReservation = false;
+      }
+      const launchArgs = decision.resume ? [...args, ...probe.resumeArgs] : args;
+      if (decision.resume) resumed = true;
+      cmd = isShell ? [] : composeTmuxArgv({ bin, envPairs, args: launchArgs });
+    }
+  } catch {
+    if (ownsResumeReservation) resumeLaunchReservations.delete(resumeReservation);
+    resumeReservation = null;
+    ownsResumeReservation = false;
+  }
+  if (!isShell && cmd.length === 1) cmd = composeTmuxArgv({ bin, envPairs: [], args: [] });
+  let r;
+  try {
+    const tmuxEnv = { PATH: await agentPath() };
+    const globalEnv = parseTmuxGlobalEnv((await run(TMUX_BIN, ["show-environment", "-g"], ROOT, 3000, tmuxEnv)).out);
+    for (const key of tmuxGlobalKeysToUnset(globalEnv)) {
+      await run(TMUX_BIN, ["set-environment", "-gr", key], ROOT, 3000, tmuxEnv);
+    }
+    if (needsGlobalColortermTruecolor(globalEnv)) {
+      await run(TMUX_BIN, ["set-environment", "-g", "COLORTERM", "truecolor"], ROOT, 3000, tmuxEnv);
+    }
+    const curGlobal = (await run(TMUX_BIN, ["show-environment", "-g", "PATH"], ROOT, 3000, tmuxEnv)).out.replace(/^PATH=/i, "");
+    await run(TMUX_BIN, ["set-environment", "-g", "PATH", cleanPath([...tmuxEnv.PATH.split(delimiter), ...(curGlobal ? curGlobal.split(delimiter) : [])])], ROOT, 3000, tmuxEnv);
+    r = await run(TMUX_BIN, ["new-session", "-d", "-e", `PATH=${tmuxEnv.PATH}`, "-e", "COLORTERM=truecolor", ...(IS_WIN ? envPairsToTmuxFlags(launchEnvPairs) : []), "-P", "-F", `${PANE_KEY_FMT}|#{session_name}:#{window_index}.#{pane_index}`, "-s", session, "-c", cwd, ...cmd], ROOT, 8000, tmuxEnv);
+    if (r.ok) await ensureTmuxHooks(true);
+  } finally {
+    if (ownsResumeReservation) setTimeout(() => resumeLaunchReservations.delete(resumeReservation), RESUME_HOLD_MS);
+  }
+  if (!r.ok) return { ok: false, status: 500, err: r.err || "tmux new-session falló (¿tmux instalado?)" };
+  const [rawPaneId, label] = (r.out || "").split("|");
+  const paneId = IS_WIN ? label : rawPaneId;
+  const cleanCwd = tildify(cwd);
+  const labelSanitized = sanitizePaneLabel(internalLabelName);
+  const cleanLabelName = labelSanitized.ok ? labelSanitized.name : "";
+  if (cleanLabelName || replacesSessionName) {
+    try {
+      const map = readLabels(PANE_LABELS_FILE);
+      if (replacesSessionName) {
+        delete map[labelKey(agentId, cleanCwd, replacesSessionName)];
+      }
+      if (cleanLabelName) {
+        map[labelKey(agentId, cleanCwd, session)] = { label: cleanLabelName, at: new Date().toISOString() };
+      }
+      writeLabels(PANE_LABELS_FILE, map);
+    } catch { /* best-effort label write */ }
+  }
+  const launchLedger = await recordLaunchInSnapshot({
+    agentId,
+    cwd: cleanCwd,
+    sessionName: session,
+    name: cleanLabelName || undefined,
+    replacesSessionName: replacesSessionName || undefined,
+  });
+  setTimeout(() => { saveCurrentSnapshot().catch(() => {}); }, 1500).unref();
+  if (typeof firstPrompt === "string" && firstPrompt.trim() && firstPrompt.length <= 64000) {
+    (async () => {
+      let prev = "";
+      for (let i = 0; i < 10; i++) {
+        await new Promise((ok) => setTimeout(ok, 2000));
+        const cap = await run(TMUX_BIN, ["capture-pane", "-t", paneId, "-p"], ROOT, 4000);
+        if (!cap.ok) return;
+        if (cap.out.trim() && cap.out === prev) break;
+        prev = cap.out;
+      }
+      const pasted = await pasteToPane(paneId, firstPrompt.trim(), true);
+      if (pasted.ok) markPaneTurnStarted(paneId);
+      logEvent(`first-prompt · ${agentId} · "${firstPrompt.slice(0, 60).replace(/\s+/g, " ").trim()}"`);
+    })().catch(() => {});
+  }
+  markPaneLaunched(paneId);
+  logEvent(`launch · ${agentId} · ${session} · ${cleanCwd} · resumed=${resumed}`);
+  return {
+    ok: true,
+    status: 200,
+    paneId,
+    label: label || session,
+    session,
+    cwd: cleanCwd,
+    resumed,
+    reason,
+    // ledger: ok | pendiente (write failed, kept as a pending intent) | <error reason>
+    ledger: launchLedger.applied || launchLedger.reason === "not-tracked" || launchLedger.reason === "unchanged" ? "ok" : launchLedger.queued ? "pendiente" : launchLedger.reason,
+    ...(cleanLabelName ? { name: cleanLabelName } : {}),
+  };
+}
+
+async function triggerRestore({ all = false, items = [] } = {}) {
+  const res = await runRestoreWithLock({
+    all,
+    items,
+    missing: async () => {
+      const liveRows = await detectAgents();
+      const liveSessionNames = await listLiveTmuxSessionNames();
+      const snapshot = ledger.projected(); // read AFTER the awaits: latest ledger + pending (unpersisted) removals
+      if (!snapshot) return [];
+      return diffSnapshot(snapshot, liveRows, { liveSessionNames }).missing;
+    },
+    // folder check before a launch slot is used: dead folders never consume the 12-launch quota
+    precheck: async (item) => {
+      const target = await resolveLaunchCwd({ cwd: item.cwd });
+      return target.err ? { skipped: true, reason: "missing-dir", err: target.err } : null;
+    },
+    launch: async (item) => {
+      const target = await resolveLaunchCwd({ cwd: item.cwd });
+      if (target.err) {
+        return {
+          ok: false,
+          skipped: true,
+          reason: "missing-dir",
+          err: target.err,
+        };
+      }
+      return launchLocalSession(
+        { agentId: item.agentId, cwd: item.cwd },
+        { internalLabelName: item.name, replacesSessionName: item.sessionName }
+      );
+    },
+    log: (msg) => logEvent(msg),
+  });
+  if (res.ok) {
+    await saveCurrentSnapshot();
+  }
+  return res;
+}
+
+if (readRestoreConfig().auto) {
+  setTimeout(() => {
+    triggerRestore({ all: true }).catch(() => {});
+  }, 20000).unref();
 }
 
 async function api(req, res, path) {
@@ -1071,9 +1546,219 @@ async function api(req, res, path) {
     const r = await pasteToPane(paneId, text, enter);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err });
     markPaneSeen(paneId);
-    if (enter !== false) markPaneTurnStarted(paneId);
+    if (enter !== false) {
+      markPaneTurnStarted(paneId);
+      const w = paneWatch.get(paneId);
+      if (w && w.source === "heuristic") { w.changedAt = Date.now(); w.waiting = false; w.ruleId = "recent_output"; }
+    }
     logEvent(`send · ${paneId} · "${text.slice(0, 80).replace(/\s+/g, " ").trim()}"`);
     return sendJSON(res, 200, { ok: true, paneId });
+  }
+
+  // long-poll until a pane reaches a target state (blocked | idle | done | not-working | changed)
+  if (path === "/api/wait" && req.method === "GET") {
+    const params = new URL(req.url, "http://x").searchParams;
+    let paneId = params.get("id") || "";
+    if (!validatePaneId(paneId).ok) {
+      const rawId = req.url.match(/[?&]id=(%[0-9]+)(?:&|$)/)?.[1];
+      if (rawId) paneId = rawId;
+    }
+    const paneCheck = validatePaneId(paneId);
+    if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
+    const condCheck = parseWaitCondition(params.get("until"));
+    if (!condCheck.ok) return sendJSON(res, 400, { ok: false, err: condCheck.err });
+    const timeoutCheck = parseWaitTimeout(params.get("timeout"));
+    if (!timeoutCheck.ok) return sendJSON(res, 400, { ok: false, err: timeoutCheck.err });
+    const baselineCheck = parseWaitBaseline(params.get("baseline"));
+    if (!baselineCheck.ok) return sendJSON(res, 400, { ok: false, err: baselineCheck.err });
+    if (denyUnlessCap(res, SHELL_DEF, "view")) return;
+    return await waitOnPane({
+      res,
+      paneId,
+      until: condCheck.until,
+      timeoutSec: timeoutCheck.timeout,
+      baseline: baselineCheck.baseline,
+      sawWorkingBefore: /^(1|true)$/i.test(params.get("sawWorking") || ""),
+      isPromptWait: false,
+    });
+  }
+
+  // send a prompt like /api/send then wait like /api/wait (only after manifest working is seen or 10 s elapsed)
+  if (path === "/api/prompt-wait" && req.method === "POST") {
+    const { paneId, text, enter = true, until: rawUntil, timeout: rawTimeout, baseline: rawBaseline } = await body(req);
+    const paneCheck = validatePaneId(paneId);
+    if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
+    if (typeof text !== "string" || !text.trim()) return sendJSON(res, 400, { ok: false, err: "texto vacío" });
+    if (text.length > 64000) return sendJSON(res, 400, { ok: false, err: "texto demasiado largo (máx 64000)" });
+    const condCheck = parseWaitCondition(rawUntil);
+    if (!condCheck.ok) return sendJSON(res, 400, { ok: false, err: condCheck.err });
+    const timeoutCheck = parseWaitTimeout(rawTimeout);
+    if (!timeoutCheck.ok) return sendJSON(res, 400, { ok: false, err: timeoutCheck.err });
+    const baselineCheck = parseWaitBaseline(rawBaseline);
+    if (!baselineCheck.ok) return sendJSON(res, 400, { ok: false, err: baselineCheck.err });
+    if (denyUnlessCap(res, SHELL_DEF, "send")) return;
+    if (denyUnlessCap(res, SHELL_DEF, "view")) return;
+    const live = (await run(TMUX_BIN, ["list-panes", "-a", "-F", PANE_KEY_FMT], ROOT, 5000)).out.split("\n");
+    if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+    const r = await pasteToPane(paneId, text, enter);
+    if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err });
+    const sentAt = Date.now(); // the gate only trusts a manifest `working` sampled after this
+    markPaneSeen(paneId);
+    if (enter !== false) {
+      markPaneTurnStarted(paneId);
+      const w = paneWatch.get(paneId);
+      if (w && w.source === "heuristic") { w.changedAt = Date.now(); w.waiting = false; w.ruleId = "recent_output"; }
+    }
+    logEvent(`prompt-wait · ${paneId} · "${text.slice(0, 80).replace(/\s+/g, " ").trim()}"`);
+    await new Promise((ok) => setTimeout(ok, 150));
+    return await waitOnPane({
+      res,
+      paneId,
+      until: condCheck.until,
+      timeoutSec: timeoutCheck.timeout,
+      baseline: baselineCheck.baseline,
+      isPromptWait: true,
+      sentAt,
+    });
+  }
+
+  // set or clear a session's free-text label (persisted in data/pane-labels.json)
+  if (path === "/api/pane-label" && req.method === "POST") {
+    const { paneId, name } = await body(req);
+    const paneCheck = validatePaneId(paneId);
+    if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
+    const nameCheck = sanitizePaneLabel(name);
+    if (!nameCheck.ok) return sendJSON(res, 400, { ok: false, err: nameCheck.err });
+    if (denyUnlessCap(res, SHELL_DEF, "send")) return;
+    const rows = await detectAgents();
+    let matchedRow = null;
+    let matchedPane = null;
+    for (const r of rows) {
+      const p = (r.panes || []).find((x) => x.paneId === paneId);
+      if (p) { matchedRow = r; matchedPane = p; break; }
+    }
+    if (!matchedRow || !matchedPane) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+    const cleanName = nameCheck.name;
+    const key = labelKey(matchedRow.id, matchedPane.cwd, matchedPane.label);
+    const map = readLabels(PANE_LABELS_FILE);
+    if (cleanName) {
+      map[key] = { label: cleanName, at: new Date().toISOString() };
+    } else {
+      delete map[key];
+    }
+    writeLabels(PANE_LABELS_FILE, map);
+    const updatedRows = rows.map((r) => ({
+      ...r,
+      panes: (r.panes || []).map((p) => {
+        if (p.paneId !== paneId) return p;
+        const copy = { ...p };
+        if (cleanName) copy.name = cleanName;
+        else delete copy.name;
+        return copy;
+      }),
+    }));
+    lastDetectRows = withScanSeq(updatedRows, scanSeqOf(rows));
+    await saveCurrentSnapshot(lastDetectRows);
+    const logLabel = (cleanName || "(borrado)").replace(/\s+/g, " ").trim();
+    logEvent(`pane-label · ${paneId} · ${logLabel}`);
+    return sendJSON(res, 200, { ok: true, key, name: cleanName });
+  }
+
+  // inspect missing sessions from data/session-snapshot.json vs live panes
+  if (path === "/api/restore" && req.method === "GET") {
+    const liveRows = await detectAgents();
+    const liveSessionNames = await listLiveTmuxSessionNames();
+    const snapshot = ledger.projected(); // read AFTER the awaits: latest ledger + pending (unpersisted) removals
+    if (!snapshot) return sendJSON(res, 200, { ok: true, savedAt: null, missing: [], present: 0 });
+    const { missing, present } = diffSnapshot(snapshot, liveRows, { liveSessionNames });
+    const missingItems = [];
+    const seenResumeTargets = new Set();
+    for (const m of missing) {
+      const def = AGENT_DEFS.find((a) => a.id === m.agentId);
+      const agentName = def?.name || m.agentId;
+      const target = await resolveLaunchCwd({ cwd: m.cwd });
+      let resumable = false;
+      let reason = "no-args";
+      if (m.ambiguous === true) {
+        reason = "ambiguous-owner";
+      } else if (target.err) {
+        reason = target.missingDir ? "missing-dir" : "invalid-dir";
+      } else if (def) {
+        const resumeKey = `${m.agentId}\0${tildify(realDir(target.cwd))}`;
+        const alreadyClaimed = seenResumeTargets.has(resumeKey);
+        seenResumeTargets.add(resumeKey);
+        const probe = await resumeProbe(def, m.agentId, target.cwd);
+        const decision = decideResume({ ...probe, alreadyOpen: probe.alreadyOpen || alreadyClaimed });
+        resumable = decision.resume;
+        reason = decision.reason;
+      }
+      missingItems.push({
+        agentId: m.agentId,
+        agentName,
+        cwd: m.cwd,
+        sessionName: m.sessionName,
+        ...(m.name ? { name: m.name } : {}),
+        ...(m.missingSince ? { missingSince: m.missingSince } : {}),
+        ...(m.ambiguous === true ? { ambiguous: true, claimants: m.claimants || [] } : {}),
+        resumable,
+        reason,
+      });
+    }
+    return sendJSON(res, 200, {
+      ok: true,
+      savedAt: snapshot.savedAt || null,
+      missing: missingItems,
+      present: present.length,
+    });
+  }
+
+  // relaunch or dismiss missing sessions from data/session-snapshot.json
+  if (path === "/api/restore" && req.method === "POST") {
+    const { all, items, dismiss, dismissAll } = await body(req);
+    if (dismissAll === true || (Array.isArray(dismiss) && dismiss.length > 0)) {
+      // discovery FIRST, then one mutation against the latest ledger (a kill or launch that lands
+      // while discovery runs is never overwritten by a stale copy)
+      const liveRows = await detectAgents();
+      const liveSessionNames = await listLiveTmuxSessionNames();
+      let dismissed = 0;
+      const out = await ledger.mutate("dismiss", (cur) => {
+        if (!cur) return null;
+        const r = dismissSnapshotSessions(
+          cur,
+          {
+            dismiss: Array.isArray(dismiss) ? dismiss : [],
+            dismissAll: Boolean(dismissAll),
+            liveRows,
+            liveSessionNames,
+          },
+          new Date().toISOString()
+        );
+        dismissed = r.dismissed;
+        return r.snapshot;
+      });
+      if (!out.state) return sendJSON(res, 200, { ok: true, dismissed: 0, savedAt: null });
+      if (out.reason === "error") return sendJSON(res, 500, { ok: false, err: "no se pudo escribir el registro de sesiones" });
+      logEvent(`restore-dismiss · ${dismissed} descartadas`);
+      return sendJSON(res, 200, { ok: true, dismissed, savedAt: out.state.savedAt || null });
+    }
+    if (!HAS_TMUX) return sendJSON(res, 400, { ok: false, err: "tmux no está instalado en este host" });
+    const result = await triggerRestore({ all: Boolean(all), items: Array.isArray(items) ? items : [] });
+    if (result.status === 409) {
+      return sendJSON(res, 409, { ok: false, err: result.err });
+    }
+    const { status: _st, ...payload } = result;
+    return sendJSON(res, 200, payload);
+  }
+
+  if (path === "/api/restore-config" && req.method === "GET") {
+    return sendJSON(res, 200, { ok: true, ...readRestoreConfig() });
+  }
+
+  if (path === "/api/restore-config" && req.method === "POST") {
+    const { auto } = await body(req);
+    writeRestoreConfig(Boolean(auto));
+    logEvent(`restore-config · auto=${Boolean(auto)}`);
+    return sendJSON(res, 200, { ok: true, auto: Boolean(auto) });
   }
 
   // receive an image, PDF, or audio file from the panel (from the phone/desktop), save it under
@@ -1415,115 +2100,10 @@ async function api(req, res, path) {
   // launch an agent CLI in a fresh detached tmux session (LAN-only). The binary comes from
   // AGENT_DEFS (allowlist) — never from the client; cwd is a tracked project or a real dir.
   if (path === "/api/launch" && req.method === "POST") {
-    if (!HAS_TMUX) return sendJSON(res, 400, { ok: false, err: "tmux no está instalado en este host" });
-    const { agentId, projectId, cwd: cwdIn, create, firstPrompt, fresh } = await body(req);
-    const def = AGENT_DEFS.find((a) => a.id === agentId);
-    const isShell = agentId === "shell";
-    if (!def || (!isShell && !(def.proc && def.proc.length))) return sendJSON(res, 400, { ok: false, err: "agente no lanzable" });
-    if (denyUnlessCap(res, def, "launch")) return;
-    const bin = isShell ? null : def.bins.map(absBin).find(Boolean);
-    if (!isShell && !bin) return sendJSON(res, 400, { ok: false, err: `${def.name} no está instalado` });
-    const target = await resolveLaunchCwd({ projectId, cwd: cwdIn });
-    if (target.err && !(target.missingDir && create)) {
-      const { status, cwd: _cwd, ...error } = target;
-      return sendJSON(res, status, { ok: false, ...error });
-    }
-    const cwd = target.cwd;
-    if (target.missingDir) {
-      try { mkdirSync(target.cwd, { recursive: true }); } catch { return sendJSON(res, 500, { ok: false, err: "no se pudo crear la carpeta" }); }
-    }
-    // readable session name: mt3k-claude-onvacation-x4f (target dir + short suffix for uniqueness)
-    const session = mt3kSessionName(agentId, basename(cwd) || "home");
-    // optional host-local launch flags (data/launch.json, gitignored) — shell aliases don't apply
-    // here because we spawn the raw binary, so per-host env/args live in data instead. resumeArgs
-    // are appended only when this agent has no live pane in the same working directory.
-    // shell → NO command: tmux spawns the user's default shell, so rc files and aliases apply
-    let cmd = isShell ? [] : [bin];
-    let launchEnvPairs = [];
-    let resumed = false;
-    let reason = "no-args";
-    let resumeReservation = null;
-    let ownsResumeReservation = false;
-    try {
-      const lc = isShell ? null : readJSON(join(ROOT, "data", "launch.json"))[agentId];
-      if (lc) {
-        const { envPairs, args } = parseLaunchConfig(lc);
-        launchEnvPairs = envPairs;
-        const reservationKey = `${agentId}\0${tildify(realDir(cwd))}`;
-        if (!resumeLaunchReservations.has(reservationKey)) {
-          resumeReservation = reservationKey;
-          ownsResumeReservation = true;
-          resumeLaunchReservations.add(resumeReservation);
-        }
-        const probe = await resumeProbe(def, agentId, cwd);
-        const decision = decideResume({ ...probe, fresh: fresh === true, alreadyOpen: probe.alreadyOpen || !ownsResumeReservation });
-        reason = decision.reason;
-        if (!decision.resume && ownsResumeReservation) {
-          resumeLaunchReservations.delete(resumeReservation);
-          resumeReservation = null;
-          ownsResumeReservation = false;
-        }
-        const launchArgs = decision.resume ? [...args, ...probe.resumeArgs] : args;
-        if (decision.resume) resumed = true;
-        cmd = isShell ? [] : composeTmuxArgv({ bin, envPairs, args: launchArgs });
-      }
-    } catch {
-      if (ownsResumeReservation) resumeLaunchReservations.delete(resumeReservation);
-      resumeReservation = null;
-      ownsResumeReservation = false;
-      // no/invalid launch.json → plain binary
-    }
-    if (!isShell && cmd.length === 1) cmd = composeTmuxArgv({ bin, envPairs: [], args: [] });
-    // Un servidor tmux nacido en Codex/Claude/Cursor arrastra su env al global; aquí lo limpiamos en cada launch.
-    // PATH (see agentPath): tmux gives a new session the PATH of the CLIENT running `new-session`,
-    // so running tmux with tmuxEnv is what sets it (and a server born right here starts with a
-    // clean global env too). -e also stores it in the session env for windows opened later in it,
-    // and the global copy keeps windows opened from other sessions in sync.
-    let r;
-    try {
-      const tmuxEnv = { PATH: await agentPath() };
-      const globalEnv = parseTmuxGlobalEnv((await run(TMUX_BIN, ["show-environment", "-g"], ROOT, 3000, tmuxEnv)).out);
-      for (const key of tmuxGlobalKeysToUnset(globalEnv)) {
-        await run(TMUX_BIN, ["set-environment", "-gr", key], ROOT, 3000, tmuxEnv);
-      }
-      if (needsGlobalColortermTruecolor(globalEnv)) {
-        await run(TMUX_BIN, ["set-environment", "-g", "COLORTERM", "truecolor"], ROOT, 3000, tmuxEnv);
-      }
-      // global = the user's PATH + whatever the running server already had (e.g. kitty's own dir
-      // for windows opened from kitty), cleaned — never narrower than before
-      const curGlobal = (await run(TMUX_BIN, ["show-environment", "-g", "PATH"], ROOT, 3000, tmuxEnv)).out.replace(/^PATH=/i, "");
-      await run(TMUX_BIN, ["set-environment", "-g", "PATH", cleanPath([...tmuxEnv.PATH.split(delimiter), ...(curGlobal ? curGlobal.split(delimiter) : [])])], ROOT, 3000, tmuxEnv);
-      // -d detached · -e PATH + COLORTERM · -P -F prints the new pane id + label · -c cwd · then the agent binary (no shell)
-      r = await run(TMUX_BIN, ["new-session", "-d", "-e", `PATH=${tmuxEnv.PATH}`, "-e", "COLORTERM=truecolor", ...(IS_WIN ? envPairsToTmuxFlags(launchEnvPairs) : []), "-P", "-F", `${PANE_KEY_FMT}|#{session_name}:#{window_index}.#{pane_index}`, "-s", session, "-c", cwd, ...cmd], ROOT, 8000, tmuxEnv);
-      if (r.ok) await ensureTmuxHooks(true);
-    } finally {
-      // tmux returns before the agent process shows up in the process tree, so a quick second
-      // launch could miss it; keep the reservation until the new pane is discoverable
-      if (ownsResumeReservation) setTimeout(() => resumeLaunchReservations.delete(resumeReservation), RESUME_HOLD_MS);
-    }
-    if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "tmux new-session falló (¿tmux instalado?)" });
-    const [rawPaneId, label] = (r.out || "").split("|");
-    const paneId = IS_WIN ? label : rawPaneId;
-    // optional first message: wait for the CLI to boot (screen settles), then paste + enter.
-    // fire-and-forget — the client already has its pane and is watching it live.
-    if (typeof firstPrompt === "string" && firstPrompt.trim() && firstPrompt.length <= 64000) {
-      (async () => {
-        let prev = "";
-        for (let i = 0; i < 10; i++) {
-          await new Promise((ok) => setTimeout(ok, 2000));
-          const cap = await run(TMUX_BIN, ["capture-pane", "-t", paneId, "-p"], ROOT, 4000);
-          if (!cap.ok) return; // pane died before boot
-          if (cap.out.trim() && cap.out === prev) break; // two identical captures → CLI is idle at its prompt
-          prev = cap.out;
-        }
-        const pasted = await pasteToPane(paneId, firstPrompt.trim(), true);
-        if (pasted.ok) markPaneTurnStarted(paneId); // a real turn: the boot grace must not hide its `done`
-        logEvent(`first-prompt · ${agentId} · "${firstPrompt.slice(0, 60).replace(/\s+/g, " ").trim()}"`);
-      })().catch(() => {});
-    }
-    markPaneLaunched(paneId);
-    logEvent(`launch · ${agentId} · ${session} · ${tildify(cwd)} · resumed=${resumed}`);
-    return sendJSON(res, 200, { ok: true, paneId, label: label || session, session, cwd: tildify(cwd), resumed, reason });
+    const payload = await body(req);
+    const launched = await launchLocalSession(payload);
+    const { status, ...rest } = launched;
+    return sendJSON(res, status || (launched.ok ? 200 : 400), rest);
   }
 
   // kill an agent's tmux pane (its dedicated session dies with its last pane)
@@ -1532,12 +2112,68 @@ async function api(req, res, path) {
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "kill")) return;
-    const live = (await run(TMUX_BIN, ["list-panes", "-a", "-F", PANE_KEY_FMT], ROOT, 5000)).out.split("\n");
-    if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+    const panesOut = (await run(TMUX_BIN, ["list-panes", "-a", "-F", `${PANE_KEY_FMT}|#{pane_pid}|#{session_name}`], ROOT, 5000)).out;
+    let targetSessionName = "";
+    let foundPane = false;
+    const paneSessions = [];
+    for (const line of panesOut.split("\n")) {
+      if (!line) continue;
+      const [id, pidStr = "", ...rest] = line.split("|");
+      const sName = rest.length ? sessionNameOf(rest.join("|")) : "";
+      paneSessions.push({ id, sName, pid: Number(pidStr) || null });
+      if (id === paneId) {
+        foundPane = true;
+        targetSessionName = sName;
+      }
+    }
+    if (!foundPane) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     const r = await run(TMUX_BIN, ["kill-pane", "-t", paneId], ROOT, 5000);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "kill-pane falló" });
+    // surviving sibling panes keep the session alive: no tombstone, no ledger removal for it
+    const siblings = targetSessionName
+      ? paneSessions.filter((p) => p.sName === targetSessionName && p.id !== paneId)
+      : [];
+    const sessionDied = Boolean(targetSessionName) && siblings.length === 0;
+    let ledgerState = "ok"; // what happened to the ledger removal (ok | pendiente | <error reason>)
+    // in-memory rows without the pane, tombstone, one ledger mutation — no detect awaited
+    const rowsNow = withScanSeq(
+      lastDetectRows.map((row) => ({
+        ...row,
+        panes: (row.panes || []).filter((p) => p.paneId !== paneId),
+      })),
+      scanSeqOf(lastDetectRows)
+    );
+    lastDetectRows = rowsNow;
+    lastDiscoveredPaneIds = new Set([...lastDiscoveredPaneIds].filter((id) => id !== paneId));
+    if (sessionDied) {
+      // every discovery that started up to now is older than this kill (killedAtSeq)
+      const killedAtSeq = discoverySeqCounter;
+      const killedPid = paneSessions.find((p) => p.id === paneId)?.pid;
+      markSessionKilled(targetSessionName, [paneId], {
+        killedAtSeq,
+        panePids: killedPid ? { [paneId]: killedPid } : {},
+      });
+      lastDiscoveredSessionNames = new Set([...lastDiscoveredSessionNames].filter((n) => n !== targetSessionName));
+      // only removes the killed entry from the LATEST ledger (no rebuild from the older in-memory scan)
+      const persisted = await ledger.mutate(
+        "kill",
+        (cur) => (cur ? removeSnapshotSession(cur, targetSessionName, new Date().toISOString()) : null),
+        { killSeq: killedAtSeq, retry: true }
+      );
+      // the pane is dead either way; a failed disk write is reported, kept as a pending intent
+      // (re-applied on the next ledger write) and never read as "session still restorable"
+      ledgerState = persisted.applied || persisted.reason === "unchanged" ? "ok" : persisted.queued ? "pendiente" : persisted.reason;
+      if (ledgerState !== "ok") logEvent(`kill · ${paneId} · ledger ${ledgerState}`);
+    }
     logEvent(`kill · ${paneId}`);
-    return sendJSON(res, 200, { ok: true, paneId });
+    sendJSON(res, 200, { ok: true, paneId, ledger: ledgerState });
+    // background reconcile: a detect started before kill-pane would still list the pane, so wait it
+    // out and save from a fresh one (the tombstone filters a stale echo either way)
+    (async () => {
+      if (detectAgentsInFlight) await detectAgentsInFlight.catch(() => {});
+      await saveCurrentSnapshot(await detectAgents().catch(() => null));
+    })().catch(() => {});
+    return;
   }
 
   // live pane stream (SSE): pushes the rendered screen only when it changes — smoother than polling
@@ -1791,13 +2427,125 @@ async function proxyToHost(req, res, path, hostId) {
   if (!h) return sendJSON(res, 400, { ok: false, err: `host desconocido: ${hostId}` });
   const u = new URL(req.url, "http://x");
   u.searchParams.delete("host"); u.searchParams.delete("t"); // our token never leaves this host
-  const target = `${h.url.replace(/\/$/, "")}${path}${u.searchParams.size ? `?${u.searchParams}` : ""}`;
+  const baseUrl = h.url.replace(/\/$/, "");
+  const authHeaders = h.token ? { authorization: `Bearer ${h.token}` } : {};
+
+  // Chunked proxy for /api/wait and /api/prompt-wait so waits > 300 s never hit undici's headersTimeout
+  if (path === "/api/wait" && req.method === "GET") {
+    const timeoutCheck = parseWaitTimeout(u.searchParams.get("timeout"));
+    if (timeoutCheck.ok) {
+      const clientAbort = new AbortController();
+      const onClose = () => clientAbort.abort();
+      res.on("close", onClose);
+      try {
+        const result = await runChunkedWait({
+          totalSeconds: timeoutCheck.timeout,
+          initialBaseline: u.searchParams.get("baseline") || null,
+          isAborted: () => res.writableEnded || res.destroyed,
+          requestChunk: async ({ chunkSec, baseline, sawWorking }) => {
+            const params = new URLSearchParams(u.searchParams);
+            params.set("timeout", String(chunkSec));
+            if (baseline) params.set("baseline", baseline);
+            if (sawWorking) params.set("sawWorking", "1");
+            const r = await fetch(`${baseUrl}/api/wait?${params.toString()}`, {
+              headers: authHeaders,
+              signal: AbortSignal.any([AbortSignal.timeout((chunkSec + 15) * 1000), clientAbort.signal]),
+            });
+            const data = await r.json().catch(() => ({ ok: false, err: `HTTP ${r.status}` }));
+            return { ok: r.ok, status: r.status, data };
+          },
+        });
+        if (result?.aborted || res.writableEnded || res.destroyed) return;
+        const out = result?.data ?? { ok: false, err: `${hostId} no responde` };
+        if (out && typeof out === "object" && "baseline" in out && !u.searchParams.get("baseline")) {
+          delete out.baseline;
+        }
+        return sendJSON(res, result?.status || 200, out);
+      } catch {
+        if (res.writableEnded || res.destroyed) return;
+        return sendJSON(res, 502, { ok: false, err: `${hostId} no responde` });
+      } finally {
+        res.removeListener("close", onClose);
+      }
+    }
+  }
+
+  if (path === "/api/prompt-wait" && req.method === "POST") {
+    const reqBuf = await rawBody(req);
+    let parsedBody = null;
+    try { parsedBody = JSON.parse(reqBuf.toString("utf8") || "{}"); } catch { parsedBody = null; }
+    const timeoutCheck = parseWaitTimeout(parsedBody?.timeout);
+    if (parsedBody && timeoutCheck.ok) {
+      const clientAbort = new AbortController();
+      const onClose = () => clientAbort.abort();
+      res.on("close", onClose);
+      try {
+        const result = await runChunkedWait({
+          totalSeconds: timeoutCheck.timeout,
+          initialBaseline: parsedBody.baseline || null,
+          isAborted: () => res.writableEnded || res.destroyed,
+          requestChunk: async ({ chunkSec, isFirst, baseline, sawWorking }) => {
+            if (isFirst) {
+              const r = await fetch(`${baseUrl}/api/prompt-wait`, {
+                method: "POST",
+                headers: { "content-type": "application/json", ...authHeaders },
+                body: JSON.stringify({ ...parsedBody, timeout: chunkSec }),
+                signal: AbortSignal.any([AbortSignal.timeout((chunkSec + 15) * 1000), clientAbort.signal]),
+              });
+              const data = await r.json().catch(() => ({ ok: false, err: `HTTP ${r.status}` }));
+              return { ok: r.ok, status: r.status, data };
+            }
+            const params = new URLSearchParams({
+              id: String(parsedBody.paneId || ""),
+              until: String(parsedBody.until || "not-working"),
+              timeout: String(chunkSec),
+            });
+            if (baseline) params.set("baseline", baseline);
+            if (sawWorking) params.set("sawWorking", "1");
+            const r = await fetch(`${baseUrl}/api/wait?${params.toString()}`, {
+              headers: authHeaders,
+              signal: AbortSignal.any([AbortSignal.timeout((chunkSec + 15) * 1000), clientAbort.signal]),
+            });
+            const data = await r.json().catch(() => ({ ok: false, err: `HTTP ${r.status}` }));
+            return { ok: r.ok, status: r.status, data };
+          },
+        });
+        if (result?.aborted || res.writableEnded || res.destroyed) return;
+        const out = result?.data ?? { ok: false, err: `${hostId} no responde` };
+        if (out && typeof out === "object" && "baseline" in out) {
+          delete out.baseline;
+        }
+        return sendJSON(res, result?.status || 200, out);
+      } catch {
+        if (res.writableEnded || res.destroyed) return;
+        return sendJSON(res, 502, { ok: false, err: `${hostId} no responde` });
+      } finally {
+        res.removeListener("close", onClose);
+      }
+    }
+    const target = `${baseUrl}${path}${u.searchParams.size ? `?${u.searchParams}` : ""}`;
+    try {
+      const r = await fetch(target, {
+        method: "POST",
+        signal: AbortSignal.timeout(120000),
+        headers: { "content-type": req.headers["content-type"] || "application/json", ...authHeaders },
+        body: reqBuf,
+      });
+      const bytes = Buffer.from(await r.arrayBuffer());
+      res.writeHead(r.status, { "content-type": r.headers.get("content-type") || "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff", "access-control-allow-origin": "*" });
+      return res.end(bytes);
+    } catch {
+      return sendJSON(res, 502, { ok: false, err: `${hostId} no responde` });
+    }
+  }
+
+  const target = `${baseUrl}${path}${u.searchParams.size ? `?${u.searchParams}` : ""}`;
   // uploads can be 500MB over Wi-Fi — give them 10 min instead of the usual 2
-  const isUpload = path === "/api/upload" || path === "/api/fs/upload";
+  const isLongUpload = path === "/api/upload" || path === "/api/fs/upload";
   const init = {
     method: req.method,
-    signal: req.method === "GET" && path === "/api/pane-stream" ? undefined : AbortSignal.timeout(isUpload ? 600000 : 120000),
-    headers: { "content-type": req.headers["content-type"] || "application/json", ...(h.token ? { authorization: `Bearer ${h.token}` } : {}) },
+    signal: req.method === "GET" && path === "/api/pane-stream" ? undefined : AbortSignal.timeout(isLongUpload ? 615000 : 120000),
+    headers: { "content-type": req.headers["content-type"] || "application/json", ...authHeaders },
   };
   if (req.method === "POST") init.body = await rawBody(req);
   let r;
@@ -2227,6 +2975,7 @@ async function proxyTlsOptions() {
       up.on("error", () => socket.destroy());
       socket.on("error", () => up.destroy());
     });
+    srv.on("error", () => {});
     srv.listen(def.webProxy, () => console.log(`  ${def.name} web UI proxied → ${tls ? "https" : "http"}://:${def.webProxy} → 127.0.0.1:${def.web}`));
   }
 })();

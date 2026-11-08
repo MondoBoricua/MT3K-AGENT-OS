@@ -11,11 +11,39 @@ import {
   type Session,
 } from "../src/lib/mosaic-presets.ts";
 
-function makeSession(id: string, paneId: string, cwd: string, host?: string): Session {
-  const pane: PaneRef = { paneId, label: `s:${paneId}`, window: "w", cwd };
+function makeSession(id: string, paneId: string, cwd: string, host?: string, name?: string): Session {
+  const pane: PaneRef = { paneId, label: `s:${paneId}`, window: "w", cwd, ...(name ? { name } : {}) };
   const agent: AgentRow = { id, name: id, online: true, running: true, host, panes: [pane] };
   return { agent, pane };
 }
+
+test("resolveSlots matches by name only within the same agentKey and before unnamed cwd fallback", () => {
+  const s1 = makeSession("claude", "%1", "~/repo-a", undefined, "ejecutor");
+  const s2 = makeSession("claude", "%2", "~/repo-a", undefined, "revisor");
+  const s3 = makeSession("codex", "%3", "~/repo-b", undefined, "revisor");
+  const slots = [
+    { agentKey: "local:claude", cwd: "~/repo-a" },
+    { agentKey: "local:claude", cwd: "~/repo-a", name: "ejecutor" },
+    { agentKey: "local:claude", cwd: "~/other-dir", name: "revisor" },
+    { agentKey: "local:claude", cwd: "~/other-dir", name: "solo-en-codex" },
+  ];
+  // Rename s3 to "solo-en-codex" to verify cross-agent name match does NOT happen
+  s3.pane.name = "solo-en-codex";
+
+  const resolved = resolveSlots(slots, [s1, s2, s3]);
+  // Named slots (index 1 -> s1 "ejecutor", index 2 -> s2 "revisor") resolve first;
+  // index 0 (unnamed local:claude in ~/repo-a) does not steal s1 before index 1 gets it.
+  assert.equal(resolved[0], null);
+  assert.equal(resolved[1], s1);
+  assert.equal(resolved[2], s2);
+  // Index 3 asks for local:claude named "solo-en-codex", which only exists on local:codex -> null
+  assert.equal(resolved[3], null);
+
+  const saved = slotsFrom(resolved);
+  assert.equal(saved[0], null);
+  assert.deepEqual(saved[1], { agentKey: "local:claude", cwd: "~/repo-a", name: "ejecutor" });
+  assert.deepEqual(saved[2], { agentKey: "local:claude", cwd: "~/repo-a", name: "revisor" });
+});
 
 test("resolveSlots resolves matching sessions without reusing the same pane twice", () => {
   const s1 = makeSession("claude", "%1", "~/repo-a");
