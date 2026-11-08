@@ -1,0 +1,3 @@
+Thinking through the manifest port and verifying regex flags...
+● Reading scripts/server.mjs
+────────────────────────────────────────────────── esc to cancel

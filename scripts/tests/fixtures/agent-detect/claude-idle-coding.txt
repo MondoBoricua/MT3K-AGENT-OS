@@ -1,0 +1,45 @@
+  Para crear el repo privado, elige una:                                             
+
+  1. [1mLa[0m [1mmás[0m [1mrápida:[0m crea en github.com un repo [1mprivado[0m vacío llamado [38;5;153manunciostv[39m en la cuenta ZothanC, sin README ni .gitignore. Avísame y lo subo.                        
+  2. [1mQue[0m [1mlo[0m [1mcree[0m [1myo:[0m escribe aquí [38;5;153m![39m [38;5;153mgh[39m [38;5;153mauth[39m [38;5;153mlogin[39m y te instalo el comando [38;5;153mgh[39m antes (ahora no está). Así puedo crear repos privados desde aquí en adelante.                
+
+  GitHub no va a guardar lo que no está en el repo; eso hay que respaldarlo aparte:  
+  - [38;5;153mserver/data/[39m: base de datos, archivos subidos y llave de firma del servidor.     
+  - [38;5;153mtv/keystore[39m y [38;5;153mkeystore.properties[39m: si se pierden, las TVs no podrán instalar actualizaciones de la app.                                                               
+
+  Si quieres, armo un respaldo cifrado de eso para que lo guardes fuera de esta máquina.                                                                                  
+
+[38;5;246m✻[39m [38;5;246mBrewed for 48s · done 3:12[39m [38;5;246mAM[39m                                                      
+
+[38;5;246m[48;5;237m❯ [38;5;231mYa hice rl repo[39m                                                                                                                                                         
+
+[38;5;114m[49m●[39m [1mBash[0m(git remote add origin git@github.com:ZothanC/anunciostv.git && timeout 60 git ls-remote origin 2>&1 | head -3; echo "ls-remote exit ${PIPESTATUS[0]}")             
+[38;5;246m  ⎿  [39mls-remote exit 0                                                                                                                                                     
+
+[38;5;114m●[39m [1mBash[0m(curl -s -o /dev/null -w "%{http_code}\n" https://api.github.com/repos/ZothanC/anunciostv; curl -s -o /dev/null -w "%{http_code}\n" https://github.com/ZothanC/an…) 
+[38;5;246m  ⎿  [39m404                                  
+     404                                  
+
+[38;5;231m●[39m Desde fuera da 404, o sea que es privado. Lo subo.                                 
+
+[38;5;114m●[39m [1mBash[0m(timeout 180 git push -u origin --all 2>&1 | tail -15 && git ls-remote origin | head)                                                                               
+[38;5;246m  ⎿  [39mTo github.com:ZothanC/anunciostv.git                                            
+      * [new branch]      main -> main                                               
+      * [new branch]      preview-web -> preview-web                                 
+     [2m… +11 lines (ctrl+o to expand)[0m                                                  
+                                          
+[38;5;231m●[39m Listo, el repo está subido a [1mgithub.com/ZothanC/anunciostv[0m. Comprobé que es privado: desde fuera, sin sesión, da 404.                                                   
+
+  - Subí [38;5;153mmain[39m ([38;5;153me519993[39m, con todo el historial) y las 3 ramas de trabajo: [38;5;153mpreview-web[39m, [38;5;153mtransiciones[39m y [38;5;153mvideos-por-link[39m. Ya todas están mezcladas a main.                    
+  - [38;5;153mmain[39m ya está enlazada con GitHub. Para subir cambios nuevos solo hace falta [38;5;153mgit push[39m.                                                                                 
+
+  [1mLo que no está en GitHub, a propósito:[0m [38;5;153mserver/data/[39m (base de datos, archivos subidos, llave de firma) y [38;5;153mtv/keystore[39m con [38;5;153mkeystore.properties[39m. Sin el keystore, las TVs no
+  podrán instalar actualizaciones de la app, así que eso necesita su propio respaldo fuera de esta máquina. ¿Te armo un respaldo cifrado de esas dos cosas?               
+
+[38;5;246m✻[39m [38;5;246mChurned for 20s · done[39m [38;5;246m3:18 AM[39m          
+
+[38;5;244m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯                                         
+[38;5;244m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;60m[38;5;189m[48;5;60m 📂 anunciostv (main) [38;5;60m[49m[38;5;246m [38;5;60m[38;5;189m[48;5;60m 🤖 Opus 5.5 [38;5;60m[49m[38;5;246m [38;5;65m[38;5;194m[48;5;65m 💰 $77.38 [38;5;65m[49m[38;5;246m [38;5;66m[38;5;195m[48;5;66m 🧠 ■□□□□□□□□□ 19% [38;5;66m[49m[38;5;246m [38;5;60m[38;5;189m[48;5;60m ⏱ 7d 45%·2d [38;5;60m[49m[39m                                     [38;5;114m✔ Update installed · Restart to apply[39m  
+  [38;5;211m⏵⏵[39m [38;5;211mbypass[39m [38;5;211mpermissions[39m [38;5;211mon[38;5;246m (shift+tab[39m [38;5;246mto[39m [38;5;246mcycle)[39m                                                                                   [38;5;246mnew task? [38;5;153m/clear[38;5;246m to save [38;5;153m188.1k tokens[39m

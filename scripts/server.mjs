@@ -8,7 +8,8 @@
  *   POST /api/send     { paneId, text, enter? } → types text into an agent's tmux pane (LAN-only)
  *   POST /api/upload   { name, data }       → saves a base64 image to data/uploads/, returns its path
  *   GET  /api/fs/list|read|raw ?path=  +  POST /api/fs/write|upload|move|delete → file browser / manager
- *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered, with status: working|blocked|idle)
+ *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered, with status: working|blocked|idle|done)
+ *   GET  /api/pane-explain ?id=           → rule, region, matched snippet & tail explaining a pane's state
  *   GET  /api/pane-stream ?id=&fmt=lines&tick= → SSE live terminal stream (clamped tick ms, default 500)
  *   GET  /api/logs                        → data/logs/*.md (Memory / Activity pages)
  *   GET  /api/skills                      → reads ~/.agents/skills SKILL.md frontmatter (Skills page)
@@ -50,6 +51,7 @@ import {
 import { pickWebStarter, webTokenFromLogText } from "./lib/adapters/web-local.mjs";
 import { mergeLocalAgentDefs, readAgentsLocalFile } from "./lib/agents-local.mjs";
 import { clampTick, paneStatusFor } from "./lib/pane-status.mjs";
+import { detectState, loadManifests } from "./lib/agent-detect.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -58,6 +60,17 @@ const SKILLS_DIR = join(homedir(), ".agents", "skills");
 const GRAPHIFY = [join(homedir(), ".local/bin/graphify"), "graphify"].find((p) => p === "graphify" || existsSync(p));
 const PORT = 4288;
 const START = Date.now();
+
+let AGENT_MANIFESTS = null;
+try {
+  const mfPath = join(ROOT, "scripts", "agent-detection", "manifests.json");
+  AGENT_MANIFESTS = loadManifests(JSON.parse(readFileSync(mfPath, "utf8")));
+  console.log(
+    `[agent-detect] loaded ${Object.keys(AGENT_MANIFESTS.manifests).length} manifests (${AGENT_MANIFESTS.unsupported.length} unsupported rules)`
+  );
+} catch (err) {
+  console.warn(`[agent-detect] manifests unavailable (${err?.message || err}); falling back to stillness heuristic`);
+}
 function lanIP() {
   const ifs = networkInterfaces();
   for (const name of Object.keys(ifs)) {
@@ -397,7 +410,7 @@ async function procTree() {
 
 // map each tmux pane to the agent CLI actually running inside it (auto-discovery, nothing hardcoded)
 async function discoverPanes(descendants) {
-  const fmt = "#{pane_id}|#{pane_pid}|#{session_name}:#{window_index}.#{pane_index}|#{window_name}|#{pane_current_path}|#{pane_current_command}";
+  const fmt = "#{pane_id}|#{pane_pid}|#{session_name}:#{window_index}.#{pane_index}|#{window_name}|#{pane_current_path}|#{pane_current_command}|#{pane_title}";
   const r = await run(TMUX_BIN, ["list-panes", "-a", "-F", fmt], ROOT, 5000);
   if (!r.ok || !r.out) return []; // no tmux server / not installed → degrade quietly
   const panes = [];
@@ -405,10 +418,11 @@ async function discoverPanes(descendants) {
     const parts = line.split("|");
     if (parts.length < 6) continue;
     const [tmuxPaneId, panePid, label, window, cwd, command] = parts;
+    const title = parts.slice(6).join("|") || "";
     const paneId = IS_WIN ? label : tmuxPaneId;
     const comms = descendants(+panePid);
     comms.add(base(command)); // also count the pane's own foreground command
-    panes.push({ paneId, label, window, cwd: tildify(cwd), command, comms: [...comms] });
+    panes.push({ paneId, label, window, cwd: tildify(cwd), command, title, comms: [...comms] });
   }
   return panes;
 }
@@ -417,6 +431,7 @@ async function detectAgents() {
   refreshAgentDefsFromLocal();
   const { running, descendants } = await procTree();
   const panes = await discoverPanes(descendants);
+  const titleByPaneId = new Map(panes.map((pn) => [pn.paneId, pn.title || ""]));
   // web-UI agents (def.web = local port): a quick probe tells us whether their server is up
   const webUp = new Set();
   await Promise.all(normalizedAgentDefs.filter((a) => a.web).map(async (a) => {
@@ -459,13 +474,27 @@ async function detectAgents() {
     const web = a.web && webUp.has(a.id) ? a.web : undefined;
     return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: HAS_TMUX && a.bins.some(onPath) && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : a.web && installed && a.webCmd ? { webOff: true } : {}), ...adapterMeta };
   });
-  await updateWaiting(rows.flatMap((r) => r.panes.map((p) => ({ ...p, agentName: r.name }))));
+  await updateWaiting(
+    rows.flatMap((r) =>
+      r.panes.map((p) => ({
+        ...p,
+        agentId: r.id,
+        agentName: r.name,
+        title: titleByPaneId.get(p.paneId) || "",
+      }))
+    )
+  );
   const now = Date.now();
   for (const r of rows) {
     for (const p of r.panes) {
       const watch = paneWatch.get(p.paneId);
-      p.waiting = watch?.waiting ?? false;
-      p.status = paneStatusFor(watch, now);
+      const status = paneStatusFor(watch, now);
+      p.status = status;
+      p.waiting = status === "blocked";
+      p.statusRule =
+        watch?.ruleId ??
+        (status === "blocked" ? "stillness_waiting" : status === "working" ? "recent_output" : "stillness_idle");
+      p.statusSource = watch?.source ?? "heuristic";
     }
     r.waiting = r.panes.some((p) => p.waiting);
   }
@@ -499,32 +528,236 @@ async function federatedAgents() {
   return [...local, ...remote.flat()];
 }
 
-// --- waiting-for-input watcher: a pane whose screen goes still is an agent waiting on you ---
-// promptish tail → waiting after 10s of stillness; anything else after 45s (spinners keep repainting).
+// --- per-agent state watcher: herdr manifest rules when available, stillness heuristic as fallback ---
 const PROMPT_RE = /(do you want|y\/n|yes\/no|proceed\?|trust|permission|allow|esperando|continuar|❯\s*1\.|\?\s*$)/i;
-const paneWatch = new Map(); // paneId → { hash, changedAt, waiting, notifiedAt }
-async function updateWaiting(panes) {
+const paneWatch = new Map();
+
+function markPaneSeen(paneId) {
+  const now = Date.now();
+  const st = paneWatch.get(paneId);
+  if (st) {
+    st.seenAt = now;
+    if (st.source === "manifest" && st.state === "idle") st.changedAt = 0;
+  }
+}
+// A prompt sent through the panel starts a turn. Short turns can finish between two 5 s samples,
+// so the pane would never show `working` and `done` would be missed: for PENDING_TURN_MS after a
+// send that pane is sampled every second (see the fast loop below the watcher), and a launch's
+// boot grace does not apply to it. A screen change alone is never taken as "turn finished": the
+// echoed prompt already changes the screen, so only an observed `working` can lead to `done`.
+const PENDING_TURN_MS = 30000;
+const pendingTurnMarks = new Map(); // paneId → ts, for panes the watcher has not created yet
+function markPaneTurnStarted(paneId) {
+  const now = Date.now();
+  const st = paneWatch.get(paneId);
+  if (st && st.source === "manifest") {
+    st.pendingTurnAt = now; // fast sampling window (cleared once `working` is observed)
+    st.turnRequested = true; // sticky: from now on the launch boot grace no longer applies
+    return;
+  }
+  // first prompt right after a launch, or a send before the first sample: remembered until the
+  // watcher creates the entry (consumed there); stale marks are dropped with the launch grace
+  pendingTurnMarks.set(paneId, now);
+  for (const [id, at] of pendingTurnMarks) if (now - at > LAUNCH_GRACE_MS) pendingTurnMarks.delete(id);
+}
+// A CLI launched from the panel spins (`working`) while it boots and then sits at its prompt:
+// that boot is not a turn Mondo asked for, so it must not surface as `done`. Launches are
+// remembered here until the watcher creates the pane's entry; the grace covers slow boots.
+const LAUNCH_GRACE_MS = 90000;
+const recentlyLaunched = new Map(); // paneId → launch timestamp
+function markPaneLaunched(paneId) {
+  recentlyLaunched.set(paneId, Date.now());
+  for (const [id, at] of recentlyLaunched) if (Date.now() - at > LAUNCH_GRACE_MS) recentlyLaunched.delete(id);
+}
+
+let watcherBusy = false;
+async function updateWaiting(panes, { partial = false } = {}) {
+  // partial = a fast re-sample of a few panes: it must not evict the entries it did not visit
+  if (watcherBusy) return;
+  watcherBusy = true;
+  try { await sampleWatch(panes, partial); } finally { watcherBusy = false; }
+}
+async function sampleWatch(panes, partial) {
   const now = Date.now();
   const seen = new Set();
   for (const pn of panes) {
+    if (seen.has(pn.paneId)) continue;
     seen.add(pn.paneId);
     const r = await run(TMUX_BIN, ["capture-pane", "-t", pn.paneId, "-p"], ROOT, 4000);
     if (!r.ok) continue;
     const screen = r.out.trimEnd();
-    const st = paneWatch.get(pn.paneId) ?? { hash: null, changedAt: now, waiting: false, notifiedAt: 0 };
-    if (screen !== st.hash) {
-      st.hash = screen; st.changedAt = now; st.waiting = false;
-    } else {
-      const still = now - st.changedAt;
-      const promptish = PROMPT_RE.test(screen.split("\n").slice(-8).join("\n"));
-      const was = st.waiting;
-      st.waiting = still >= (promptish ? 10000 : 45000);
-      if (st.waiting && !was && now - st.notifiedAt > 600000) { st.notifiedAt = now; notifyWaiting(pn); }
+    const manifest = AGENT_MANIFESTS ? AGENT_MANIFESTS.resolve(pn.agentId) : null;
+    let existing = paneWatch.get(pn.paneId);
+    // the same tmux pane can change hands (agent exits to a shell, another CLI starts): a stale
+    // entry would keep the old agent's state/done/blocked, so identity changes start the DETECTOR
+    // state afresh. Pane-level bookkeeping (seen, launched, turn requested) belongs to the pane,
+    // not to the detector, and is carried over so a transient attribution change loses nothing.
+    let carry = null;
+    if (existing && (existing.agentId !== pn.agentId || existing.source !== (manifest ? "manifest" : "heuristic"))) {
+      // two different KNOWN agents in a row (codex → antigravity) is a real new occupant: it keeps the
+      // viewing history only, never the previous occupant's prompt/launch exemptions. Anything that
+      // passes through the heuristic (agent → shell → agent) is treated as a transient attribution
+      // loss and keeps everything.
+      // `ownerAgentId` names the known agent the bookkeeping belongs to, even across a shell spell
+      const owner = existing.source === "manifest" ? existing.agentId : (existing.ownerAgentId ?? null);
+      const newOccupant = !!manifest && owner !== null && owner !== pn.agentId;
+      carry = newOccupant
+        ? { seenAt: existing.seenAt ?? 0, launchedAt: 0, turnRequested: false, pendingTurnAt: 0, ownerAgentId: null }
+        : { seenAt: existing.seenAt ?? 0, launchedAt: existing.launchedAt ?? 0, turnRequested: !!existing.turnRequested, pendingTurnAt: existing.pendingTurnAt ?? 0, ownerAgentId: owner };
+      paneWatch.delete(pn.paneId);
+      existing = undefined;
     }
-    paneWatch.set(pn.paneId, st);
+    // a prompt sent before this pane had an entry: applied (if still fresh) to whichever entry is
+    // created now, manifest or heuristic, and only then forgotten
+    const queuedMark = existing ? undefined : pendingTurnMarks.get(pn.paneId);
+    const freshMark = queuedMark !== undefined && now - queuedMark < LAUNCH_GRACE_MS;
+    if (!existing) pendingTurnMarks.delete(pn.paneId);
+
+    if (manifest) {
+      const isFirst = !existing;
+      const st = existing ?? {
+        hash: null,
+        changedAt: 0,
+        waiting: false,
+        notifiedAt: 0,
+        doneNotifiedAt: 0,
+        lastWorkingAt: 0,
+        doneAt: 0,
+        seenAt: carry?.seenAt ?? 0,
+        pendingTurnAt: freshMark ? queuedMark : (carry?.pendingTurnAt ?? 0),
+        turnRequested: freshMark || (carry?.turnRequested ?? false),
+        launchedAt: recentlyLaunched.get(pn.paneId) ?? carry?.launchedAt ?? 0,
+        ownerAgentId: pn.agentId,
+        source: "manifest",
+        state: "idle",
+        ruleId: null,
+        region: null,
+        matched: null,
+        prevDetect: null,
+      };
+      const prevState = isFirst ? null : st.state;
+      const det = detectState(manifest, { screen, oscTitle: pn.title || "" }, st.prevDetect);
+      st.source = "manifest";
+      st.state = det.state;
+      st.ruleId = det.ruleId;
+      st.region = det.region;
+      st.matched = det.matched;
+      st.prevDetect = { state: det.state, ruleId: det.ruleId };
+      st.agentId = pn.agentId;
+      st.agentName = pn.agentName;
+      st.cwd = pn.cwd;
+      st.title = pn.title || "";
+
+      if (det.state === "working") {
+        st.lastWorkingAt = now;
+        st.doneAt = 0;
+        st.waiting = false;
+        st.pendingTurnAt = 0;
+        if (screen !== st.hash) {
+          st.hash = screen;
+          st.changedAt = now;
+        }
+      } else if (det.state === "blocked") {
+        st.waiting = true;
+        st.hash = screen;
+        if (prevState !== "blocked" && now - st.notifiedAt > 600000) {
+          st.notifiedAt = now;
+          notifyWaiting(pn);
+        }
+      } else {
+        st.waiting = false;
+        const bootOnly = st.launchedAt > 0 && now - st.launchedAt < LAUNCH_GRACE_MS && !st.turnRequested;
+        if (prevState === "working" && !bootOnly) {
+          st.pendingTurnAt = 0;
+          st.doneAt = now;
+          st.hash = screen;
+          st.changedAt = 0;
+          if (st.doneAt > st.seenAt && now - st.doneNotifiedAt > 600000) {
+            st.doneNotifiedAt = now;
+            notifyDone(pn);
+          }
+        } else if (!isFirst && screen !== st.hash) {
+          st.hash = screen;
+          if (
+            det.ruleId === "default_known_agent_idle_fallback" &&
+            st.lastWorkingAt > 0 &&
+            now - st.lastWorkingAt < 10000
+          ) {
+            st.changedAt = now;
+          } else {
+            st.changedAt = 0;
+          }
+        } else if (isFirst) {
+          st.hash = screen;
+          st.changedAt = 0;
+        }
+      }
+      paneWatch.set(pn.paneId, st);
+    } else {
+      const st = existing ?? {
+        hash: null,
+        changedAt: now,
+        waiting: false,
+        notifiedAt: 0,
+        doneNotifiedAt: 0,
+        lastWorkingAt: 0,
+        doneAt: 0,
+        seenAt: carry?.seenAt ?? 0,
+        // pane bookkeeping survives a spell as "shell" so the agent gets it back when re-attributed
+        pendingTurnAt: freshMark ? queuedMark : (carry?.pendingTurnAt ?? 0),
+        turnRequested: freshMark || (carry?.turnRequested ?? false),
+        launchedAt: recentlyLaunched.get(pn.paneId) ?? carry?.launchedAt ?? 0,
+        ownerAgentId: carry?.ownerAgentId ?? null,
+        source: "heuristic",
+        ruleId: "recent_output",
+        region: null,
+        matched: null,
+      };
+      st.source = "heuristic";
+      st.agentId = pn.agentId;
+      st.agentName = pn.agentName;
+      st.cwd = pn.cwd;
+      st.title = pn.title || "";
+      if (screen !== st.hash) {
+        st.hash = screen;
+        st.changedAt = now;
+        st.waiting = false;
+        st.ruleId = "recent_output";
+      } else {
+        const still = now - st.changedAt;
+        const promptish = PROMPT_RE.test(screen.split("\n").slice(-8).join("\n"));
+        const was = st.waiting;
+        st.waiting = still >= (promptish ? 10000 : 45000);
+        st.ruleId = st.waiting
+          ? promptish
+            ? "stillness_prompt_10s"
+            : "stillness_45s"
+          : still < 5000
+            ? "recent_output"
+            : "stillness_idle";
+        if (st.waiting && !was && now - st.notifiedAt > 600000) {
+          st.notifiedAt = now;
+          notifyWaiting(pn);
+        }
+      }
+      paneWatch.set(pn.paneId, st);
+    }
   }
-  for (const id of [...paneWatch.keys()]) if (!seen.has(id)) paneWatch.delete(id);
+  if (!partial) {
+    for (const id of [...paneWatch.keys()]) if (!seen.has(id)) paneWatch.delete(id);
+    // marks for panes that never showed up (swallowed launch, dead pane) expire with the grace
+    for (const [id, at] of pendingTurnMarks) if (now - at > LAUNCH_GRACE_MS) pendingTurnMarks.delete(id);
+    for (const [id, at] of recentlyLaunched) if (now - at > LAUNCH_GRACE_MS) recentlyLaunched.delete(id);
+  }
 }
+// fast loop: panes with a prompt in flight are sampled every second so a short turn is still seen
+setInterval(() => {
+  const now = Date.now();
+  const hot = [...paneWatch.entries()]
+    .filter(([, st]) => st.source === "manifest" && st.pendingTurnAt > 0 && now - st.pendingTurnAt < PENDING_TURN_MS)
+    .map(([paneId, st]) => ({ paneId, agentId: st.agentId, agentName: st.agentName, cwd: st.cwd, title: st.title }));
+  if (hot.length) updateWaiting(hot, { partial: true }).catch(() => {});
+}, 1000);
 // push notification via ntfy (data/notify.json: { "ntfy": "https://ntfy.sh/tu-topic" }) — optional
 function notifyWaiting(pn) {
   logEvent(`waiting · ${pn.agentName} · ${pn.cwd}`);
@@ -536,8 +769,19 @@ function notifyWaiting(pn) {
     headers: { Title: "MT3K Agent OS", Priority: "high", Tags: "hourglass" },
   }).catch(() => { /* notification is best-effort */ });
 }
+function notifyDone(pn) {
+  logEvent(`done · ${pn.agentName} · ${pn.cwd}`);
+  let cfg; try { cfg = readJSON(join(ROOT, "data", "notify.json")); } catch { return; }
+  if (!cfg?.ntfy || cfg.onDone === false) return;
+  fetch(cfg.ntfy, {
+    method: "POST",
+    body: `${pn.agentName} terminó · ${pn.cwd}`,
+    headers: { Title: "MT3K Agent OS", Priority: "default", Tags: "white_check_mark" },
+  }).catch(() => { /* notification is best-effort */ });
+}
 // keep watching even when no browser is polling — otherwise notifications only fire while the panel is open
-setInterval(() => detectAgents().catch(() => {}), 15000);
+// 5 s (was 15): a turn shorter than the sampling gap never shows `working`, so `done` would be missed
+setInterval(() => detectAgents().catch(() => {}), 5000);
 
 // scan for graphified repos that aren't tracked yet: ~/Developer (deep) + home top-level (shallow,
 // catches repos graphed outside Developer, e.g. ~/.proxmox or ~/.agent-forge-skills)
@@ -707,6 +951,7 @@ async function api(req, res, path) {
     if (denyUnlessCap(res, SHELL_DEF, "view")) return;
     const live = (await run(TMUX_BIN, ["list-panes", "-a", "-F", PANE_KEY_FMT], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+    markPaneSeen(paneId);
     // -e keeps colors, -p prints to stdout, -S -1000 ships real scrollback — 200 felt like
     // "no history" on long agent sessions (keep on-screen line breaks → less reflow)
     const r = await run(TMUX_BIN, ["capture-pane", "-t", paneId, "-p", "-e", "-N", "-S", "-1000"], ROOT, 5000);
@@ -715,6 +960,71 @@ async function api(req, res, path) {
       (await run(TMUX_BIN, ["display-message", "-p", "-t", paneId, TMUX_ALT_MOUSE_DISPLAY], ROOT, 4000)).out,
     );
     return sendJSON(res, 200, { ok: r.ok, content: r.out, alternate: flags.alternate, mouse_sgr: flags.mouse_sgr });
+  }
+
+  // explain why a pane has its current state (manifest rule/region/matched vs stillness heuristic)
+  if (path === "/api/pane-explain" && req.method === "GET") {
+    const paneId = new URL(req.url, "http://x").searchParams.get("id") || "";
+    const paneCheck = validatePaneId(paneId);
+    if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
+    if (denyUnlessCap(res, SHELL_DEF, "view")) return;
+    refreshAgentDefsFromLocal();
+    const { descendants } = await procTree();
+    const panes = await discoverPanes(descendants);
+    const pn = panes.find((x) => x.paneId === paneId);
+    if (!pn) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+    let agent = paneWatch.get(paneId)?.agentId || null;
+    if (!agent) {
+      if (pn.label.startsWith("mt3k-shell-")) {
+        agent = "shell";
+      } else {
+        const matchedDef = normalizedAgentDefs.find(
+          (a) =>
+            a.id !== "shell" &&
+            Array.isArray(a.proc) &&
+            a.proc.length > 0 &&
+            pn.comms.some((comm) => a.proc.some((name) => procMatches(comm, name)))
+        );
+        agent = matchedDef ? matchedDef.id : "shell";
+      }
+    }
+    const cap = await run(TMUX_BIN, ["capture-pane", "-t", paneId, "-p"], ROOT, 4000);
+    const screen = cap.ok ? cap.out.trimEnd() : "";
+    const title = pn.title || "";
+    const tail = screen
+      .split(/\r?\n/)
+      .filter((l) => l.trim().length > 0)
+      .slice(-12);
+    const watch = paneWatch.get(paneId);
+    const manifest = AGENT_MANIFESTS ? AGENT_MANIFESTS.resolve(agent) : null;
+    if (manifest) {
+      const det = detectState(manifest, { screen, oscTitle: title }, watch?.prevDetect || null);
+      return sendJSON(res, 200, {
+        ok: true,
+        paneId,
+        agent,
+        source: "manifest",
+        state: det.state,
+        ruleId: det.ruleId,
+        region: det.region,
+        matched: det.matched,
+        title,
+        tail,
+      });
+    }
+    const hStatus = paneStatusFor(watch, Date.now());
+    return sendJSON(res, 200, {
+      ok: true,
+      paneId,
+      agent,
+      source: "heuristic",
+      state: hStatus,
+      ruleId: watch?.ruleId ?? (hStatus === "blocked" ? "stillness_waiting" : hStatus === "working" ? "recent_output" : "stillness_idle"),
+      region: null,
+      matched: null,
+      title,
+      tail,
+    });
   }
 
   // grow a detached tmux window so the CLI reflows to the viewer's width — panel-launched
@@ -760,6 +1070,8 @@ async function api(req, res, path) {
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     const r = await pasteToPane(paneId, text, enter);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err });
+    markPaneSeen(paneId);
+    if (enter !== false) markPaneTurnStarted(paneId);
     logEvent(`send · ${paneId} · "${text.slice(0, 80).replace(/\s+/g, " ").trim()}"`);
     return sendJSON(res, 200, { ok: true, paneId });
   }
@@ -851,7 +1163,7 @@ async function api(req, res, path) {
     const inPrefix = (cwd) => typeof cwdPrefix !== "string" || !cwdPrefix || cwd === cwdPrefix || cwd.startsWith(cwdPrefix + "/");
     const locals = (await detectAgents()).flatMap((a) => a.panes).filter((p) => inPrefix(p.cwd));
     let sent = 0;
-    for (const p of locals) { if ((await pasteToPane(p.paneId, text, true)).ok) sent++; }
+    for (const p of locals) { if ((await pasteToPane(p.paneId, text, true)).ok) { sent++; markPaneTurnStarted(p.paneId); } }
     const flat = new URL(req.url, "http://x").searchParams.get("flat");
     if (!flat) {
       for (const h of readHosts()) {
@@ -1079,6 +1391,7 @@ async function api(req, res, path) {
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     const r = await run(TMUX_BIN, ["send-keys", "-t", paneId, ...args], ROOT, 5000);
     if (!r.ok) return sendJSON(res, 500, { ok: false, err: r.err || "send-keys falló" });
+    markPaneSeen(paneId);
     logEvent(`key · ${paneId} · ${key}`);
     return sendJSON(res, 200, { ok: true, paneId, key });
   }
@@ -1203,10 +1516,12 @@ async function api(req, res, path) {
           if (cap.out.trim() && cap.out === prev) break; // two identical captures → CLI is idle at its prompt
           prev = cap.out;
         }
-        await pasteToPane(paneId, firstPrompt.trim(), true);
+        const pasted = await pasteToPane(paneId, firstPrompt.trim(), true);
+        if (pasted.ok) markPaneTurnStarted(paneId); // a real turn: the boot grace must not hide its `done`
         logEvent(`first-prompt · ${agentId} · "${firstPrompt.slice(0, 60).replace(/\s+/g, " ").trim()}"`);
       })().catch(() => {});
     }
+    markPaneLaunched(paneId);
     logEvent(`launch · ${agentId} · ${session} · ${tildify(cwd)} · resumed=${resumed}`);
     return sendJSON(res, 200, { ok: true, paneId, label: label || session, session, cwd: tildify(cwd), resumed, reason });
   }
@@ -1236,6 +1551,7 @@ async function api(req, res, path) {
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "view")) return;
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
+    markPaneSeen(paneId);
     let last = null, lastAlt = null, lastMouseSgr = null, idleTicks = 0, closed = false, busy = false;
     const tick = async () => {
       // Diffs are relative to `last`: a slow capture-pane must never overlap the next tick,
@@ -1246,6 +1562,7 @@ async function api(req, res, path) {
         const r = await run(TMUX_BIN, ["capture-pane", "-t", paneId, "-p", "-e", "-N", "-S", "-1000"], ROOT, 5000);
         if (closed) return;
         if (!r.ok) { res.write(`event: gone\ndata: {}\n\n`); return end(); }
+        markPaneSeen(paneId);
         const lines = r.out.split("\n");
         let from = 0;
         while (last !== null && from < last.length && from < lines.length && last[from] === lines[from]) from++;

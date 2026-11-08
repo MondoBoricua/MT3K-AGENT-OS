@@ -1,0 +1,6 @@
+⏺ Bash(rm -rf /tmp/test-build)
+
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and don't ask again for this session
+  3. No (esc)

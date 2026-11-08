@@ -1,0 +1,24 @@
+[1;2m› [0mComo podemos hacer las compilaciones y firmas sin los servidores de expo ? T… 
+  Podemos automatizar el proceso para que yo envíe una compilación a la Mac por 
+  SSH, esta genere el IPA firmado y lo suba al mismo enlace de instalación.     
+  Mantendríamos el identificador de la app y la configuración de OTA para       
+  conservar la continuidad de las instalaciones.                                
+                    
+  [1m[38;2;243;139;168mUsaría Xcode directamente.[0m [38;2;166;227;161meas build --local[39m también compila en la Mac, pero  
+  todavía consulta servidores de Expo para validar el proyecto y, opcionalmente,
+  obtener credenciales. [4m[38;2;137;180;250m]8;;https://docs.expo.dev/build-reference/local-builds/\Detalles[0m]8;;\ ([4m[38;2;137;180;250m]8;;https://docs.expo.dev/build-reference/local-builds/\https://docs.expo.dev/build-reference/local-[0m]8;;\  
+  [4m[38;2;137;180;250m]8;;https://docs.expo.dev/build-reference/local-builds/\builds/[0m]8;;\).         
+                    
+  Seguiríamos necesitando la cuenta Apple Developer, pero no las cuotas de      
+  compilación de EAS.                   
+                    
+  Para prepararlo, dime [1m[38;2;243;139;168mqué Mac y versión de macOS tienes, y si está conectada a
+[0m  [1m[38;2;243;139;168mnuestra VPN[0m.      
+                    
+[2m  Worked for 2m 11s • Oct 29 at 2:07 AM                                         
+[0m                    
+                    
+[1m›[0m [2mAsk Codex to do anything[0m              
+                    
+  [38;2;246;226;183mGPT-6.1-Sol medium[39m · [38;2;171;223;167m~/Developer/squishypos[39m · [38;2;249;226;175mConstruye POS infantil Squishy[39m …
+  [1m←[0m for agents · [1m?[0m for shortcuts                       ⚠ [38;2;196;167;103m1 warning[39m · [1mf2[0m to view

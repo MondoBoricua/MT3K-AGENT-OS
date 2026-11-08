@@ -322,6 +322,7 @@ Las operaciones responden **400** con `err` cuando el adaptador del agente no la
 | `POST /api/send` | types text into an agent's tmux pane (`{ paneId, text, enter? }`) — LAN-only, used by Agents View |
 | `POST /api/key` | sends a single allowlisted key to a pane (`{ paneId, key }`: `Up`/`Down`/`Enter`/`Escape`/`Tab`/`ShiftTab`…) for navigating TUI menus / cycling permission modes (yolo · plan · edit) |
 | `GET /api/pane?id=%N` | live capture of an agent's tmux pane (rendered screen + ANSI colors) for the terminal viewer — also returns `alternate: true` when the pane is a full-screen TUI with no scrollback (the viewer maps scroll to `PageUp`/`PageDown` keys) |
+| `GET /api/pane-explain?id=%N` | returns the state (`working\|blocked\|idle`), `source` (`manifest\|heuristic`), matched rule id, region, matched snippet, OSC title, and the last 12 non-empty lines for a pane |
 | `GET /api/pane-stream?id=%N` | SSE stream of the same screen — pushed only when it changes (viewer falls back to polling); diffs carry `alt`, and an `event: alt` notification fires whenever the pane enters/leaves the alternate screen |
 | `POST /api/kill` | kills a tmux pane/session (`{ paneId }`) |
 | `POST /api/broadcast` | `{ text }` → pasted into every live agent pane, here and on federated hosts |
@@ -331,5 +332,9 @@ Any of the tmux endpoints accepts `?host=<id>` to target a federated host (see `
 the server forwards the call with that host's own token.
 | `GET /api/skills` | reads `~/.agents/skills` SKILL.md frontmatter |
 | `GET /api/logs` | file-based memory for Memory / Activity |
+
+## Agent state detection
+
+Pane states (`working`, `blocked`, `idle`, plus `done` when a working turn finishes and has not yet been viewed) come from per-agent screen and OSC-title rules vendored from [herdr](https://github.com/herdrdev/herdr) under the Apache-2.0 license (`scripts/agent-detection/LICENSE-herdr` and `scripts/agent-detection/ORIGIN.md`). The raw TOML manifests live in `scripts/agent-detection/manifests/*.toml`, precompiled into `scripts/agent-detection/manifests.json` and evaluated by `scripts/lib/agent-detect.mjs`. To refresh after updating the TOML files, run `node scripts/agent-detection/vendor.mjs` (and verify with `node scripts/agent-detection/vendor.mjs --check`). Agents without a manifest (`zcode`, `deepseek`, `shell`, etc.) automatically fall back to the screen-stillness heuristic.
 
 Brand colors and logo are sourced from MT3K Web.
