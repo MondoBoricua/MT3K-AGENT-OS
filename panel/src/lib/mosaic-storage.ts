@@ -6,7 +6,8 @@ import {
   normalizeSlots,
   type MosaicPreset,
   type MosaicSlot,
-} from "./mosaic-presets";
+} from "./mosaic-presets.ts";
+import { DEFAULT_LAYOUT, LAYOUT_STORAGE_KEY, parseLayout, type MosaicLayout } from "./mosaic-layout.ts";
 
 export function loadPresets(): MosaicPreset[] {
   try {
@@ -50,6 +51,22 @@ export function loadLastSlots(): MosaicSlot[] {
 export function saveLastSlots(slots: readonly MosaicSlot[]): void {
   try {
     localStorage.setItem(LAST_SLOTS_STORAGE_KEY, JSON.stringify(normalizeSlots(slots)));
+  } catch {
+    /* private mode */
+  }
+}
+
+export function loadLayout(): MosaicLayout {
+  try {
+    return parseLayout(localStorage.getItem(LAYOUT_STORAGE_KEY));
+  } catch {
+    return DEFAULT_LAYOUT;
+  }
+}
+
+export function saveLayout(layout: MosaicLayout): void {
+  try {
+    localStorage.setItem(LAYOUT_STORAGE_KEY, layout);
   } catch {
     /* private mode */
   }
