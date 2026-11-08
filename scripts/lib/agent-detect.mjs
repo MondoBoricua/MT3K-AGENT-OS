@@ -1,7 +1,7 @@
 // Pure rule engine ported from herdr (src/detect/manifest.rs, Apache-2.0).
 // Evaluates per-agent screen/OSC rules compiled in scripts/agent-detection/manifests.json.
 
-import { convertRustRegex } from "../agent-detection/vendor.mjs";
+import { convertRustRegex } from "./rust-regex.mjs";
 
 export const DEFAULT_KNOWN_AGENT_IDLE_FALLBACK = "default_known_agent_idle_fallback";
 
