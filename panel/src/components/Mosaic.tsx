@@ -243,6 +243,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
               onFocus={() => setFocus(idx)}
               onExpand={() => onExpand(slot.agent, slot.pane.paneId)}
               onRemove={() => removeSlot(idx)}
+              onToast={onToast}
             />
           ) : (
             <div
@@ -278,6 +279,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
                               {s.agent.host}
                             </span>
                           )}
+                          {s.pane.name && <span className="shrink-0 font-semibold text-accent">{s.pane.name}</span>}
                           <span className="truncate text-[11px] text-white/50">{s.pane.cwd}</span>
                         </div>
                         <span title={s.pane.statusRule} className={`shrink-0 rounded-full border px-2 py-0.5 text-[9px] ${TONE_CLS[tone]}`}>
@@ -363,7 +365,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
             </label>
             <span className="font-mono text-[11px] text-white/40">
               {focusedSession
-                ? `foco: ${focusedSession.agent.name} · ${focusedSession.pane.cwd} (${focusedSession.pane.label})`
+                ? `foco: ${focusedSession.agent.name} · ${focusedSession.pane.name ? `${focusedSession.pane.name} · ` : ""}${focusedSession.pane.cwd} (${focusedSession.pane.label})`
                 : "elige un tile"}
             </span>
           </div>

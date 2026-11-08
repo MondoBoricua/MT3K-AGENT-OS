@@ -5,6 +5,7 @@ export interface PaneRef {
   label: string;
   window: string;
   cwd: string;
+  name?: string;
   waiting?: boolean;
   status?: "working" | "blocked" | "idle" | "done";
   statusRule?: string;
@@ -91,6 +92,50 @@ export const uploadFile = (name: string, file: Blob, host?: string) =>
 // and skips windows with a real terminal attached)
 export const paneResize = (paneId: string, cols: number, rows: number, host?: string) =>
   jpost<{ ok: boolean; cols?: number; rows?: number; skipped?: string; err?: string }>(`/api/pane-resize${hostQ(host)}`, { paneId, cols, rows });
+export const setPaneLabel = (paneId: string, name: string, host?: string) =>
+  jpost<{ ok: boolean; key?: string; name?: string; err?: string }>(`/api/pane-label${hostQ(host)}`, { paneId, name });
+
+export interface RestoreMissingItem {
+  agentId: string;
+  agentName: string;
+  cwd: string;
+  sessionName?: string;
+  name?: string;
+  missingSince?: string;
+  /** two different agents claim this session and no panel launch says which: never auto-relaunched */
+  ambiguous?: boolean;
+  claimants?: string[];
+  resumable: boolean;
+  reason: string;
+}
+export interface RestoreState {
+  ok: boolean;
+  savedAt: string | null;
+  missing: RestoreMissingItem[];
+  present: number;
+}
+export interface RestoreResultItem {
+  agentId: string;
+  cwd: string;
+  sessionName?: string;
+  name?: string;
+  ok: boolean;
+  paneId?: string;
+  resumed?: boolean;
+  reason?: string;
+  err?: string;
+}
+export const getRestore = () => jget<RestoreState>("/api/restore");
+export const restoreSessions = (opts: {
+  all?: boolean;
+  items?: { agentId: string; cwd: string; sessionName?: string }[];
+  dismiss?: string[];
+  dismissAll?: boolean;
+}) =>
+  jpost<{ ok: boolean; results?: RestoreResultItem[]; dismissed?: number; missing?: number; err?: string }>("/api/restore", opts);
+export const getRestoreConfig = () => jget<{ ok: boolean; auto: boolean }>("/api/restore-config");
+export const setRestoreConfig = (auto: boolean) =>
+  jpost<{ ok: boolean; auto: boolean; err?: string }>("/api/restore-config", { auto });
 export const getMacros = () => jget<{ macros: string[] }>("/api/macros");
 // start a web-UI agent's server on its host (federation-aware via ?host=)
 export const webStart = (agentId: string, host?: string) => jpost<{ ok: boolean; already?: boolean; err?: string }>(`/api/web-start${hostQ(host)}`, { agentId });

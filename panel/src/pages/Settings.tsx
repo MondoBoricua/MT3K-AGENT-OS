@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Manifest } from "../types";
-import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, moveHost, updateFleet, getMacros, saveMacros, type SystemStatus, type FedHost } from "../lib/api";
+import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, moveHost, updateFleet, getMacros, saveMacros, getRestoreConfig, setRestoreConfig, type SystemStatus, type FedHost } from "../lib/api";
 import { fmt } from "../lib/ui";
 
 const REFRESH_KEY = "mt3k.refreshMs";
@@ -63,6 +63,22 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
   const doSaveMacros = async () => {
     const r = await saveMacros(macrosText.split("\n").map((m) => m.trim()).filter(Boolean));
     setMacrosMsg(r?.ok ? `guardados ${r.macros?.length ?? 0} — aplican al próximo abrir de terminal` : (r?.err ?? "error"));
+  };
+  // session restore config (data/restore.json)
+  const [autoRestore, setAutoRestore] = useState(false);
+  const [restoreCfgMsg, setRestoreCfgMsg] = useState("");
+  useEffect(() => { getRestoreConfig().then((r) => { if (r?.ok) setAutoRestore(!!r.auto); }); }, []);
+  const doToggleAutoRestore = async (next: boolean) => {
+    setAutoRestore(next);
+    setRestoreCfgMsg("");
+    const r = await setRestoreConfig(next);
+    if (r?.ok) {
+      setAutoRestore(!!r.auto);
+      setRestoreCfgMsg(r.auto ? "✓ restauración automática activada (20s tras arrancar)" : "✓ restauración automática desactivada");
+    } else {
+      setAutoRestore(!next);
+      setRestoreCfgMsg(r?.err ?? "error al guardar");
+    }
   };
   const doToggleHost = async (h: FedHost) => {
     const r = await toggleHost(h.id, !h.disabled);
@@ -226,6 +242,23 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
             <button onClick={doSaveMacros} className="rounded-lg border border-ink-line px-3 py-1.5 font-mono text-xs text-white/70 transition hover:border-accent/50 hover:text-accent">guardar</button>
             {macrosMsg && <span className="font-mono text-[11px] text-white/55">{macrosMsg}</span>}
           </div>
+        </div>
+
+        <div className="surface p-5">
+          <div className="mb-3 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-white/50"><span className="text-accent">✦</span> Sesiones</div>
+          <p className="mb-3 text-sm text-white/55">
+            El panel guarda una instantánea de las sesiones locales en <span className="font-mono text-xs">data/session-snapshot.json</span> para ofrecer restaurarlas tras un reinicio.
+          </p>
+          <label className="flex cursor-pointer items-center gap-2.5 text-sm text-white/85">
+            <input
+              type="checkbox"
+              checked={autoRestore}
+              onChange={(e) => void doToggleAutoRestore(e.target.checked)}
+              className="accent-[oklch(62%_0.23_25)]"
+            />
+            <span>Restaurar sesiones automáticamente al arrancar</span>
+          </label>
+          {restoreCfgMsg && <p className="mt-2 font-mono text-[11px] text-white/55">{restoreCfgMsg}</p>}
         </div>
 
         <div className="surface p-5 lg:col-span-2">

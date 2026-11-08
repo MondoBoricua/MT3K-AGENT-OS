@@ -1,6 +1,6 @@
 import { agentKey, type AgentRow, type PaneRef } from "./api.ts";
 
-export type MosaicSlot = { agentKey: string; cwd: string } | null;
+export type MosaicSlot = { agentKey: string; cwd: string; name?: string } | null;
 export type MosaicPreset = { name: string; slots: MosaicSlot[] };
 export type Session = { agent: AgentRow; pane: PaneRef };
 
@@ -12,32 +12,56 @@ export const LAST_SLOTS_STORAGE_KEY = "mt3k.mosaic.last";
 export function normalizeSlots(slots: readonly MosaicSlot[]): MosaicSlot[] {
   return Array.from({ length: MOSAIC_SLOTS }, (_, i) => {
     const s = slots[i];
-    return s && typeof s.agentKey === "string" && typeof s.cwd === "string"
-      ? { agentKey: s.agentKey, cwd: s.cwd }
-      : null;
+    if (!s || typeof s.agentKey !== "string" || typeof s.cwd !== "string") return null;
+    const name = typeof s.name === "string" && s.name.trim() ? s.name.trim() : undefined;
+    return name ? { agentKey: s.agentKey, cwd: s.cwd, name } : { agentKey: s.agentKey, cwd: s.cwd };
   });
 }
 
 export function resolveSlots(slots: readonly MosaicSlot[], sessions: readonly Session[]): (Session | null)[] {
   const usedPaneIds = new Set<string>();
-  return Array.from({ length: MOSAIC_SLOTS }, (_, i) => {
+  const keyOf = (s: Session) => `${agentKey(s.agent)}|${s.pane.paneId}`;
+  const result: (Session | null)[] = Array.from({ length: MOSAIC_SLOTS }, () => null);
+
+  // First pass: resolve named slots within the same agentKey so unnamed slots cannot steal them.
+  for (let i = 0; i < MOSAIC_SLOTS; i++) {
     const slot = slots[i];
-    if (!slot) return null;
-    const match = sessions.find((s) => {
-      const key = `${agentKey(s.agent)}|${s.pane.paneId}`;
-      if (usedPaneIds.has(key)) return false;
-      return agentKey(s.agent) === slot.agentKey && s.pane.cwd === slot.cwd;
-    });
-    if (!match) return null;
-    usedPaneIds.add(`${agentKey(match.agent)}|${match.pane.paneId}`);
-    return match;
-  });
+    const slotName = slot?.name?.trim();
+    if (!slot || !slotName) continue;
+    const match = sessions.find(
+      (s) => !usedPaneIds.has(keyOf(s)) && agentKey(s.agent) === slot.agentKey && s.pane.name === slotName
+    );
+    if (match) {
+      usedPaneIds.add(keyOf(match));
+      result[i] = match;
+    }
+  }
+
+  // Second pass: fall back to agentKey + cwd for any remaining unresolved slots.
+  for (let i = 0; i < MOSAIC_SLOTS; i++) {
+    if (result[i]) continue;
+    const slot = slots[i];
+    if (!slot) continue;
+    const match = sessions.find(
+      (s) => !usedPaneIds.has(keyOf(s)) && agentKey(s.agent) === slot.agentKey && s.pane.cwd === slot.cwd
+    );
+    if (match) {
+      usedPaneIds.add(keyOf(match));
+      result[i] = match;
+    }
+  }
+
+  return result;
 }
 
 export function slotsFrom(sessions: readonly (Session | null)[]): MosaicSlot[] {
   return Array.from({ length: MOSAIC_SLOTS }, (_, i) => {
     const s = sessions[i];
-    return s ? { agentKey: agentKey(s.agent), cwd: s.pane.cwd } : null;
+    if (!s) return null;
+    const name = s.pane.name?.trim();
+    return name
+      ? { agentKey: agentKey(s.agent), cwd: s.pane.cwd, name }
+      : { agentKey: agentKey(s.agent), cwd: s.pane.cwd };
   });
 }
 

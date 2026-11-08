@@ -1,0 +1,67 @@
+#!/usr/bin/env node
+import { exitCodeForResult, parsePromptArgs, PROMPT_USAGE, runChunkedWait } from "../lib/wait-cli.mjs";
+
+const parsed = parsePromptArgs(process.argv.slice(2), process.env);
+if (!parsed.ok) {
+  process.stderr.write(`${JSON.stringify({ ok: false, err: parsed.err })}\n`);
+  process.exit(1);
+}
+if (parsed.help) {
+  process.stdout.write(`${PROMPT_USAGE}\n`);
+  process.exit(0);
+}
+
+const authHeader = parsed.token ? { authorization: `Bearer ${parsed.token}` } : {};
+
+try {
+  const result = await runChunkedWait({
+    totalSeconds: parsed.timeout,
+    requestChunk: async ({ chunkSec, isFirst, baseline, sawWorking }) => {
+      if (isFirst) {
+        const qs = parsed.host ? `?host=${encodeURIComponent(parsed.host)}` : "";
+        const target = `${parsed.url}/api/prompt-wait${qs}`;
+        const res = await fetch(target, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...authHeader,
+          },
+          body: JSON.stringify({
+            paneId: parsed.paneId,
+            text: parsed.text,
+            enter: parsed.enter,
+            until: parsed.until,
+            timeout: chunkSec,
+          }),
+          signal: AbortSignal.timeout((chunkSec + 15) * 1000),
+        });
+        const data = await res.json().catch(() => ({ ok: false, err: `HTTP ${res.status}` }));
+        return { ok: res.ok, status: res.status, data };
+      }
+      const params = new URLSearchParams({
+        id: parsed.paneId,
+        until: parsed.until,
+        timeout: String(chunkSec),
+      });
+      if (parsed.host) params.set("host", parsed.host);
+      if (baseline) params.set("baseline", baseline);
+      if (sawWorking) params.set("sawWorking", "1");
+      const target = `${parsed.url}/api/wait?${params.toString()}`;
+      const res = await fetch(target, {
+        headers: authHeader,
+        signal: AbortSignal.timeout((chunkSec + 15) * 1000),
+      });
+      const data = await res.json().catch(() => ({ ok: false, err: `HTTP ${res.status}` }));
+      return { ok: res.ok, status: res.status, data };
+    },
+  });
+  const out = result?.data ?? { ok: false, err: "sin respuesta" };
+  if (out && typeof out === "object" && "baseline" in out) {
+    delete out.baseline;
+  }
+  process.stdout.write(`${JSON.stringify(out)}\n`);
+  process.exit(exitCodeForResult(Boolean(result?.ok), out));
+} catch (err) {
+  process.stdout.write(`${JSON.stringify({ ok: false, err: String(err?.message || err) })}\n`);
+  process.exit(1);
+}
