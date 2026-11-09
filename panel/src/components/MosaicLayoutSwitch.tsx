@@ -4,6 +4,7 @@ type Props = { layout: MosaicLayout; onChange: (layout: MosaicLayout) => void };
 
 const OPTIONS: { value: MosaicLayout; title: string }[] = [
   { value: "1x1", title: "Una sesión a pantalla completa (teclas 1-4 cambian de slot)" },
+  { value: "1x2", title: "Dos sesiones lado a lado (teclas 1-4 mueven el par 1-2 / 3-4)" },
   { value: "2x2", title: "Cuadrícula de 4 sesiones" },
 ];
 

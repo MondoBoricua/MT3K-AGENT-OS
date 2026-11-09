@@ -9,7 +9,7 @@ import {
   type MosaicPreset,
   type Session,
 } from "../lib/mosaic-presets";
-import { pickActiveSlot, slotForKey, type MosaicLayout } from "../lib/mosaic-layout";
+import { pickActiveSlot, slotForKey, usesSlotStrip, visibleSlotsFor, type MosaicLayout } from "../lib/mosaic-layout";
 import { loadLastSlots, loadLayout, loadPresets, saveLastSlots, saveLayout, savePresets } from "../lib/mosaic-storage";
 import { paneStatus, statusLabel, statusTone } from "../lib/pane-status";
 import AgentLogo from "./AgentLogo";
@@ -31,6 +31,12 @@ const TONE_CLS = {
   sky: "border-sky-400/40 bg-sky-400/10 text-sky-200",
   muted: "border-ink-line bg-ink-850/60 text-white/50",
 } as const;
+
+const GRID_CLS: Record<MosaicLayout, string> = {
+  "1x1": "grid-cols-1 grid-rows-1",
+  "1x2": "grid-cols-2 grid-rows-1",
+  "2x2": "grid-cols-2 grid-rows-2",
+};
 
 const sessionUid = (s: Session) => `${agentKey(s.agent)}|${s.pane.paneId}`;
 
@@ -95,9 +101,9 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
     if (focus !== null) setActive(focus);
   }, [focus]);
 
-  // Keys 1-4 pick the active slot in 1x1 (ignored while typing or with modifiers)
+  // Keys 1-4 pick the active slot in 1x1 and 1x2 (ignored while typing or with modifiers)
   useEffect(() => {
-    if (layout !== "1x1") return;
+    if (!usesSlotStrip(layout)) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -149,7 +155,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
   const changeLayout = (next: MosaicLayout) => {
     setLayout(next);
     saveLayout(next);
-    if (next === "1x1") setActive((cur) => (focus !== null ? focus : cur));
+    if (usesSlotStrip(next)) setActive((cur) => (focus !== null ? focus : cur));
   };
 
   const selectSlot = (idx: number) => {
@@ -157,7 +163,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
     setFocus(slots[idx] ? idx : null);
   };
 
-  const visibleIdx = layout === "1x1" ? [active] : slots.map((_, i) => i);
+  const visibleIdx = visibleSlotsFor(layout, active);
 
   const placeInSlot = (idx: number, s: Session) => {
     setSlots((prev) => prev.map((cur, i) => (i === idx ? s : cur)));
@@ -275,8 +281,8 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
         </div>
       </header>
 
-      {layout === "1x1" && <MosaicSlotStrip slots={slots} active={active} onSelect={selectSlot} />}
-      <div className={`grid min-h-0 flex-1 gap-2 p-2 ${layout === "1x1" ? "grid-cols-1 grid-rows-1" : "grid-cols-2 grid-rows-2"}`}>
+      {usesSlotStrip(layout) && <MosaicSlotStrip slots={slots} active={active} visible={visibleIdx} onSelect={selectSlot} />}
+      <div className={`grid min-h-0 flex-1 gap-2 p-2 ${GRID_CLS[layout]}`}>
         {visibleIdx.map((idx) => {
           const slot = slots[idx];
           return slot ? (

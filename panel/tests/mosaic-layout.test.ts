@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_LAYOUT, LAYOUT_STORAGE_KEY, parseLayout, pickActiveSlot, slotForKey } from "../src/lib/mosaic-layout.ts";
+import { DEFAULT_LAYOUT, LAYOUT_STORAGE_KEY, parseLayout, pickActiveSlot, slotForKey, usesSlotStrip, visibleSlotsFor } from "../src/lib/mosaic-layout.ts";
 import { loadLayout, saveLayout } from "../src/lib/mosaic-storage.ts";
 
 function stubStorage(initial: Record<string, string> = {}, throwing = false) {
@@ -67,4 +67,40 @@ test("pickActiveSlot ignores a focus on an empty slot and bounds the scan", () =
   const s = { id: 1 };
   assert.equal(pickActiveSlot([null, s, null, null], 0), 1);
   assert.equal(pickActiveSlot([null, null, null, null, s], null), 0);
+});
+
+test("parseLayout accepts 1x2", () => {
+  assert.equal(parseLayout("1x2"), "1x2");
+});
+
+test("visibleSlotsFor: 1x1 single, 1x2 pair holding active, 2x2 all", () => {
+  for (const active of [0, 1, 2, 3]) {
+    assert.deepEqual(visibleSlotsFor("1x1", active), [active]);
+    assert.deepEqual(visibleSlotsFor("2x2", active), [0, 1, 2, 3]);
+  }
+  assert.deepEqual(visibleSlotsFor("1x2", 0), [0, 1]);
+  assert.deepEqual(visibleSlotsFor("1x2", 1), [0, 1]);
+  assert.deepEqual(visibleSlotsFor("1x2", 2), [2, 3]);
+  assert.deepEqual(visibleSlotsFor("1x2", 3), [2, 3]);
+});
+
+test("usesSlotStrip: strip and keys in 1x1 and 1x2 only", () => {
+  assert.equal(usesSlotStrip("1x1"), true);
+  assert.equal(usesSlotStrip("1x2"), true);
+  assert.equal(usesSlotStrip("2x2"), false);
+});
+
+test("1x2 round-trips through storage", () => {
+  const data = stubStorage();
+  saveLayout("1x2");
+  assert.equal(data.get("mt3k.mosaic.layout"), "1x2");
+  assert.equal(loadLayout(), "1x2");
+});
+
+test("visibleSlotsFor falls back to slot 0 for out-of-range or non-integer active", () => {
+  for (const bad of [-1, 4, 5, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.deepEqual(visibleSlotsFor("1x1", bad), [0]);
+    assert.deepEqual(visibleSlotsFor("1x2", bad), [0, 1]);
+    assert.deepEqual(visibleSlotsFor("2x2", bad), [0, 1, 2, 3]);
+  }
 });
