@@ -51,6 +51,7 @@ import { createPasteToPane } from "./lib/tmux-paste.mjs";
 import { buildRunningSet } from "./lib/running-set.mjs";
 import { WIN32_PS_COMMAND, createWin32ProcessSource, withoutWindowsApps } from "./lib/proc-tree-win32.mjs";
 import { nvmBinDirs } from "./lib/bin-dirs.mjs";
+import { createPaneNotifier } from "./lib/pane-notify.mjs";
 import { describeAgent, normalizeAgentDefs, requireCapability } from "./lib/adapters.mjs";
 import {
   validatePaneId,
@@ -260,6 +261,7 @@ const PATH_DIRS = [dirname(process.execPath), join(homedir(), ".local/bin"), ...
 // Windows binaries carry extensions (claude.cmd, dsh.ps1, ollama.exe) — probe those too
 const BIN_EXTS = process.platform === "win32" ? ["", ".exe", ".cmd", ".ps1", ".bat"] : [""];
 const onPath = (bin) => PATH_DIRS.some((d) => d && BIN_EXTS.some((e) => existsSync(join(d, bin + e))));
+const notifyPane = createPaneNotifier({ binDirs: [...(process.env.PATH || "").split(delimiter), ...PATH_DIRS] });
 // `proc` = exact process basenames (case-sensitive) that mean this agent is actively running.
 // CLI binaries are lowercase (claude/codex/…); same-named GUI apps are Capitalized → not matched.
 const AGENT_DEFS = [
@@ -805,7 +807,7 @@ async function sampleWatch(panes, partial) {
         st.hash = screen;
         if (prevState !== "blocked" && now - st.notifiedAt > 600000) {
           st.notifiedAt = now;
-          notifyWaiting(pn);
+          notifyWaiting(pn, st);
         }
       } else {
         st.waiting = false;
@@ -817,7 +819,7 @@ async function sampleWatch(panes, partial) {
           st.changedAt = 0;
           if (st.doneAt > st.seenAt && now - st.doneNotifiedAt > 600000) {
             st.doneNotifiedAt = now;
-            notifyDone(pn);
+            notifyDone(pn, st);
           }
         } else if (!isFirst && screen !== st.hash) {
           st.hash = screen;
@@ -880,7 +882,7 @@ async function sampleWatch(panes, partial) {
             : "stillness_idle";
         if (st.waiting && !was && now - st.notifiedAt > 600000) {
           st.notifiedAt = now;
-          notifyWaiting(pn);
+          notifyWaiting(pn, st);
         }
       }
       paneWatch.set(pn.paneId, st);
@@ -902,7 +904,8 @@ setInterval(() => {
   if (hot.length) updateWaiting(hot, { partial: true }).catch(() => {});
 }, 1000);
 // push notification via ntfy (data/notify.json: { "ntfy": "https://ntfy.sh/tu-topic" }) — optional
-function notifyWaiting(pn) {
+function notifyWaiting(pn, st) {
+  notifyPane({ state: "blocked", agentId: pn.agentId, statusSource: st.source, ruleId: st.ruleId, session: sessionNameOf(pn.label), paneId: pn.paneId });
   logEvent(`waiting · ${pn.agentName} · ${pn.cwd}`);
   let cfg; try { cfg = readJSON(join(ROOT, "data", "notify.json")); } catch { return; }
   if (!cfg?.ntfy) return;
@@ -912,7 +915,8 @@ function notifyWaiting(pn) {
     headers: { Title: "MT3K Agent OS", Priority: "high", Tags: "hourglass" },
   }).catch(() => { /* notification is best-effort */ });
 }
-function notifyDone(pn) {
+function notifyDone(pn, st) {
+  notifyPane({ state: "done", agentId: pn.agentId, statusSource: st.source, ruleId: st.ruleId, session: sessionNameOf(pn.label), paneId: pn.paneId });
   logEvent(`done · ${pn.agentName} · ${pn.cwd}`);
   let cfg; try { cfg = readJSON(join(ROOT, "data", "notify.json")); } catch { return; }
   if (!cfg?.ntfy || cfg.onDone === false) return;
