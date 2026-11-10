@@ -2,22 +2,84 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Preserve the compact mouse desktop; tablets and touch desktops need tap targets. */
-@media (min-width: 600px) and (max-width: 1023px), (min-width: 600px) and (pointer: coarse) {
-  .mosaic button, .mosaic select, .mosaic label { min-height: 44px; }
-  .mosaic button { min-width: 44px; touch-action: manipulation; }
-  .mosaic > header { flex-wrap: wrap; }
-  .mosaic > header > div:last-child { flex-wrap: wrap; }
-  .mosaic-tile > header { flex-wrap: wrap; }
-  .mosaic-tile > header > div:first-child { overflow: hidden; }
-  .mosaic-tile > header > div:last-child { margin-left: auto; }
+.mosaic-compact-icon { display: none; }
+
+/* One compact chrome for every mosaic viewport. */
+@media (min-width: 600px) {
+  .mosaic { --mosaic-target: 40px; }
+  .mosaic button, .mosaic select, .mosaic label { min-height: var(--mosaic-target); }
+  .mosaic button { min-width: var(--mosaic-target); touch-action: manipulation; }
+  .mosaic-band { display: flex; align-items: center; gap: 4px; padding: 3px 4px; border-bottom: 1px solid #292932; }
+  .mosaic-band > div:first-child { gap: 0; }
+  .mosaic-band > div:first-child > span:last-child { display: none; }
+  .mosaic-title { font-size: 0; }
+  .mosaic-title > span { font-size: 18px; }
+  .mosaic-band > nav { flex: 0 0 auto; gap: 4px; padding: 0; }
+  .mosaic-band > nav button { flex: none; width: var(--mosaic-target); justify-content: center; gap: 3px; padding: 0; }
+  .mosaic-band > nav button span:last-child:not(:first-child) { display: none; }
+  .mosaic-band > div:last-child { flex-wrap: nowrap; flex: 1; min-width: 0; justify-content: flex-end; gap: 4px; }
+  .mosaic-band [role="group"] { border: 0; gap: 4px; overflow: visible; }
+  .mosaic-band button { padding: 0 4px; }
+  .mosaic-band select { min-width: 0; width: 90px; padding: 0 4px; }
+  .mosaic-full-label { display: none; }
+  .mosaic-compact-icon { display: inline; }
+  .mosaic-grid { gap: 4px; padding: 4px; }
+  .mosaic-tile > header { height: 40px; flex-shrink: 0; flex-wrap: nowrap; gap: 4px; padding: 0 4px; border: 0; box-shadow: inset 0 -1px #292932; }
+  .mosaic-tile > header > div:first-child { flex: 1; min-width: 0; overflow: hidden; gap: 4px; }
+  .mosaic-tile > header > div:first-child > span { min-width: 0; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mosaic-tile > header > div:first-child > span:first-of-type { flex-shrink: 0; max-width: 55%; }
+  .mosaic-tile > header > div:first-child > span[title]:not(:last-child) { max-width: 25%; }
+  .mosaic-tile > header > div:last-child { margin-left: auto; gap: 4px; }
+  .mosaic-tile > header > div:last-child > span { max-width: 76px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 4px; }
+  .mosaic-tile > header button { width: var(--mosaic-target); height: var(--mosaic-target); padding: 0; }
   .mosaic-tile pre { min-width: 0; overflow-wrap: anywhere; }
   .mosaic-empty > div:last-child { grid-template-columns: minmax(0, 1fr); }
   .mosaic-empty button > div { overflow: hidden; }
-  .mosaic > footer > div:last-child { min-width: 0; }
+  .mosaic > footer { display: grid; grid-template-columns: minmax(84px, .9fr) minmax(100px, 1fr) auto; align-items: center; gap: 4px; padding: 4px; }
+  .mosaic > footer > div:first-child { min-width: 0; margin: 0; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  .mosaic > footer > div:first-child::-webkit-scrollbar { display: none; }
+  .mosaic > footer > div:first-child button { flex: 0 0 var(--mosaic-target); height: var(--mosaic-target); padding: 0; }
+  .mosaic > footer > div:first-child button:last-child { flex-basis: auto; padding: 0 6px; }
+  .mosaic > footer textarea { text-overflow: ellipsis; min-width: 0; min-height: 40px; max-height: 76px; line-height: 20px; padding: 7px 8px; }
+  .mosaic > footer textarea::placeholder { white-space: nowrap; text-overflow: ellipsis; }
+  .mosaic > footer > div:last-child { min-width: 0; margin: 0; gap: 4px; }
   .mosaic > footer > div:last-child > div { min-width: 0; }
-  .mosaic > footer > div:last-child > div > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mosaic > footer label, .mosaic > footer button { flex-shrink: 0; }
+  .mosaic > footer > div:last-child > div > span { display: none; }
+  .mosaic > footer label { gap: 4px; padding: 0 4px; }
+  .mosaic > footer label input { width: 13px; height: 13px; }
+  .mosaic > footer label:has(input:checked) { color: white; background: #ffffff12; border-radius: 8px; }
+  .mosaic > footer label:has(input:focus-visible) { outline: 2px solid currentColor; }
+  .mosaic > footer > div:last-child > button { padding: 0 8px; }
+  .mosaic button, .mosaic select { white-space: nowrap; }
+  .mosaic :is(button, select, textarea):focus-visible { outline: 2px solid #e87979; outline-offset: -2px; }
+  .mosaic button:enabled:hover { border-color: #e8797980; background-color: #ffffff12; }
+  .mosaic > footer label { flex-shrink: 0; }
+}
+
+/* The faded edge signals more keys; trailing space keeps the last key clear at the end. */
+@media (min-width: 600px) and (max-width: 1023px) {
+  .mosaic > footer > div:first-child { padding-right: 12px; mask-image: linear-gradient(to right, #000 calc(100% - 12px), transparent); }
+}
+
+/* Mouse users keep compact key buttons; touch keeps the 40px target at any width. */
+@media (min-width: 1024px) and (pointer: fine) {
+  .mosaic { --mosaic-target: 32px; }
+}
+@media (min-width: 1024px) {
+  .mosaic-band > nav { flex: 1; min-width: 0; }
+  .mosaic-band > nav button { flex: 1; min-width: var(--mosaic-target); width: 0; justify-content: flex-start; padding: 0 6px; gap: 5px; }
+  .mosaic-band > nav button span:last-child:not(:first-child) { display: inline; }
+  .mosaic-band > div:last-child { flex: 0 0 auto; }
+  .mosaic > footer { grid-template-columns: auto minmax(100px, 1fr) auto; }
+  .mosaic > footer > div:first-child { overflow-x: visible; }
+}
+@media (min-width: 1280px) {
+  .mosaic-full-label { display: inline; }
+  .mosaic-compact-icon { display: none; }
+  .mosaic > footer > div:last-child > div { display: flex; align-items: center; gap: 4px; }
+  .mosaic > footer > div:last-child > div > .mosaic-focus { display: block; max-width: 15vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mosaic-band select { width: 124px; }
+  .mosaic-band button { padding: 0 8px; }
 }
 
 /* Nerd Font icons only (Powerline separators, file/git/clock glyphs from statuslines and

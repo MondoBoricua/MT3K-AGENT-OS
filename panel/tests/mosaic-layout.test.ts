@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_LAYOUT, LAYOUT_STORAGE_KEY, parseLayout, pickActiveSlot, slotForKey, usesSlotStrip, visibleSlotsFor } from "../src/lib/mosaic-layout.ts";
+import { DEFAULT_LAYOUT, LAYOUT_STORAGE_KEY, parseLayout, pickActiveSlot, slotForKey, slotForShortcut, visibleSlotsFor } from "../src/lib/mosaic-layout.ts";
 import { loadLayout, saveLayout } from "../src/lib/mosaic-storage.ts";
 
 function stubStorage(initial: Record<string, string> = {}, throwing = false) {
@@ -84,10 +84,18 @@ test("visibleSlotsFor: 1x1 single, 1x2 pair holding active, 2x2 all", () => {
   assert.deepEqual(visibleSlotsFor("1x2", 3), [2, 3]);
 });
 
-test("usesSlotStrip: strip and keys in 1x1 and 1x2 only", () => {
-  assert.equal(usesSlotStrip("1x1"), true);
-  assert.equal(usesSlotStrip("1x2"), true);
-  assert.equal(usesSlotStrip("2x2"), false);
+test("slot shortcuts preserve typing, editing, composition and every modifier", () => {
+  const plain = { key: "2", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, isComposing: false };
+  assert.equal(slotForShortcut(plain, null), 1);
+  assert.equal(slotForShortcut({ ...plain, key: "4" }, { tagName: "BUTTON" }), 3);
+  assert.equal(slotForShortcut({ ...plain, key: "5" }, null), null);
+  for (const modifier of ["metaKey", "ctrlKey", "altKey", "shiftKey", "isComposing"]) {
+    assert.equal(slotForShortcut({ ...plain, [modifier]: true }, null), null, modifier);
+  }
+  for (const tagName of ["INPUT", "TEXTAREA", "SELECT"]) {
+    assert.equal(slotForShortcut(plain, { tagName }), null, tagName);
+  }
+  assert.equal(slotForShortcut(plain, { tagName: "SPAN", isContentEditable: true }), null);
 });
 
 test("1x2 round-trips through storage", () => {

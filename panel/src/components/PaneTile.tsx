@@ -173,6 +173,7 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
               void handleRename();
             }}
             title="renombrar sesión"
+            aria-label="renombrar sesión"
             className="rounded border border-ink-line px-1.5 py-0.5 font-mono text-[10px] text-white/60 transition hover:border-accent/50 hover:text-accent"
           >
             ✎
@@ -184,6 +185,7 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
               onExpand();
             }}
             title="ampliar a pantalla completa"
+            aria-label="ampliar a pantalla completa"
             className="rounded border border-ink-line px-1.5 py-0.5 font-mono text-[10px] text-white/60 transition hover:border-accent/50 hover:text-accent"
           >
             ⤢
@@ -195,6 +197,7 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
               onRemove();
             }}
             title="quitar del mosaico"
+            aria-label="quitar del mosaico"
             className="rounded border border-ink-line px-1.5 py-0.5 font-mono text-[10px] text-white/60 transition hover:border-red-400/50 hover:text-red-300"
           >
             ✕

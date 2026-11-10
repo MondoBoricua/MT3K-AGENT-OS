@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { agentKey, sendKey, sendToPane, type AgentRow } from "../lib/api";
 import {
   MOSAIC_SLOTS,
@@ -9,8 +9,8 @@ import {
   type MosaicPreset,
   type Session,
 } from "../lib/mosaic-presets";
-import { layoutForViewport, layoutsForViewport, pickActiveSlot, slotForKey, usesSlotStrip, visibleSlotsFor, type MosaicLayout } from "../lib/mosaic-layout";
-import { DESKTOP_QUERY, useMediaQuery } from "../lib/use-media-query";
+import { layoutForViewport, layoutsForViewport, pickActiveSlot, slotForShortcut, visibleSlotsFor, type MosaicLayout } from "../lib/mosaic-layout";
+import { COMPACT_MOSAIC_QUERY, MOSAIC_DESKTOP_QUERY, useMediaQuery } from "../lib/use-media-query";
 import { loadLastSlots, loadLayout, loadPresets, saveLastSlots, saveLayout, savePresets } from "../lib/mosaic-storage";
 import { paneStatus, statusLabel, statusTone } from "../lib/pane-status";
 import AgentLogo from "./AgentLogo";
@@ -53,13 +53,37 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
     const idx = initial.findIndex((s) => s !== null);
     return idx >= 0 ? idx : null;
   });
-  const isDesktop = useMediaQuery(DESKTOP_QUERY);
+  const isDesktop = useMediaQuery(MOSAIC_DESKTOP_QUERY);
   const [savedLayout, setLayout] = useState<MosaicLayout>(() => loadLayout());
   const layout = layoutForViewport(savedLayout, isDesktop);
   const [active, setActive] = useState<number>(() => pickActiveSlot(resolveSlots(loadLastSlots(), sessions), null));
   const [presets, setPresets] = useState<MosaicPreset[]>(() => loadPresets());
   const [selectedPreset, setSelectedPreset] = useState("");
   const [text, setText] = useState("");
+  const compact = useMediaQuery(COMPACT_MOSAIC_QUERY);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    const grow = () => {
+      input.style.height = "";
+      if (!compact) return;
+      const style = getComputedStyle(input);
+      const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+      input.style.height = "auto";
+      input.style.height = `${Math.min(76, Math.max(40, input.scrollHeight + border))}px`;
+    };
+    grow();
+    let width = input.getBoundingClientRect().width;
+    const observer = new ResizeObserver(() => {
+      const nextWidth = input.getBoundingClientRect().width;
+      if (nextWidth === width) return;
+      width = nextWidth;
+      grow();
+    });
+    observer.observe(input);
+    return () => observer.disconnect();
+  }, [text, compact]);
   const [sending, setSending] = useState(false);
   const [enterSends, setEnterSends] = useState(() => {
     try {
@@ -104,14 +128,10 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
     if (focus !== null) setActive(focus);
   }, [focus]);
 
-  // Keys 1-4 pick the active slot in 1x1 and 1x2 (ignored while typing or with modifiers)
+  // Keys 1-4 pick the active slot in every layout (ignored while typing or with modifiers)
   useEffect(() => {
-    if (!usesSlotStrip(layout)) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return;
-      const idx = slotForKey(e.key);
+      const idx = slotForShortcut(e, e.target instanceof HTMLElement ? e.target : null);
       if (idx === null) return;
       e.preventDefault();
       e.stopPropagation(); // App.tsx binds 1-9 to "switch project" on window: capture first so it never sees these
@@ -120,7 +140,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [layout, slots]);
+  }, [slots]);
 
   // Lock body scroll while open
   useEffect(() => {
@@ -158,7 +178,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
   const changeLayout = (next: MosaicLayout) => {
     setLayout(next);
     saveLayout(next);
-    if (usesSlotStrip(next)) setActive((cur) => (focus !== null ? focus : cur));
+    setActive((cur) => (focus !== null ? focus : cur));
   };
 
   const selectSlot = (idx: number) => {
@@ -229,24 +249,31 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
     if (!r?.ok) onToast?.(r?.err ? `error: ${r.err}` : "no se pudo enviar la tecla", false);
   };
 
+  const shorten = (value: string, limit: number) => value.length > limit ? `…${value.slice(-(limit - 1))}` : value;
+  const sendTarget = focusedSession
+    ? `${focusedSession.agent.name} · ${shorten(focusedSession.pane.cwd, 24)}${focusedSession.pane.name ? ` · ${shorten(focusedSession.pane.name, 20)}` : ""} (${focus! + 1})`
+    : "elige un tile";
+
   return (
     <div
       className="mosaic fixed inset-0 z-[60] flex flex-col bg-black"
       style={{ paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)" }}
     >
-      <header
-        className="flex shrink-0 items-center justify-between gap-3 border-b border-ink-line px-4 py-2.5"
-      >
+      <header className="mosaic-band flex shrink-0 items-center justify-between gap-3 border-b border-ink-line px-4 py-2.5">
         <div className="flex items-center gap-3">
-          <span className="font-mono text-sm font-semibold text-white">⊞ Mosaico</span>
+          <span title="Mosaico" className="mosaic-title font-mono text-sm font-semibold text-white"><span aria-hidden="true">⊞</span> Mosaico</span>
           <span className="font-mono text-xs text-white/45">
             {sessions.length} {sessions.length === 1 ? "sesión" : "sesiones"}
           </span>
         </div>
 
+        <MosaicSlotStrip slots={slots} active={active} visible={visibleIdx} onSelect={selectSlot} />
+
         <div className="flex items-center gap-2">
           <MosaicLayoutSwitch layout={layout} options={layoutsForViewport(isDesktop)} onChange={changeLayout} />
           <select
+            aria-label="Presets del mosaico"
+            title="cargar preset"
             value={selectedPreset}
             onChange={(e) => handleLoadPreset(e.target.value)}
             className="rounded-lg border border-ink-line bg-ink-850/60 px-2.5 py-1 font-mono text-xs text-white/80 focus:border-accent/50 focus:outline-none"
@@ -260,30 +287,34 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
           </select>
           <button
             type="button"
+            aria-label="guardar preset"
+            title="guardar preset"
             onClick={handleSavePreset}
             className="rounded-lg border border-ink-line bg-ink-850/60 px-2.5 py-1 font-mono text-xs text-white/70 transition hover:border-accent/50 hover:text-accent"
           >
-            guardar
+            <span className="mosaic-full-label">guardar</span><span className="mosaic-compact-icon" aria-hidden="true">▣</span>
           </button>
           <button
             type="button"
+            aria-label="borrar preset"
+            title="borrar preset"
             onClick={handleDeletePreset}
             disabled={!selectedPreset}
             className="rounded-lg border border-ink-line bg-ink-850/60 px-2.5 py-1 font-mono text-xs text-white/70 transition hover:border-red-400/50 hover:text-red-300 disabled:opacity-40"
           >
-            borrar
+            <span className="mosaic-full-label">borrar</span><span className="mosaic-compact-icon" aria-hidden="true">⌫</span>
           </button>
           <button
             type="button"
+            aria-label="cerrar mosaico"
+            title="cerrar mosaico"
             onClick={onClose}
             className="rounded-lg border border-ink-line px-2.5 py-1 font-mono text-xs text-white/60 transition hover:text-white"
           >
-            ✕ cerrar
+            <span className="mosaic-full-label">✕ cerrar</span><span className="mosaic-compact-icon" aria-hidden="true">✕</span>
           </button>
         </div>
       </header>
-
-      {usesSlotStrip(layout) && <MosaicSlotStrip slots={slots} active={active} visible={visibleIdx} onSelect={selectSlot} />}
       <div className={`mosaic-grid grid min-h-0 min-w-0 flex-1 gap-2 p-2 ${GRID_CLS[layout]}`}>
         {visibleIdx.map((idx) => {
           const slot = slots[idx];
@@ -368,6 +399,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
               disabled={!focusedSession}
               onClick={() => void key(btn.k)}
               title={btn.title}
+              aria-label={btn.title}
               className="flex-1 rounded-lg border border-ink-line bg-ink-850/60 py-1.5 font-mono text-xs text-white/80 transition hover:border-accent/40 active:bg-accent/20 active:text-accent disabled:opacity-40"
             >
               {btn.label}
@@ -376,6 +408,8 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
         </div>
 
         <textarea
+          ref={inputRef}
+          aria-label={focusedSession ? `Mensaje a ${sendTarget}` : sendTarget}
           value={text}
           disabled={!focusedSession}
           onChange={(e) => setText(e.target.value)}
@@ -388,12 +422,8 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
               void send();
             }
           }}
-          rows={2}
-          placeholder={
-            focusedSession
-              ? `escríbele a ${focusedSession.agent.name} (${focusedSession.pane.cwd})…`
-              : "elige un tile"
-          }
+          rows={compact ? 1 : 2}
+          placeholder={focusedSession ? `Mensaje a ${sendTarget}…` : sendTarget}
           className="w-full resize-none rounded-lg border border-ink-line bg-ink-850/60 px-3 py-2 font-mono text-sm text-white placeholder:text-white/30 focus:border-accent/50 focus:outline-none disabled:opacity-40"
         />
 
@@ -402,6 +432,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
             <label className="flex cursor-pointer items-center gap-2 font-mono text-[11px] text-white/55">
               <input
                 type="checkbox"
+                aria-label="Enviar al pulsar Enter"
                 checked={enterSends}
                 onChange={(e) => {
                   setEnterSends(e.target.checked);
@@ -415,10 +446,8 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
               />
               ↵ enviar
             </label>
-            <span className="font-mono text-[11px] text-white/40">
-              {focusedSession
-                ? `foco: ${focusedSession.agent.name} · ${focusedSession.pane.name ? `${focusedSession.pane.name} · ` : ""}${focusedSession.pane.cwd} (${focusedSession.pane.label})`
-                : "elige un tile"}
+            <span className="mosaic-focus font-mono text-[11px] text-white/40" title={sendTarget}>
+              {focusedSession ? `foco: ${sendTarget}` : sendTarget}
             </span>
           </div>
           <button

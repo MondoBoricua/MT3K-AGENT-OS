@@ -43,7 +43,11 @@ export function visibleSlotsFor(layout: MosaicLayout, rawActive: number): number
   return [start, start + 1];
 }
 
-/** Layouts that show the 1 2 3 4 slot strip and react to keys 1-4. */
-export function usesSlotStrip(layout: MosaicLayout): boolean {
-  return layout !== "2x2";
+type SlotShortcut = Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "isComposing">;
+
+/** Only bare digits outside editable controls select mosaic slots. */
+export function slotForShortcut(event: SlotShortcut, target: { tagName?: string; isContentEditable?: boolean } | null): number | null {
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.isComposing) return null;
+  if (target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName ?? "")) return null;
+  return slotForKey(event.key);
 }
