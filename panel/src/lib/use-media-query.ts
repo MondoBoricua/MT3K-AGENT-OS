@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 export const DESKTOP_QUERY = "(min-width: 1024px)";
+export const MOSAIC_QUERY = "(min-width: 600px)";
 
 export function useMediaQuery(query: string): boolean {
   return useSyncExternalStore(

@@ -9,7 +9,8 @@ import {
   type MosaicPreset,
   type Session,
 } from "../lib/mosaic-presets";
-import { pickActiveSlot, slotForKey, usesSlotStrip, visibleSlotsFor, type MosaicLayout } from "../lib/mosaic-layout";
+import { layoutForViewport, layoutsForViewport, pickActiveSlot, slotForKey, usesSlotStrip, visibleSlotsFor, type MosaicLayout } from "../lib/mosaic-layout";
+import { DESKTOP_QUERY, useMediaQuery } from "../lib/use-media-query";
 import { loadLastSlots, loadLayout, loadPresets, saveLastSlots, saveLayout, savePresets } from "../lib/mosaic-storage";
 import { paneStatus, statusLabel, statusTone } from "../lib/pane-status";
 import AgentLogo from "./AgentLogo";
@@ -52,7 +53,9 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
     const idx = initial.findIndex((s) => s !== null);
     return idx >= 0 ? idx : null;
   });
-  const [layout, setLayout] = useState<MosaicLayout>(() => loadLayout());
+  const isDesktop = useMediaQuery(DESKTOP_QUERY);
+  const [savedLayout, setLayout] = useState<MosaicLayout>(() => loadLayout());
+  const layout = layoutForViewport(savedLayout, isDesktop);
   const [active, setActive] = useState<number>(() => pickActiveSlot(resolveSlots(loadLastSlots(), sessions), null));
   const [presets, setPresets] = useState<MosaicPreset[]>(() => loadPresets());
   const [selectedPreset, setSelectedPreset] = useState("");
@@ -228,12 +231,11 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex flex-col bg-black"
-      style={{ paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }}
+      className="mosaic fixed inset-0 z-[60] flex flex-col bg-black"
+      style={{ paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)" }}
     >
       <header
         className="flex shrink-0 items-center justify-between gap-3 border-b border-ink-line px-4 py-2.5"
-        style={{ paddingLeft: "calc(1rem + env(safe-area-inset-left))", paddingRight: "calc(1rem + env(safe-area-inset-right))" }}
       >
         <div className="flex items-center gap-3">
           <span className="font-mono text-sm font-semibold text-white">⊞ Mosaico</span>
@@ -243,7 +245,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
         </div>
 
         <div className="flex items-center gap-2">
-          <MosaicLayoutSwitch layout={layout} onChange={changeLayout} />
+          <MosaicLayoutSwitch layout={layout} options={layoutsForViewport(isDesktop)} onChange={changeLayout} />
           <select
             value={selectedPreset}
             onChange={(e) => handleLoadPreset(e.target.value)}
@@ -282,7 +284,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
       </header>
 
       {usesSlotStrip(layout) && <MosaicSlotStrip slots={slots} active={active} visible={visibleIdx} onSelect={selectSlot} />}
-      <div className={`grid min-h-0 flex-1 gap-2 p-2 ${GRID_CLS[layout]}`}>
+      <div className={`mosaic-grid grid min-h-0 min-w-0 flex-1 gap-2 p-2 ${GRID_CLS[layout]}`}>
         {visibleIdx.map((idx) => {
           const slot = slots[idx];
           return slot ? (
@@ -299,7 +301,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
           ) : (
             <div
               key={`empty-${idx}`}
-              className="flex min-h-0 flex-col rounded-xl border border-dashed border-ink-line bg-ink-900/40 p-3"
+              className="mosaic-empty flex min-h-0 min-w-0 flex-col rounded-xl border border-dashed border-ink-line bg-ink-900/40 p-3"
             >
               <div className="mb-2 flex items-center justify-between">
                 <span className="font-mono text-[10px] uppercase tracking-wider text-white/35">
@@ -348,7 +350,6 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
 
       <footer
         className="shrink-0 border-t border-ink-line bg-ink-900/95 p-3"
-        style={{ paddingLeft: "calc(0.75rem + env(safe-area-inset-left))", paddingRight: "calc(0.75rem + env(safe-area-inset-right))" }}
       >
         <div className="mb-2 flex items-center gap-1.5">
           {[

@@ -5,6 +5,16 @@ export type MosaicLayout = "1x1" | "1x2" | "2x2";
 export const LAYOUT_STORAGE_KEY = "mt3k.mosaic.layout";
 export const DEFAULT_LAYOUT: MosaicLayout = "2x2";
 
+/** At 600px a two-column grid leaves <300px per tile after padding and gap.
+ * Keep four-tile layouts desktop-only; retain the saved desktop preference. */
+export function layoutsForViewport(isDesktop: boolean): MosaicLayout[] {
+  return isDesktop ? ["1x1", "1x2", "2x2"] : ["1x1", "1x2"];
+}
+
+export function layoutForViewport(saved: MosaicLayout, isDesktop: boolean): MosaicLayout {
+  return layoutsForViewport(isDesktop).includes(saved) ? saved : "1x2";
+}
+
 export function parseLayout(raw: unknown): MosaicLayout {
   return raw === "1x1" || raw === "1x2" || raw === "2x2" ? raw : DEFAULT_LAYOUT;
 }

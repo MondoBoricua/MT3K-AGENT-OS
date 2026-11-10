@@ -140,7 +140,7 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
   return (
     <div
       onClick={onFocus}
-      className={`flex min-h-0 flex-col overflow-hidden rounded-xl border border-ink-line bg-ink-900/90 transition ${
+      className={`mosaic-tile flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-ink-line bg-ink-900/90 transition ${
         focused ? "ring-2 ring-accent/60" : ""
       }`}
     >

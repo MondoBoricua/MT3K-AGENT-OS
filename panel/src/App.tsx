@@ -14,7 +14,7 @@ import Files from "./pages/Files";
 import AgentTerminalSheet from "./components/AgentTerminalSheet";
 import Mosaic from "./components/Mosaic";
 import AgentLogo from "./components/AgentLogo";
-import { DESKTOP_QUERY, useMediaQuery } from "./lib/use-media-query";
+import { MOSAIC_QUERY, useMediaQuery } from "./lib/use-media-query";
 
 const BASE = import.meta.env.BASE_URL;
 const NAV = [
@@ -48,7 +48,7 @@ export default function App() {
   const [sheetAgentId, setSheetAgentId] = useState<string | null>(null);
   const [sheetInitialPaneId, setSheetInitialPaneId] = useState<string | undefined>(undefined);
   const [mosaicOpen, setMosaicOpen] = useState(false);
-  const isDesktop = useMediaQuery(DESKTOP_QUERY);
+  const canMosaic = useMediaQuery(MOSAIC_QUERY);
   const [toasts, setToasts] = useState<{ id: number; text: string; live: boolean }[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pendingSel, setPendingSel] = useState<{ project: string; id: string } | null>(null);
@@ -80,8 +80,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!isDesktop && mosaicOpen) setMosaicOpen(false);
-  }, [isDesktop, mosaicOpen]);
+    if (!canMosaic && mosaicOpen) setMosaicOpen(false);
+  }, [canMosaic, mosaicOpen]);
   const saveToken = () => {
     if (!tokenDraft.trim()) return;
     setToken(tokenDraft.trim());
@@ -337,7 +337,7 @@ export default function App() {
         {page === "Memory" && <Memory />}
         {page === "Activity" && <Activity />}
         {page === "Files" && <Files onToast={pushToast} focusPath={focus?.path} />}
-        {page === "Agents View" && <AgentsView agents={viewAgents} onOpen={openAgent} onOpenMosaic={isDesktop ? () => setMosaicOpen(true) : undefined} onToast={pushToast} focusPath={focus?.path} />}
+        {page === "Agents View" && <AgentsView agents={viewAgents} onOpen={openAgent} onOpenMosaic={canMosaic ? () => setMosaicOpen(true) : undefined} onToast={pushToast} focusPath={focus?.path} />}
         {page === "Settings" && <Settings manifest={manifest} onChanged={() => loadManifest(`?t=${Date.now()}`)} />}
       </main>
 
@@ -351,7 +351,7 @@ export default function App() {
       {/* shared terminal/compose sheet — opened from Agents View or the sidebar quick-access list */}
       <AgentTerminalSheet agent={sheetAgent} initialPaneId={sheetInitialPaneId} projects={manifest?.projects ?? []} focusProjectId={focus?.id} focusPath={focus?.path} onClose={() => { setSheetAgentId(null); setSheetInitialPaneId(undefined); }} onToast={pushToast} />
 
-      <Mosaic open={mosaicOpen && isDesktop} sessions={viewSessions} onClose={() => setMosaicOpen(false)} onExpand={expandFromMosaic} onToast={pushToast} />
+      <Mosaic open={mosaicOpen && canMosaic} sessions={viewSessions} onClose={() => setMosaicOpen(false)} onExpand={expandFromMosaic} onToast={pushToast} />
 
       {/* Focus picker — mobile first-visit asks here; the header chip reopens it anywhere */}
       {focusPickerOpen && (

@@ -2,6 +2,24 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Preserve the compact mouse desktop; tablets and touch desktops need tap targets. */
+@media (min-width: 600px) and (max-width: 1023px), (min-width: 600px) and (pointer: coarse) {
+  .mosaic button, .mosaic select, .mosaic label { min-height: 44px; }
+  .mosaic button { min-width: 44px; touch-action: manipulation; }
+  .mosaic > header { flex-wrap: wrap; }
+  .mosaic > header > div:last-child { flex-wrap: wrap; }
+  .mosaic-tile > header { flex-wrap: wrap; }
+  .mosaic-tile > header > div:first-child { overflow: hidden; }
+  .mosaic-tile > header > div:last-child { margin-left: auto; }
+  .mosaic-tile pre { min-width: 0; overflow-wrap: anywhere; }
+  .mosaic-empty > div:last-child { grid-template-columns: minmax(0, 1fr); }
+  .mosaic-empty button > div { overflow: hidden; }
+  .mosaic > footer > div:last-child { min-width: 0; }
+  .mosaic > footer > div:last-child > div { min-width: 0; }
+  .mosaic > footer > div:last-child > div > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mosaic > footer label, .mosaic > footer button { flex-shrink: 0; }
+}
+
 /* Nerd Font icons only (Powerline separators, file/git/clock glyphs from statuslines and
    prompts). Listed LAST in the mono stack, so text keeps its font and only the private-use
    glyphs fall through to this. Symbols Nerd Font Mono v3.5.1, MIT — license beside the file. */
