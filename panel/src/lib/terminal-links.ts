@@ -25,10 +25,13 @@ export function branchTitles(refs: GitRefs | null): Map<string, string> {
   return m;
 }
 
-// parent directory of a file path, either separator; "" when there is none
+// parent directory of a file path, either separator; "" when there is none. Roots keep their separator
+// ("C:\\", "\\\\host\\share\\", "/") because "C:" alone is drive-relative.
 export function parentDir(p: string): string {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   if (i < 0) return "";
   if (i === 0) return "/";
-  return p.slice(0, i);
+  const parent = p.slice(0, i);
+  if (/^[A-Za-z]:$/.test(parent) || /^[\\/]{2}[^\\/]+[\\/][^\\/]+$/.test(parent)) return parent + p[i];
+  return parent;
 }

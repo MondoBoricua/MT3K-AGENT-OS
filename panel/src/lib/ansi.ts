@@ -65,7 +65,7 @@ const stripNonSgr = (s: string) =>
 // Clickable text inside the terminal. Three kinds, all produced here and nowhere else:
 //   1. bare http(s) URLs  -> <a href="https://…" target="_blank" rel="noopener noreferrer">
 //   2. absolute file-system paths (/abs, ~/x, C:\x, optional :LINE[:COL]) -> <a data-fs-path="…">
-//   3. git branch names (exact token, code-styled run only)               -> <a data-git-branch="…">
+//   3. git branch names (the WHOLE code-styled run equals the name)               -> <a data-git-branch="…">
 // SAFETY INVARIANT: only (1) carries an href, and its scheme is anchored by URL_RE itself.
 // (2) and (3) carry ONLY escaped data- attributes (no href, no event handlers, no file:/javascript:
 // scheme, nothing computed): ONE delegated click listener on the terminal container reads them
@@ -76,53 +76,68 @@ const URL_RE = /https?:\/\/[^\s<>"']+/g;
 // `https://h/Users/x` (consumed as a URL first) are never paths. A POSIX path needs two segments
 // (`/Users/x`), so slash commands like `/review` are left alone; `~/x` and `C:\x` need one.
 const PATH_RE = /(^|[\s"'`(\[<=,{])(~\/[^\s<>"'`|*?]+|\/[^\s\/<>"'`|*?][^\s<>"'`|*?]*|[A-Za-z]:\\[^\s<>"'`|*?]+)/g;
-const TRAIL_PUNCT_RE = /[.,;:!?)\]}]+$/;
 const LINE_SUFFIX_RE = /:\d+(?::\d+)?$/;
-const BRANCH_TOKEN_RE = /[A-Za-z0-9_.\/+@-]+/g;
 const LINK_STYLE = 'style="color:inherit;text-decoration:underline dotted;cursor:pointer"';
 const URL_STYLE = 'style="color:inherit;text-decoration:underline"';
 
 export type BranchTitles = ReadonlyMap<string, string>; // branch name -> tooltip text
 
-// text between URLs/paths: only here can a branch token be linked
-function linkBranches(text: string, branches: BranchTitles | undefined): string {
-  if (!branches || branches.size === 0 || !text) return esc(text);
-  let html = "";
-  let i = 0;
-  for (const m of text.matchAll(BRANCH_TOKEN_RE)) {
-    const tok = m[0].replace(/\.+$/, ""); // "on master." -> master
-    const title = branches.get(tok);
-    if (title === undefined) continue;
-    const at = m.index ?? 0;
-    html += esc(text.slice(i, at));
-    html += `<a data-git-branch="${escAttr(tok)}" title="${escAttr(title)}" ${LINK_STYLE}>${esc(tok)}</a>`;
-    i = at + tok.length;
-  }
-  return html + esc(text.slice(i));
+// Linear backwards trim of trailing prose punctuation (a regex `[...]+$` backtracks quadratically on
+// "/a/b" + 100k dots + "x"). `}` is trimmed from paths only; a URL may legitimately end in one.
+const TRAIL_URL = ".,;:!?)]";
+const TRAIL_PATH = ".,;:!?)]}";
+function trimTrailing(s: string, chars: string): string {
+  let end = s.length;
+  while (end > 0 && chars.includes(s[end - 1])) end--;
+  return end === s.length ? s : s.slice(0, end);
+}
+
+// A branch name is linked ONLY when the whole styled run (minus surrounding whitespace, quotes,
+// backticks and trailing prose punctuation) is exactly that name: a coloured diff line, highlighted code
+// or a "string literal" that merely contains the word never matches. Unicode-safe: plain string equality.
+const WRAP = " \t\r\n\"'`";
+const TRAIL_BRANCH = WRAP + ".,;:!?)]}";
+function linkWholeBranch(run: string, branches: BranchTitles): string | null {
+  let start = 0;
+  let end = run.length;
+  while (start < end && WRAP.includes(run[start])) start++;
+  while (end > start && TRAIL_BRANCH.includes(run[end - 1])) end--;
+  const name = run.slice(start, end);
+  const title = branches.get(name);
+  if (title === undefined) return null;
+  return `${esc(run.slice(0, start))}<a data-git-branch="${escAttr(name)}" title="${escAttr(title)}" ${LINK_STYLE}>${esc(name)}</a>${esc(run.slice(end))}`;
 }
 
 // "/a/b" or "~/a" or "C:\a" after trimming; POSIX roots need a second segment
 const pathOk = (p: string) => (p.startsWith("/") ? p.indexOf("/", 1) > 0 : p.length > 2);
 
-function linkify(raw: string, branches?: BranchTitles): string {
-  let html = "";
-  let i = 0;
-  const hits: { at: number; end: number; kind: "url" | "path"; text: string }[] = [];
+// Windows paths stop at the first space (`C:\Program Files\x` links only `C:\Program`): paths with spaces
+// cannot be told apart from prose in a terminal, so this is left as is on purpose.
+interface Hit { at: number; end: number; kind: "url" | "path"; text: string }
+
+function linkify(raw: string): string {
+  const urls: Hit[] = [];
   for (const m of raw.matchAll(URL_RE)) {
-    const url = m[0].replace(/[.,;:!?)\]]+$/, ""); // trailing prose punctuation isn't part of the URL
-    hits.push({ at: m.index ?? 0, end: (m.index ?? 0) + url.length, kind: "url", text: url });
+    const url = trimTrailing(m[0], TRAIL_URL); // trailing prose punctuation isn't part of the URL
+    urls.push({ at: m.index ?? 0, end: (m.index ?? 0) + url.length, kind: "url", text: url });
   }
+  // both lists come out of matchAll in ascending order: one forward pass, no rescans
+  const hits: Hit[] = [];
+  let u = 0;
   for (const m of raw.matchAll(PATH_RE)) {
     const at = (m.index ?? 0) + m[1].length;
-    if (hits.some((h) => at >= h.at && at < h.end)) continue; // inside a URL
-    const text = m[2].replace(TRAIL_PUNCT_RE, "");
+    while (u < urls.length && urls[u].end <= at) u++;
+    if (u < urls.length && urls[u].at <= at) continue; // inside a URL
+    const text = trimTrailing(m[2], TRAIL_PATH);
     if (!pathOk(text.replace(LINE_SUFFIX_RE, ""))) continue;
     hits.push({ at, end: at + text.length, kind: "path", text });
   }
-  hits.sort((a, b) => a.at - b.at);
-  for (const h of hits) {
+  const all = urls.length && hits.length ? [...urls, ...hits].sort((a, b) => a.at - b.at) : urls.length ? urls : hits;
+  let html = "";
+  let i = 0;
+  for (const h of all) {
     if (h.at < i) continue;
-    html += linkBranches(raw.slice(i, h.at), branches);
+    html += esc(raw.slice(i, h.at));
     if (h.kind === "url") {
       html += `<a href="${escAttr(h.text)}" target="_blank" rel="noopener noreferrer" ${URL_STYLE}>${esc(h.text)}</a>`;
     } else {
@@ -131,7 +146,7 @@ function linkify(raw: string, branches?: BranchTitles): string {
     }
     i = h.end;
   }
-  return html + linkBranches(raw.slice(i), branches);
+  return html + esc(raw.slice(i));
 }
 
 // Inline code in Claude Code is drawn with a non-default, non-grey foreground (measured on its dark
@@ -171,7 +186,7 @@ export function ansiToHtml(input: string, opts: { branches?: BranchTitles } = {}
   const flush = (t: string) => {
     if (!t) return;
     if (!open) { out += `<span style="${styleAttr(st)}">`; open = true; }
-    out += linkify(t, codeStyled(st) ? opts.branches : undefined);
+    out += (opts.branches && codeStyled(st) && linkWholeBranch(t, opts.branches)) || linkify(t);
   };
   const closeSpan = () => { if (open) { out += "</span>"; open = false; } };
 

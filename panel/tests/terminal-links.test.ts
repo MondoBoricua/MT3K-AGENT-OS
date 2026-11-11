@@ -57,6 +57,34 @@ test("branch: plain, grey or inverse text, no branch list, and substrings are no
   }
 });
 
+test("branch: a coloured run that merely CONTAINS the name is not linked (diff line, code, string, unicode word)", () => {
+  const green = (t: string) => `\x1b[32m${t}\x1b[0m`;
+  assert.deepEqual(branchLinks(ansiToHtml(green("+ master"), { branches: BR })), []);
+  assert.deepEqual(branchLinks(ansiToHtml(CODE("main() master()"), { branches: BR })), []);
+  assert.deepEqual(branchLinks(ansiToHtml(CODE('"master" is'), { branches: BR })), []);
+  assert.deepEqual(branchLinks(ansiToHtml(CODE("émasteré"), { branches: BR })), []);
+  assert.deepEqual(branchLinks(ansiToHtml(CODE("master branch"), { branches: BR })), []);
+});
+
+test("branch: whole run equal to the name (positive control, quotes/space/punctuation trimmed, wrapper kept as text)", () => {
+  const BR2 = new Map([["feat/panel-motion", "t"], ["master", "t"]]);
+  assert.deepEqual(branchLinks(ansiToHtml(CODE("feat/panel-motion"), { branches: BR2 })), ["feat/panel-motion"]);
+  assert.deepEqual(branchLinks(ansiToHtml(CODE("master"), { branches: BR2 })), ["master"]);
+  const html = ansiToHtml(CODE(' "master". '), { branches: BR2 });
+  assert.deepEqual(branchLinks(html), ["master"]);
+  assert.match(html, /> "<a data-git-branch="master"[^>]*>master<\/a>"\. <\/span>/);
+});
+
+test("pathological lines stay linear: long punctuation run after a path, many paths, long URL tail (50k units < 200 ms)", () => {
+  const cases = ["/a/b" + ".".repeat(50000) + "x", " /a/b".repeat(50000), "https://a.io/x" + ".".repeat(50000) + "x", "/a/b" + ":1".repeat(25000)];
+  for (const input of cases) {
+    const t0 = performance.now();
+    ansiToHtml(input);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 200, `${input.slice(0, 20)}… took ${ms.toFixed(0)} ms`);
+  }
+});
+
 test("branch inside a path or URL is not linked", () => {
   assert.deepEqual(branchLinks(ansiToHtml(CODE("/Users/mondo/master/x"), { branches: BR })), []);
   assert.deepEqual(branchLinks(ansiToHtml(CODE("https://github.com/o/r/tree/master"), { branches: BR })), []);
@@ -105,5 +133,9 @@ test("parentDir handles both separators and roots", () => {
   assert.equal(parentDir("/a/b/c.ts"), "/a/b");
   assert.equal(parentDir("/c.ts"), "/");
   assert.equal(parentDir("C:\\u\\x.txt"), "C:\\u");
+  assert.equal(parentDir("C:\\x.txt"), "C:\\");
+  assert.equal(parentDir("C:/x.txt"), "C:/");
+  assert.equal(parentDir("\\\\host\\share\\x.txt"), "\\\\host\\share\\");
+  assert.equal(parentDir("\\\\host\\share\\d\\x.txt"), "\\\\host\\share\\d");
   assert.equal(parentDir("x"), "");
 });
