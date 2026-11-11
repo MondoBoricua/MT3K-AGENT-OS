@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  buildRefs, expandHome, findGit, githubBranchUrl, gitRefs, parseForEachRef, parseGithubRemote, parseWorktrees, validateCwd,
+  buildRefs, createGitResolver, expandHome, findGit, githubBranchUrl, gitRefs, parseForEachRef, parseGithubRemote, parseWorktrees, runGitWith, validateCwd,
 } from "./git-refs.mjs";
 
 const FER = [
@@ -136,13 +136,72 @@ test("findGit: first absolute PATH hit wins; empty, '.', and relative entries ar
   assert.equal(findGit({ pathEnv: "", platform: "linux", exists: () => true, sep: ":" }), null);
 });
 
-test("findGit on win32 only tries git.exe then git.com, never git.cmd or the bare name", () => {
+test("findGit on win32: drive-letter entries only, .exe then .com, never .cmd or the bare name", () => {
   const seen = [];
   const exists = (p) => { seen.push(p); return p.endsWith("git.com"); };
-  const r = findGit({ pathEnv: "/tools;.;/more", platform: "win32", exists, sep: ";" });
-  assert.equal(r, "/tools\\git.com");
-  assert.deepEqual(seen, ["/tools\\git.exe", "/tools\\git.com"]);
-  assert.ok(!seen.some((p) => /cmd|git$/.test(p)));
+  const r = findGit({ pathEnv: "C:\\Tools;.;D:\\More", platform: "win32", exists });
+  assert.equal(r, "C:\\Tools\\git.com");
+  assert.deepEqual(seen, ["C:\\Tools\\git.exe", "C:\\Tools\\git.com"]);
+  assert.equal(findGit({ pathEnv: '"C:\\Program Files\\Git\\cmd";C:\\x', platform: "win32", exists: () => true }), "C:\\Program Files\\Git\\cmd\\git.exe");
+  assert.equal(findGit({ pathEnv: "C:/Git/cmd", platform: "win32", exists: () => true }), "C:\\Git\\cmd\\git.exe");
+});
+
+test("findGit on win32 rejects drive-less roots and UNC (cross-drive: \\tools would exec as D:\\tools under a D: cwd)", () => {
+  const seen = [];
+  const exists = (p) => { seen.push(p); return true; };
+  for (const entry of ["\\tools", "/tools", "\\\\host\\share", "//host/share", "tools", "C:tools"]) {
+    assert.equal(findGit({ pathEnv: `${entry};C:\\trusted`, platform: "win32", exists }), "C:\\trusted\\git.exe", entry);
+  }
+  assert.ok(!seen.some((p) => !/^C:\\trusted/.test(p)), seen.join(","));
+  assert.equal(findGit({ pathEnv: "\\tools;/tools", platform: "win32", exists: () => true }), null);
+});
+
+test("findGit on POSIX: a non-executable git earlier in PATH is skipped", () => {
+  const exec = new Set(["/usr/bin/git"]);
+  assert.equal(findGit({ pathEnv: "/blocked:/usr/bin", platform: "linux", exists: (p) => exec.has(p) }), "/usr/bin/git");
+});
+
+test("default POSIX lookup requires the execute bit", () => {
+  const dir = mkdtempSync(join(tmpdir(), "git-bin-"));
+  const f = join(dir, "git");
+  writeFileSync(f, "#!/bin/sh\n");
+  chmodSync(f, 0o644);
+  assert.equal(findGit({ pathEnv: dir, platform: "linux" }), null);
+  chmodSync(f, 0o755);
+  assert.equal(findGit({ pathEnv: dir, platform: "linux" }), f);
+});
+
+test("createGitResolver: hit cached, miss re-tried after the TTL, invalidate forces a lookup", () => {
+  let t = 0; let calls = 0; let answer = null;
+  const r = createGitResolver({ find: () => { calls++; return answer; }, now: () => t, ttl: 60_000 });
+  assert.equal(r.get(), null); assert.equal(r.get(), null); assert.equal(calls, 1);
+  answer = "/usr/bin/git"; t = 59_999; assert.equal(r.get(), null);
+  t = 60_000; assert.equal(r.get(), "/usr/bin/git"); assert.equal(calls, 2);
+  assert.equal(r.get(), "/usr/bin/git"); assert.equal(calls, 2);
+  r.invalidate(); answer = "/opt/git"; assert.equal(r.get(), "/opt/git");
+});
+
+test("runGitWith: ENOENT/EACCES on the cached path re-resolves once and retries; other errors do not", async () => {
+  const mk = (paths) => { let i = 0; return { get: () => paths[Math.min(i, paths.length - 1)], invalidate: () => { i++; } }; };
+  const tried = [];
+  const exec = (bin, args, opts, cb) => { tried.push(bin); if (bin === "/old/git") cb(Object.assign(new Error("x"), { code: "EACCES" })); else cb(null, "out"); };
+  assert.deepEqual(await runGitWith(mk(["/old/git", "/new/git"]), exec, ["status"], "/"), { ok: true, out: "out" });
+  assert.deepEqual(tried, ["/old/git", "/new/git"]);
+  const exec2 = (bin, a, o, cb) => cb(Object.assign(new Error("x"), { code: 1 }));
+  assert.deepEqual(await runGitWith(mk(["/a", "/b"]), exec2, [], "/"), { ok: false, code: 1 });
+  assert.deepEqual(await runGitWith(mk([null]), exec2, [], "/"), { ok: false, code: "ENOENT" });
+});
+
+test("validateCwd on win32: drive-letter cwd accepted; UNC and drive-less roots rejected", () => {
+  const isDir = () => true;
+  assert.equal(validateCwd("C:\\work\\repo", { platform: "win32", isDir }), "C:\\work\\repo");
+  assert.equal(validateCwd("\\\\host\\share\\x", { platform: "win32", isDir }), null);
+  assert.equal(validateCwd("//host/share/x", { platform: "win32", isDir }), null);
+  assert.equal(validateCwd("\\work", { platform: "win32", isDir }), null);
+  assert.equal(validateCwd("/work", { platform: "win32", isDir }), null);
+  assert.equal(validateCwd("C:work", { platform: "win32", isDir }), null);
+  assert.equal(validateCwd("~\\proj", { platform: "win32", home: "C:\\Users\\m", isDir }), "C:\\Users\\m\\proj");
+  assert.equal(validateCwd("C:\\work", { platform: "linux", isDir }), null);
 });
 
 test("expandHome: only a leading ~ or ~/ (and ~\\ on win32); ~user stays", () => {

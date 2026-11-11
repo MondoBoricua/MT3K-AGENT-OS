@@ -2,13 +2,17 @@
 // Never touches the network (no fetch / ls-remote), never uses a shell: git is run with execFile and a
 // fixed argv; the only caller-controlled value is the process cwd, validated first.
 import { execFile } from "node:child_process";
-import { statSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute } from "node:path";
+import { posix, win32 } from "node:path";
 
 const GIT_TIMEOUT_MS = 3000;
 const GIT_MAX_BUFFER = 1024 * 1024;
 const MAX_BRANCHES = 500;
+
+// platform-specific path rules are applied through path.win32 / path.posix so they behave the same on any host
+const pathFor = (platform) => (platform === "win32" ? win32 : posix);
+const WIN_QUALIFIED = /^[A-Za-z]:[\\/]/; // drive-less rooted ("\\tools", "/tools") or UNC are resolved against another drive at exec time
 
 /** leading `~` / `~/…` (and `~\…` on win32) -> home; `~user` and everything else untouched */
 export function expandHome(cwd, home = homedir(), platform = process.platform) {
@@ -18,35 +22,75 @@ export function expandHome(cwd, home = homedir(), platform = process.platform) {
   return cwd;
 }
 
-/** `~`-expanded, absolute, NUL-free, existing directory (UNC rejected on win32) -> the path; anything else -> null */
-export function validateCwd(cwd, { home = homedir(), platform = process.platform } = {}) {
+const isDirectory = (p) => { try { return statSync(p).isDirectory(); } catch { return false; } };
+
+/** `~`-expanded, absolute, NUL-free, existing directory -> the path; anything else -> null. win32: drive-letter paths only (no UNC, no drive-less roots) */
+export function validateCwd(cwd, { home = homedir(), platform = process.platform, isDir = isDirectory } = {}) {
   if (typeof cwd !== "string" || !cwd) return null;
   const dir = expandHome(cwd, home, platform);
-  if (dir.includes("\0") || !isAbsolute(dir)) return null;
-  if (platform === "win32" && /^[\\/]{2}/.test(dir)) return null; // \\host\share: no network paths
-  try { return statSync(dir).isDirectory() ? dir : null; } catch { return null; }
+  if (dir.includes("\0") || !pathFor(platform).isAbsolute(dir)) return null;
+  if (platform === "win32" && !WIN_QUALIFIED.test(dir)) return null;
+  return isDir(dir) ? dir : null;
 }
+
+const isFile = (p) => { try { return statSync(p).isFile(); } catch { return false; } };
+const isExecutableFile = (p) => { try { if (!statSync(p).isFile()) return false; accessSync(p, constants.X_OK); return true; } catch { return false; } };
 
 /**
  * Absolute path of git, searched in PATH entries only: empty, "." and relative entries are skipped, and the
  * request cwd is never consulted (on Windows libuv would otherwise run a git.exe planted in the cwd).
- * win32 accepts .exe/.com only (execFile cannot run .cmd without a shell).
+ * win32: only fully qualified `C:\…` entries (a drive-less root would resolve against the request cwd's drive
+ * at exec time) and .exe/.com only (execFile cannot run .cmd without a shell). POSIX: must be executable;
+ * non-executable hits are skipped (symlinks/shims that are executable work, statSync follows them).
  */
-export function findGit({ pathEnv = process.env.PATH || "", platform = process.platform, exists = isFile, sep = delimiter } = {}) {
+export function findGit({ pathEnv = process.env.PATH || "", platform = process.platform, exists, sep } = {}) {
+  const P = pathFor(platform);
+  const ok = exists ?? (platform === "win32" ? isFile : isExecutableFile);
   const names = platform === "win32" ? ["git.exe", "git.com"] : ["git"];
-  for (const entry of pathEnv.split(sep)) {
+  for (const entry of pathEnv.split(sep ?? P.delimiter)) {
     const dir = entry.trim().replace(/^"(.*)"$/, "$1");
-    if (!dir || dir === "." || !isAbsolute(dir)) continue;
+    if (!dir || dir === ".") continue;
+    if (platform === "win32" ? !WIN_QUALIFIED.test(dir) : !P.isAbsolute(dir)) continue;
     for (const name of names) {
-      const full = platform === "win32" ? `${dir.replace(/[\\/]+$/, "")}\\${name}` : `${dir.replace(/\/+$/, "")}/${name}`;
-      if (exists(full)) return full;
+      const full = P.join(dir, name);
+      if (ok(full)) return full;
     }
   }
   return null;
 }
-const isFile = (p) => { try { return statSync(p).isFile(); } catch { return false; } };
-let gitPath; // undefined = not looked up yet, null = not found
-const resolveGit = () => (gitPath === undefined ? (gitPath = findGit()) : gitPath);
+
+const NOT_FOUND_TTL_MS = 60_000;
+/** lazy cached lookup; a miss is re-tried after a TTL, `invalidate()` forces a fresh lookup */
+export function createGitResolver({ find = findGit, now = Date.now, ttl = NOT_FOUND_TTL_MS } = {}) {
+  let cached; // { path, at }
+  return {
+    get() {
+      if (!cached || (cached.path === null && now() - cached.at >= ttl)) cached = { path: find(), at: now() };
+      return cached.path;
+    },
+    invalidate() { cached = undefined; },
+  };
+}
+const resolver = createGitResolver();
+
+// every call: absolute git, fixed argv (nothing request-controlled), fsmonitor off, no stderr kept.
+// If the cached executable vanished or lost its mode (ENOENT/EACCES), look it up again once.
+export async function runGitWith(res, exec, args, cwd, maxBuffer = GIT_MAX_BUFFER) {
+  const once = (git) => new Promise((resolve) => {
+    exec(git, ["-c", "core.fsmonitor=false", ...args], {
+      cwd, timeout: GIT_TIMEOUT_MS, maxBuffer, windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+    }, (err, stdout) => resolve(err ? { ok: false, code: err.code } : { ok: true, out: stdout }));
+  });
+  const git = res.get();
+  if (!git) return { ok: false, code: "ENOENT" };
+  const r = await once(git);
+  if (r.ok || (r.code !== "ENOENT" && r.code !== "EACCES")) return r;
+  res.invalidate();
+  const again = res.get();
+  return again && again !== git ? once(again) : r;
+}
+const runGit = (args, cwd, maxBuffer) => runGitWith(resolver, execFile, args, cwd, maxBuffer);
 
 /**
  * `git for-each-ref --format=%(refname)%09%(HEAD) refs/heads refs/remotes/origin` output ->
@@ -114,16 +158,6 @@ export function buildRefs({ root, forEachRef, worktrees, remoteUrl }) {
   });
   return { ok: true, root, branches };
 }
-
-// every call: absolute git, fixed argv (nothing request-controlled), fsmonitor off, no stderr kept
-const runGit = (args, cwd, maxBuffer = GIT_MAX_BUFFER) => new Promise((resolve) => {
-  const git = resolveGit();
-  if (!git) return resolve({ ok: false, code: "ENOENT" });
-  execFile(git, ["-c", "core.fsmonitor=false", ...args], {
-    cwd, timeout: GIT_TIMEOUT_MS, maxBuffer, windowsHide: true,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
-  }, (err, stdout) => resolve(err ? { ok: false, code: err.code } : { ok: true, out: stdout }));
-});
 
 /**
  * Branch info for the repo containing `cwd`.
