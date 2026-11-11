@@ -92,12 +92,16 @@ function trimTrailing(s: string, chars: string): string {
   return end === s.length ? s : s.slice(0, end);
 }
 
-// A branch name is linked ONLY when the whole styled run (minus surrounding whitespace, quotes,
-// backticks and trailing prose punctuation) is exactly that name: a coloured diff line, highlighted code
-// or a "string literal" that merely contains the word never matches. Unicode-safe: plain string equality.
-const WRAP = " \t\r\n\"'`";
-const TRAIL_BRANCH = WRAP + ".,;:!?)]}";
-function linkWholeBranch(run: string, branches: BranchTitles): string | null {
+// A branch name is linked ONLY when the whole styled run (minus surrounding whitespace, backticks and
+// trailing prose punctuation) is exactly that name, so a coloured diff line or highlighted code that merely
+// contains the word never matches. Quotes are NOT stripped: `"master"` (a string literal) stays plain.
+// Unicode-safe: plain string equality. The characters just outside the run (in neighbouring runs) must not be
+// word characters, or a hostile `master` + bold `ful` would link part of "masterful". A name split across SGR
+// runs is not joined (known limit).
+const WRAP = " \t\r\n`";
+const TRAIL_BRANCH = WRAP + ".,;:!?)";
+const WORD_CHAR = /[\p{L}\p{N}_\-\/]/u;
+function linkWholeBranch(run: string, branches: BranchTitles, before: string, after: string): string | null {
   let start = 0;
   let end = run.length;
   while (start < end && WRAP.includes(run[start])) start++;
@@ -105,6 +109,7 @@ function linkWholeBranch(run: string, branches: BranchTitles): string | null {
   const name = run.slice(start, end);
   const title = branches.get(name);
   if (title === undefined) return null;
+  if ((before && WORD_CHAR.test(before)) || (after && WORD_CHAR.test(after))) return null;
   return `${esc(run.slice(0, start))}<a data-git-branch="${escAttr(name)}" title="${escAttr(title)}" ${LINK_STYLE}>${esc(name)}</a>${esc(run.slice(end))}`;
 }
 
@@ -128,6 +133,7 @@ function linkify(raw: string): string {
     const at = (m.index ?? 0) + m[1].length;
     while (u < urls.length && urls[u].end <= at) u++;
     if (u < urls.length && urls[u].at <= at) continue; // inside a URL
+    if (m[2].includes("\u2026")) continue; // TUI-truncated path ("/Users/me/…/panel-l…"): not a real path
     const text = trimTrailing(m[2], TRAIL_PATH);
     if (!pathOk(text.replace(LINE_SUFFIX_RE, ""))) continue;
     hits.push({ at, end: at + text.length, kind: "path", text });
@@ -153,7 +159,7 @@ function linkify(raw: string): string {
 // theme: 38;5;153 for branch/skill names; tool output and chrome use greys 244/246/231). A branch
 // name only counts as one when the run is coloured like that. Heuristic, theme-dependent.
 function codeStyled(s: Style): boolean {
-  if (!s.fg || s.inverse) return false;
+  if (!s.fg || s.inverse || s.bg) return false; // a background means highlighted output (diff lines), not inline code
   const h = s.fg.slice(1);
   const ch = [0, 2, 4].map((k) => parseInt(h.slice(k, k + 2), 16));
   return Math.max(...ch) - Math.min(...ch) > 24;
@@ -180,27 +186,31 @@ function styleAttr(s: Style): string {
 // minus branch links.
 export function ansiToHtml(input: string, opts: { branches?: BranchTitles } = {}): string {
   input = stripNonSgr(input);
+  // pass 1: split into styled runs (an SGR escape ends a run). Pass 2 needs the visible characters on both
+  // sides of a run, across span boundaries, so a branch followed by "ful" in another colour is not a link.
+  const segs: { text: string; st: Style }[] = [];
   let st: Style = {};
-  let out = "";
-  let open = false;
-  const flush = (t: string) => {
-    if (!t) return;
-    if (!open) { out += `<span style="${styleAttr(st)}">`; open = true; }
-    out += (opts.branches && codeStyled(st) && linkWholeBranch(t, opts.branches)) || linkify(t);
-  };
-  const closeSpan = () => { if (open) { out += "</span>"; open = false; } };
-
   const re = /\x1b\[([0-9;]*)m/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(input))) {
-    flush(input.slice(last, m.index));
+    if (m.index > last) segs.push({ text: input.slice(last, m.index), st });
     last = re.lastIndex;
-    closeSpan();
     const codes = m[1] === "" ? [0] : m[1].split(";").map((x) => Number(x) || 0);
     st = applyCodes(st, codes);
   }
-  flush(input.slice(last));
-  closeSpan();
+  if (last < input.length) segs.push({ text: input.slice(last), st });
+
+  let out = "";
+  for (let i = 0; i < segs.length; i++) {
+    const { text, st: style } = segs[i];
+    let body: string | null = null;
+    if (opts.branches && codeStyled(style)) {
+      const before = i > 0 ? segs[i - 1].text.slice(-1) : "";
+      const after = i + 1 < segs.length ? segs[i + 1].text.slice(0, 1) : "";
+      body = linkWholeBranch(text, opts.branches, before, after);
+    }
+    out += `<span style="${styleAttr(style)}">${body ?? linkify(text)}</span>`;
+  }
   return out;
 }

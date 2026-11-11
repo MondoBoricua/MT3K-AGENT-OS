@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "rea
 import { fsList, fsRead, fsWrite, fsUpload, fsRawUrl, getHosts, getAgents, sendToPane, UPLOAD_MAX_MB, type FsEntry, type FsListing, type FsFile, type FedHost, type PaneRef } from "../lib/api";
 import { childPath, destinationDir, directorySelection } from "../lib/file-manager";
 import { parentDir } from "../lib/terminal-links";
+import { decideLinkRequest, hostEffectAction, pendingAfterManualHost, type PendingOpen } from "../lib/files-nav";
 
 // CodeMirror (VS Code look: One Dark + line numbers + syntax) is heavy → its own chunk,
 // downloaded only when a text file is opened
@@ -100,8 +101,8 @@ export default function Files({ onToast, focusPath, request, onRequestHandled }:
   // open a path from a terminal link: a folder becomes the listing, a file opens in its folder.
   // Failures (missing path, no access) toast and leave the page as it was. Returns false on failure.
   // Results of a superseded navigation (navGen moved on) are discarded.
-  const openAt = async (p: string): Promise<boolean> => {
-    if (!confirmDiscard()) return true;
+  const openAt = async (p: string, discardApproved = false): Promise<boolean> => {
+    if (!discardApproved && !confirmDiscard()) return true;
     const g = ++navGen.current;
     const dl = await fsList(p, hq);
     if (g !== navGen.current) return true;
@@ -116,7 +117,7 @@ export default function Files({ onToast, focusPath, request, onRequestHandled }:
     onToast?.(`no se pudo abrir ${p}: ${dl?.err ?? fr?.err ?? "sin respuesta del servidor"}`, false);
     return false;
   };
-  const pendingOpen = useRef<{ path: string; host: string } | null>(null);
+  const pendingOpen = useRef<PendingOpen | null>(null);
   const mounted = useRef(false);
 
   // runs before the host effect so a link that mounts this page (or switches host) wins over the remembered folder.
@@ -124,14 +125,9 @@ export default function Files({ onToast, focusPath, request, onRequestHandled }:
   // until `host` equals the request's host, so the first fetch never hits the wrong machine.
   useEffect(() => {
     if (!request) return;
-    const wantHost = request.host ?? "";
-    if (!mounted.current || wantHost !== host) {
-      if (wantHost !== host && !confirmDiscard()) { onRequestHandled?.(); return; }
-      pendingOpen.current = { path: request.path, host: wantHost };
-      if (wantHost !== host) setHost(wantHost);
-    } else {
-      void openAt(request.path);
-    }
+    const d = decideLinkRequest({ mounted: mounted.current, host, wantHost: request.host ?? "", path: request.path, dirty, confirm: () => window.confirm("Tienes cambios sin guardar. ¿Descartarlos?") });
+    if (d.action === "open-now") void openAt(request.path);
+    else if (d.action === "queue") { pendingOpen.current = d.pending; if (d.switchHost) setHost(d.pending.host); } // editor is cleared by the host effect when the switch commits
     onRequestHandled?.(); // consumed: the page must not replay it next time it is shown
   }, [request?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -141,9 +137,10 @@ export default function Files({ onToast, focusPath, request, onRequestHandled }:
     try { start = localStorage.getItem(memKey) || "~"; } catch { /* defaults */ }
     if (!host && focusPath) start = focusPath; // Focus mode: land in the project (local host only)
     const pend = pendingOpen.current;
+    const act = hostEffectAction(pend, host);
+    if (act === "wait") { navGen.current++; return; } // the switch to pend.host is queued: this render's host is already obsolete
     setFile(null); setDraft("");
-    if (pend && pend.host !== host) { navGen.current++; return; } // the switch to pend.host is queued: this render's host is already obsolete
-    if (pend) void openAt(pend.path).then((ok) => { if (pendingOpen.current === pend) pendingOpen.current = null; if (!ok) void load(start); }); // cleared only once opened, so StrictMode's second run repeats it
+    if (act === "open" && pend) void openAt(pend.path, pend.approved).then((ok) => { if (pendingOpen.current === pend) pendingOpen.current = null; if (!ok) void load(start); }); // cleared only once opened, so StrictMode's second run repeats it
     else load(start);
   }, [host, focusPath]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { mounted.current = true; }, []);
@@ -291,7 +288,7 @@ export default function Files({ onToast, focusPath, request, onRequestHandled }:
         </div>
         <div className="flex items-center gap-2">
           {hosts.length > 0 && (
-            <select value={host} onChange={(e) => { if (confirmDiscard()) setHost(e.target.value); }}
+            <select value={host} onChange={(e) => { if (confirmDiscard()) { pendingOpen.current = pendingAfterManualHost(pendingOpen.current, e.target.value); setHost(e.target.value); } }}
               className={`${glassField} appearance-none px-3 py-1.5 font-mono text-xs text-white`}>
               <option value="">local · esta máquina</option>
               {hosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}

@@ -66,13 +66,41 @@ test("branch: a coloured run that merely CONTAINS the name is not linked (diff l
   assert.deepEqual(branchLinks(ansiToHtml(CODE("master branch"), { branches: BR })), []);
 });
 
-test("branch: whole run equal to the name (positive control, quotes/space/punctuation trimmed, wrapper kept as text)", () => {
+test("branch: whole run equal to the name (positive control; trailing space/punctuation and backticks trimmed)", () => {
   const BR2 = new Map([["feat/panel-motion", "t"], ["master", "t"]]);
   assert.deepEqual(branchLinks(ansiToHtml(CODE("feat/panel-motion"), { branches: BR2 })), ["feat/panel-motion"]);
   assert.deepEqual(branchLinks(ansiToHtml(CODE("master"), { branches: BR2 })), ["master"]);
-  const html = ansiToHtml(CODE(' "master". '), { branches: BR2 });
+  assert.deepEqual(branchLinks(ansiToHtml(CODE("master "), { branches: BR2 })), ["master"]);
+  assert.deepEqual(branchLinks(ansiToHtml(CODE("master."), { branches: BR2 })), ["master"]);
+  const html = ansiToHtml(CODE(" `master`. "), { branches: BR2 });
   assert.deepEqual(branchLinks(html), ["master"]);
-  assert.match(html, /> "<a data-git-branch="master"[^>]*>master<\/a>"\. <\/span>/);
+  assert.match(html, /> `<a data-git-branch="master"[^>]*>master<\/a>`\. <\/span>/);
+});
+
+test("branch: string literals and runs with a background colour stay plain", () => {
+  assert.deepEqual(branchLinks(ansiToHtml(CODE('"master"'), { branches: BR })), []);
+  assert.deepEqual(branchLinks(ansiToHtml(CODE("'master'"), { branches: BR })), []);
+  assert.deepEqual(branchLinks(ansiToHtml("\x1b[48;5;22m\x1b[38;5;153mmaster\x1b[0m", { branches: BR })), []);
+  assert.deepEqual(branchLinks(ansiToHtml("\x1b[42mmaster\x1b[0m", { branches: BR })), []);
+  assert.deepEqual(branchLinks(ansiToHtml("\x1b[38;5;153;48;5;22mmain\x1b[0m", { branches: BR })), []);
+});
+
+test("branch: neighbouring word characters across span boundaries block the link", () => {
+  const link = (s: string) => branchLinks(ansiToHtml(s, { branches: BR }));
+  assert.deepEqual(link("\x1b[38;5;153mmaster\x1b[1mful\x1b[0m"), []);
+  assert.deepEqual(link("pre\x1b[38;5;153mmaster\x1b[0m"), []);
+  assert.deepEqual(link("origin/\x1b[38;5;153mmaster\x1b[0m"), []);
+  assert.deepEqual(link("\x1b[38;5;153mmaster\x1b[0mé"), []);
+  assert.deepEqual(link("\x1b[38;5;153mmaster\x1b[0m-2"), []);
+  assert.deepEqual(link("see \x1b[38;5;153mmaster\x1b[0m, then"), ["master"]);
+  assert.deepEqual(link("(\x1b[38;5;153mmaster\x1b[0m)"), ["master"]);
+});
+
+test("paths truncated by the TUI with an ellipsis are not linked", () => {
+  assert.deepEqual(fsLinks(ansiToHtml("/Users/mondo/…/panel-l…")), []);
+  assert.deepEqual(fsLinks(ansiToHtml("see /Users/mondo/MT3K-AGENT-OS/pan… ok")), []);
+  assert.deepEqual(fsLinks(ansiToHtml("/Users/mondo/…")), []);
+  assert.deepEqual(fsLinks(ansiToHtml("/Users/mondo/x… and /Users/mondo/ok")), [["/Users/mondo/ok", "/Users/mondo/ok"]]);
 });
 
 test("pathological lines stay linear: long punctuation run after a path, many paths, long URL tail (50k units < 200 ms)", () => {
