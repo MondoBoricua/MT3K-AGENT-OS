@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  buildRefs, githubBranchUrl, gitRefs, parseForEachRef, parseGithubRemote, parseWorktrees, validateCwd,
+  buildRefs, expandHome, findGit, githubBranchUrl, gitRefs, parseForEachRef, parseGithubRemote, parseWorktrees, validateCwd,
 } from "./git-refs.mjs";
 
 const FER = [
@@ -110,7 +110,7 @@ test("gitRefs: argv are fixed arrays and cwd is only the process cwd", async () 
   const run = async (args, cwd) => {
     seen.push({ args, cwd });
     if (args[0] === "rev-parse") return { ok: true, out: "/repo\n" };
-    if (args[0] === "for-each-ref") return { ok: true, out: FER };
+    if (args[0] === "for-each-ref") return { ok: true, out: FER.split("\n").filter((l) => l.startsWith(args.includes("refs/heads") ? "refs/heads" : "refs/remotes")).join("\n") };
     if (args[0] === "worktree") return { ok: true, out: WT };
     return { ok: true, out: "https://github.com/o/r.git\n" };
   };
@@ -124,4 +124,57 @@ test("gitRefs against this real repo returns the current branch", async () => {
   const r = await gitRefs(process.cwd());
   assert.equal(r.ok, true);
   if (r.root) assert.ok(r.branches.some((b) => b.current));
+});
+
+test("findGit: first absolute PATH hit wins; empty, '.', and relative entries are ignored (planted git never chosen)", () => {
+  const seen = [];
+  const exists = (p) => { seen.push(p); return p === "/planted/cwd/git" || p === "relative/bin/git" || p === "./git" || p === "/usr/bin/git"; };
+  const pathEnv = [".", "", "relative/bin", "/nowhere", "/usr/bin"].join(":");
+  assert.equal(findGit({ pathEnv, platform: "linux", exists, sep: ":" }), "/usr/bin/git");
+  assert.ok(!seen.some((p) => p.startsWith(".") || p.startsWith("relative") || p.startsWith("/planted")), seen.join(","));
+  assert.equal(findGit({ pathEnv: ".:relative/bin", platform: "linux", exists, sep: ":" }), null);
+  assert.equal(findGit({ pathEnv: "", platform: "linux", exists: () => true, sep: ":" }), null);
+});
+
+test("findGit on win32 only tries git.exe then git.com, never git.cmd or the bare name", () => {
+  const seen = [];
+  const exists = (p) => { seen.push(p); return p.endsWith("git.com"); };
+  const r = findGit({ pathEnv: "/tools;.;/more", platform: "win32", exists, sep: ";" });
+  assert.equal(r, "/tools\\git.com");
+  assert.deepEqual(seen, ["/tools\\git.exe", "/tools\\git.com"]);
+  assert.ok(!seen.some((p) => /cmd|git$/.test(p)));
+});
+
+test("expandHome: only a leading ~ or ~/ (and ~\\ on win32); ~user stays", () => {
+  assert.equal(expandHome("~", "/h", "linux"), "/h");
+  assert.equal(expandHome("~/MT3K-AGENT-OS", "/h", "linux"), "/h/MT3K-AGENT-OS");
+  assert.equal(expandHome("~\\x", "/h", "linux"), "~\\x");
+  assert.equal(expandHome("~\\x", "C:\\h", "win32"), "C:\\h\\x");
+  assert.equal(expandHome("~root/x", "/h", "linux"), "~root/x");
+  assert.equal(expandHome("/a/~/b", "/h", "linux"), "/a/~/b");
+});
+
+test("validateCwd expands ~ to the given home; rejects ~user and UNC on win32", () => {
+  const home = mkdtempSync(join(tmpdir(), "git-refs-home-"));
+  const sub = join(home, "proj");
+  mkdirSync(sub);
+  assert.equal(validateCwd("~/proj", { home }), sub);
+  assert.equal(validateCwd("~", { home }), home);
+  assert.equal(validateCwd("~/nope", { home }), null);
+  assert.equal(validateCwd("~root", { home }), null);
+  assert.equal(validateCwd("\\\\host\\share\\x", { platform: "win32" }), null);
+  assert.equal(validateCwd("//host/share/x", { platform: "win32" }), null);
+});
+
+test("gitRefs: heads survive a failed origin listing; git missing vs git failed are told apart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "git-refs-"));
+  const run = async (args) => {
+    if (args[0] === "rev-parse") return { ok: true, out: "/repo\n" };
+    if (args[0] === "for-each-ref") return args.includes("refs/remotes/origin") ? { ok: false, code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" } : { ok: true, out: "refs/heads/master\t*\n" };
+    return { ok: false, code: 1 };
+  };
+  const r = await gitRefs(dir, run);
+  assert.deepEqual(r.branches, [{ name: "master", current: true, pushed: false, url: null, worktree: null }]);
+  assert.deepEqual(await gitRefs(dir, async () => ({ ok: false, code: 1 })), { ok: false, err: "git falló" });
+  assert.deepEqual(await gitRefs(dir, async () => ({ ok: false, code: "ENOENT" })), { ok: false, err: "git no disponible" });
 });

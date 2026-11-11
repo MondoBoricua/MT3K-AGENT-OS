@@ -3,17 +3,50 @@
 // fixed argv; the only caller-controlled value is the process cwd, validated first.
 import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, isAbsolute } from "node:path";
 
 const GIT_TIMEOUT_MS = 3000;
 const GIT_MAX_BUFFER = 1024 * 1024;
 const MAX_BRANCHES = 500;
 
-/** absolute, NUL-free, existing directory -> the path; anything else -> null */
-export function validateCwd(cwd) {
-  if (typeof cwd !== "string" || !cwd || cwd.includes("\0") || !isAbsolute(cwd)) return null;
-  try { return statSync(cwd).isDirectory() ? cwd : null; } catch { return null; }
+/** leading `~` / `~/…` (and `~\…` on win32) -> home; `~user` and everything else untouched */
+export function expandHome(cwd, home = homedir(), platform = process.platform) {
+  if (typeof cwd !== "string") return cwd;
+  if (cwd === "~") return home;
+  if (cwd.startsWith("~/") || (platform === "win32" && cwd.startsWith("~\\"))) return home + cwd.slice(1);
+  return cwd;
 }
+
+/** `~`-expanded, absolute, NUL-free, existing directory (UNC rejected on win32) -> the path; anything else -> null */
+export function validateCwd(cwd, { home = homedir(), platform = process.platform } = {}) {
+  if (typeof cwd !== "string" || !cwd) return null;
+  const dir = expandHome(cwd, home, platform);
+  if (dir.includes("\0") || !isAbsolute(dir)) return null;
+  if (platform === "win32" && /^[\\/]{2}/.test(dir)) return null; // \\host\share: no network paths
+  try { return statSync(dir).isDirectory() ? dir : null; } catch { return null; }
+}
+
+/**
+ * Absolute path of git, searched in PATH entries only: empty, "." and relative entries are skipped, and the
+ * request cwd is never consulted (on Windows libuv would otherwise run a git.exe planted in the cwd).
+ * win32 accepts .exe/.com only (execFile cannot run .cmd without a shell).
+ */
+export function findGit({ pathEnv = process.env.PATH || "", platform = process.platform, exists = isFile, sep = delimiter } = {}) {
+  const names = platform === "win32" ? ["git.exe", "git.com"] : ["git"];
+  for (const entry of pathEnv.split(sep)) {
+    const dir = entry.trim().replace(/^"(.*)"$/, "$1");
+    if (!dir || dir === "." || !isAbsolute(dir)) continue;
+    for (const name of names) {
+      const full = platform === "win32" ? `${dir.replace(/[\\/]+$/, "")}\\${name}` : `${dir.replace(/\/+$/, "")}/${name}`;
+      if (exists(full)) return full;
+    }
+  }
+  return null;
+}
+const isFile = (p) => { try { return statSync(p).isFile(); } catch { return false; } };
+let gitPath; // undefined = not looked up yet, null = not found
+const resolveGit = () => (gitPath === undefined ? (gitPath = findGit()) : gitPath);
 
 /**
  * `git for-each-ref --format=%(refname)%09%(HEAD) refs/heads refs/remotes/origin` output ->
@@ -82,9 +115,12 @@ export function buildRefs({ root, forEachRef, worktrees, remoteUrl }) {
   return { ok: true, root, branches };
 }
 
-const runGit = (args, cwd) => new Promise((resolve) => {
-  execFile("git", args, {
-    cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER, windowsHide: true,
+// every call: absolute git, fixed argv (nothing request-controlled), fsmonitor off, no stderr kept
+const runGit = (args, cwd, maxBuffer = GIT_MAX_BUFFER) => new Promise((resolve) => {
+  const git = resolveGit();
+  if (!git) return resolve({ ok: false, code: "ENOENT" });
+  execFile(git, ["-c", "core.fsmonitor=false", ...args], {
+    cwd, timeout: GIT_TIMEOUT_MS, maxBuffer, windowsHide: true,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
   }, (err, stdout) => resolve(err ? { ok: false, code: err.code } : { ok: true, out: stdout }));
 });
@@ -98,14 +134,23 @@ export async function gitRefs(cwd, run = runGit) {
   const dir = validateCwd(cwd);
   if (!dir) return { ok: false, err: "cwd inválido" };
   const top = await run(["rev-parse", "--show-toplevel"], dir);
-  if (!top.ok) return top.code === 128 ? { ok: true, root: null, branches: [] } : { ok: false, err: "git no disponible" };
+  if (!top.ok) {
+    if (top.code === 128) return { ok: true, root: null, branches: [] };
+    return { ok: false, err: top.code === "ENOENT" ? "git no disponible" : "git falló" };
+  }
   const root = top.out.trim();
   if (!root) return { ok: true, root: null, branches: [] };
-  const [refs, wts, remote] = await Promise.all([
-    run(["for-each-ref", "--format=%(refname)%09%(HEAD)", "refs/heads", "refs/remotes/origin"], dir),
+  // heads and origin refs are separate calls: a repo with > 1 MiB of remote refs overflows only the second
+  // (pushed then reads false) and still returns the local branches
+  const [heads, remotes, wts, remote] = await Promise.all([
+    run(["for-each-ref", "--format=%(refname)%09%(HEAD)", "refs/heads"], dir),
+    run(["for-each-ref", "--format=%(refname)%09%(HEAD)", "refs/remotes/origin"], dir),
     run(["worktree", "list", "--porcelain"], dir),
     run(["config", "--get", "remote.origin.url"], dir),
   ]);
-  if (!refs.ok) return { ok: false, err: "git falló" };
-  return buildRefs({ root, forEachRef: refs.out, worktrees: wts.ok ? wts.out : "", remoteUrl: remote.ok ? remote.out : "" });
+  if (!heads.ok) return { ok: false, err: "git falló" };
+  return buildRefs({
+    root, forEachRef: `${heads.out}\n${remotes.ok ? remotes.out : ""}`,
+    worktrees: wts.ok ? wts.out : "", remoteUrl: remote.ok ? remote.out : "",
+  });
 }
