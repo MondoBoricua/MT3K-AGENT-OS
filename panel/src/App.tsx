@@ -199,7 +199,7 @@ export default function App() {
   const viewSessions = viewAgents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
 
   return (
-    <div className="relative flex h-screen overflow-hidden text-white">
+    <div className="relative flex h-dvh overflow-hidden text-white">
       {/* mobile backdrop */}
       {navOpen && <div className="fixed inset-0 z-30 bg-black/55 lg:hidden" onClick={() => setNavOpen(false)} />}
 
@@ -362,7 +362,7 @@ export default function App() {
             <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-white/20 sm:hidden" />
             <h2 className="mb-1 text-sm font-semibold">¿En qué vas a trabajar?</h2>
             <p className="mb-3 font-mono text-[11px] text-white/45">enfoca agentes, files y el grafo en un proyecto — se recuerda en este dispositivo</p>
-            <div className="flex max-h-[60vh] flex-col gap-1.5 overflow-y-auto overscroll-contain pr-0.5">
+            <div className="flex max-h-[60dvh] flex-col gap-1.5 overflow-y-auto overscroll-contain pr-0.5">
               <button onClick={() => pickFocus(null)}
                 className={`rounded-xl border px-3 py-2.5 text-left font-mono text-xs transition ${!focus ? "border-accent/60 bg-accent/15 text-white" : "border-ink-line bg-ink-850/50 text-white/70 hover:border-accent/40"}`}>
                 🌐 Todo — la sala de control completa
