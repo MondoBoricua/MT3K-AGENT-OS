@@ -409,7 +409,7 @@ export default function App() {
             tabIndex={0}
             onClick={() => dismissToast(t.id)}
             onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); dismissToast(t.id); } }}
-            className={`pointer-events-auto flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm shadow-2xl backdrop-blur ${t.live ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200" : "border-ink-line bg-ink-800/90 text-white/70"}`}
+            className={`toast-enter pointer-events-auto flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm shadow-2xl backdrop-blur ${t.live ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200" : "border-ink-line bg-ink-800/90 text-white/70"}`}
           >
             <span className={`h-1.5 w-1.5 rounded-full ${t.live ? "animate-pulse bg-emerald-400" : "bg-white/30"}`} /> {t.text}
           </div>

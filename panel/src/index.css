@@ -321,3 +321,9 @@ button, [role="button"] { -webkit-user-select: none; user-select: none; }
   .sheet-enter, .sheet-enter.sheet-center { transition: opacity var(--dur-fast) ease; }
   @starting-style { .sheet-enter, .sheet-enter.sheet-center { transform: none; opacity: 0; } }
 }
+
+.toast-enter { transition: opacity var(--dur-pop) var(--ease-out), transform var(--dur-pop) var(--ease-out); }
+@starting-style { .toast-enter { opacity: 0; transform: translateX(8px); } }
+@media (prefers-reduced-motion: reduce) {
+  @starting-style { .toast-enter { transform: none; } }
+}
