@@ -342,7 +342,7 @@ export default function App() {
         {page === "Skills" && <Skills />}
         {page === "Memory" && <Memory />}
         {page === "Activity" && <Activity />}
-        {page === "Files" && <Files onToast={pushToast} focusPath={focus?.path} request={filesRequest} />}
+        {page === "Files" && <Files onToast={pushToast} focusPath={focus?.path} request={filesRequest} onRequestHandled={() => setFilesRequest(null)} />}
         {page === "Agents View" && <AgentsView agents={viewAgents} onOpen={openAgent} onOpenMosaic={canMosaic ? () => setMosaicOpen(true) : undefined} onToast={pushToast} focusPath={focus?.path} />}
         {page === "Settings" && <Settings manifest={manifest} onChanged={() => loadManifest(`?t=${Date.now()}`)} />}
       </main>

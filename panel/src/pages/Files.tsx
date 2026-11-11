@@ -8,7 +8,7 @@ import { parentDir } from "../lib/terminal-links";
 const CodeEditor = lazy(() => import("../components/CodeEditor"));
 
 // request: a path clicked in a terminal (dir → listing; file → its folder + the file opened); nonce makes repeats count
-type Props = { onToast?: (text: string, live: boolean) => void; focusPath?: string; request?: { path: string; host?: string; nonce: number } | null };
+type Props = { onToast?: (text: string, live: boolean) => void; focusPath?: string; request?: { path: string; host?: string; nonce: number } | null; onRequestHandled?: () => void };
 
 const human = (n: number) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 const when = (ms: number) => (ms ? new Date(ms).toLocaleString("es-PR", { dateStyle: "short", timeStyle: "short" }) : "nuevo");
@@ -54,7 +54,7 @@ const FileTile = ({ entry }: { entry: FsEntry }) => (
 // VS Code-style file browser (collapsible tree, lazy-loaded per folder) + viewer/editor.
 // Every call rides ?host= so picking a federated host walks THAT machine's disk. Text edits
 // save atomically with an optimistic lock — a conflicting agent write asks before clobbering.
-export default function Files({ onToast, focusPath, request }: Props) {
+export default function Files({ onToast, focusPath, request, onRequestHandled }: Props) {
   const [hosts, setHosts] = useState<FedHost[]>([]);
   const [host, setHost] = useState(""); // "" = this machine
   const [listing, setListing] = useState<FsListing | null>(null); // tree ROOT
@@ -79,46 +79,60 @@ export default function Files({ onToast, focusPath, request }: Props) {
   useEffect(() => { getHosts().then((r) => setHosts((r?.hosts ?? []).filter((h) => h.reachable))); }, []);
 
   // navigate the tree ROOT (breadcrumbs / path input / quick picks) — resets the expansion state
-  const load = async (p: string) => {
+  // navGen: every navigation (load / openAt / host switch) takes a new generation; a response that
+  // arrives after a newer navigation started (e.g. a slow local listing after switching to a remote host) is dropped.
+  const navGen = useRef(0);
+  const load = async (p: string): Promise<boolean> => {
+    const g = ++navGen.current;
     const r = await fsList(p, hq);
+    if (g !== navGen.current) return false;
     if (r?.ok) {
       setListing(r); setKids({ [r.path]: r.entries }); setExpanded([]); setSelectedDir(r.path); setPathInput(r.path); setListErr("");
       try { localStorage.setItem(memKey, r.path); } catch { /* private mode */ }
     } else {
       setListErr(r?.err ?? "no se pudo listar esa carpeta");
     }
+    return true;
   };
 
   const confirmDiscard = () => !dirty || window.confirm("Tienes cambios sin guardar. ¿Descartarlos?");
 
   // open a path from a terminal link: a folder becomes the listing, a file opens in its folder.
   // Failures (missing path, no access) toast and leave the page as it was. Returns false on failure.
+  // Results of a superseded navigation (navGen moved on) are discarded.
   const openAt = async (p: string): Promise<boolean> => {
     if (!confirmDiscard()) return true;
+    const g = ++navGen.current;
     const dl = await fsList(p, hq);
+    if (g !== navGen.current) return true;
     if (dl?.ok) { setFile(null); setDraft(""); await load(dl.path); return true; }
     const fr = await fsRead(p, hq);
+    if (g !== navGen.current) return true;
     if (fr?.ok) {
-      await load(parentDir(fr.path) || "/");
+      if (!(await load(parentDir(fr.path) || "/"))) return true;
       setFile(fr); setDraft(fr.content ?? "");
       return true;
     }
     onToast?.(`no se pudo abrir ${p}: ${dl?.err ?? fr?.err ?? "sin respuesta del servidor"}`, false);
     return false;
   };
-  const pendingOpen = useRef<string | null>(null);
+  const pendingOpen = useRef<{ path: string; host: string } | null>(null);
   const mounted = useRef(false);
 
-  // runs before the host effect so a link that mounts this page (or switches host) wins over the remembered folder
+  // runs before the host effect so a link that mounts this page (or switches host) wins over the remembered folder.
+  // A request for another host only queues the switch (after the dirty-file confirmation); nothing is opened
+  // until `host` equals the request's host, so the first fetch never hits the wrong machine.
   useEffect(() => {
     if (!request) return;
     const wantHost = request.host ?? "";
     if (!mounted.current || wantHost !== host) {
-      pendingOpen.current = request.path;
+      if (wantHost !== host && !confirmDiscard()) { onRequestHandled?.(); return; }
+      pendingOpen.current = { path: request.path, host: wantHost };
       if (wantHost !== host) setHost(wantHost);
     } else {
       void openAt(request.path);
     }
+    onRequestHandled?.(); // consumed: the page must not replay it next time it is shown
   }, [request?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // switching host: forget the open file, resume where you left off on that host
@@ -126,9 +140,10 @@ export default function Files({ onToast, focusPath, request }: Props) {
     let start = "~";
     try { start = localStorage.getItem(memKey) || "~"; } catch { /* defaults */ }
     if (!host && focusPath) start = focusPath; // Focus mode: land in the project (local host only)
-    const pend = pendingOpen.current; // cleared only once opened, so StrictMode's second mount-effect run repeats it instead of loading `start`
+    const pend = pendingOpen.current;
     setFile(null); setDraft("");
-    if (pend) void openAt(pend).then((ok) => { if (pendingOpen.current === pend) pendingOpen.current = null; if (!ok) void load(start); });
+    if (pend && pend.host !== host) { navGen.current++; return; } // the switch to pend.host is queued: this render's host is already obsolete
+    if (pend) void openAt(pend.path).then((ok) => { if (pendingOpen.current === pend) pendingOpen.current = null; if (!ok) void load(start); }); // cleared only once opened, so StrictMode's second run repeats it
     else load(start);
   }, [host, focusPath]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { mounted.current = true; }, []);
