@@ -7,6 +7,7 @@ import { applyPaneEvent } from "../lib/pane-stream";
 import { usePaneStream } from "../lib/use-pane-stream";
 import AgentLogo from "./AgentLogo";
 import { TerminalLine } from "./TerminalLines";
+import { useTerminalLinks } from "../lib/use-terminal-links";
 
 type Props = {
   session: Session;
@@ -16,6 +17,7 @@ type Props = {
   onExpand: () => void;
   onRemove: () => void;
   onToast?: (text: string, live: boolean, ms?: number) => void;
+  onOpenPath?: (path: string, host?: string) => void;
 };
 
 const TONE_CLS = {
@@ -27,9 +29,10 @@ const TONE_CLS = {
 
 const TILE_FONT_PX = 12;
 
-export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, onRemove, onToast }: Props) {
+export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, onRemove, onToast, onOpenPath }: Props) {
   const { agent, pane } = session;
   const host = agent.host;
+  const links = useTerminalLinks({ cwd: pane.cwd, host, onOpenPath });
   const [term, setTerm] = useState<string[]>([]);
   const [localName, setLocalName] = useState<string | null>(null);
   const latestTerm = useRef<string[]>([]);
@@ -209,11 +212,12 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
         <pre
           ref={termRef}
           onScroll={onScroll}
+          onClick={links.onClick}
           style={{ fontSize: TILE_FONT_PX }}
           className="flex-1 overflow-y-auto overscroll-contain overflow-x-hidden whitespace-pre-wrap break-words bg-black px-2.5 py-2 font-mono leading-none text-white/90"
         >
           {term.length > 0 && !(term.length === 1 && term[0] === "")
-            ? term.map((line, idx) => <TerminalLine key={idx} line={line} last={idx === term.length - 1} />)
+            ? term.map((line, idx) => <TerminalLine key={idx} line={line} last={idx === term.length - 1} branches={links.branches} />)
             : <span className="opacity-40">cargando terminal…</span>}
         </pre>
         {scrolledUp && (

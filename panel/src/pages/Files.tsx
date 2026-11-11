@@ -1,12 +1,14 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { fsList, fsRead, fsWrite, fsUpload, fsRawUrl, getHosts, getAgents, sendToPane, UPLOAD_MAX_MB, type FsEntry, type FsListing, type FsFile, type FedHost, type PaneRef } from "../lib/api";
 import { childPath, destinationDir, directorySelection } from "../lib/file-manager";
+import { parentDir } from "../lib/terminal-links";
 
 // CodeMirror (VS Code look: One Dark + line numbers + syntax) is heavy → its own chunk,
 // downloaded only when a text file is opened
 const CodeEditor = lazy(() => import("../components/CodeEditor"));
 
-type Props = { onToast?: (text: string, live: boolean) => void; focusPath?: string };
+// request: a path clicked in a terminal (dir → listing; file → its folder + the file opened); nonce makes repeats count
+type Props = { onToast?: (text: string, live: boolean) => void; focusPath?: string; request?: { path: string; host?: string; nonce: number } | null };
 
 const human = (n: number) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 const when = (ms: number) => (ms ? new Date(ms).toLocaleString("es-PR", { dateStyle: "short", timeStyle: "short" }) : "nuevo");
@@ -52,7 +54,7 @@ const FileTile = ({ entry }: { entry: FsEntry }) => (
 // VS Code-style file browser (collapsible tree, lazy-loaded per folder) + viewer/editor.
 // Every call rides ?host= so picking a federated host walks THAT machine's disk. Text edits
 // save atomically with an optimistic lock — a conflicting agent write asks before clobbering.
-export default function Files({ onToast, focusPath }: Props) {
+export default function Files({ onToast, focusPath, request }: Props) {
   const [hosts, setHosts] = useState<FedHost[]>([]);
   const [host, setHost] = useState(""); // "" = this machine
   const [listing, setListing] = useState<FsListing | null>(null); // tree ROOT
@@ -87,14 +89,49 @@ export default function Files({ onToast, focusPath }: Props) {
     }
   };
 
+  const confirmDiscard = () => !dirty || window.confirm("Tienes cambios sin guardar. ¿Descartarlos?");
+
+  // open a path from a terminal link: a folder becomes the listing, a file opens in its folder.
+  // Failures (missing path, no access) toast and leave the page as it was. Returns false on failure.
+  const openAt = async (p: string): Promise<boolean> => {
+    if (!confirmDiscard()) return true;
+    const dl = await fsList(p, hq);
+    if (dl?.ok) { setFile(null); setDraft(""); await load(dl.path); return true; }
+    const fr = await fsRead(p, hq);
+    if (fr?.ok) {
+      await load(parentDir(fr.path) || "/");
+      setFile(fr); setDraft(fr.content ?? "");
+      return true;
+    }
+    onToast?.(`no se pudo abrir ${p}: ${dl?.err ?? fr?.err ?? "sin respuesta del servidor"}`, false);
+    return false;
+  };
+  const pendingOpen = useRef<string | null>(null);
+  const mounted = useRef(false);
+
+  // runs before the host effect so a link that mounts this page (or switches host) wins over the remembered folder
+  useEffect(() => {
+    if (!request) return;
+    const wantHost = request.host ?? "";
+    if (!mounted.current || wantHost !== host) {
+      pendingOpen.current = request.path;
+      if (wantHost !== host) setHost(wantHost);
+    } else {
+      void openAt(request.path);
+    }
+  }, [request?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // switching host: forget the open file, resume where you left off on that host
   useEffect(() => {
     let start = "~";
     try { start = localStorage.getItem(memKey) || "~"; } catch { /* defaults */ }
     if (!host && focusPath) start = focusPath; // Focus mode: land in the project (local host only)
+    const pend = pendingOpen.current; // cleared only once opened, so StrictMode's second mount-effect run repeats it instead of loading `start`
     setFile(null); setDraft("");
-    load(start);
+    if (pend) void openAt(pend).then((ok) => { if (pendingOpen.current === pend) pendingOpen.current = null; if (!ok) void load(start); });
+    else load(start);
   }, [host, focusPath]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { mounted.current = true; }, []);
 
   // expand/collapse a folder in place; children fetch once and cache for the session
   const toggleDir = async (p: string) => {
@@ -114,8 +151,6 @@ export default function Files({ onToast, focusPath }: Props) {
     }
     setExpanded((x) => [...x, p]);
   };
-
-  const confirmDiscard = () => !dirty || window.confirm("Tienes cambios sin guardar. ¿Descartarlos?");
 
   const open = async (p: string) => {
     if (!confirmDiscard()) return;

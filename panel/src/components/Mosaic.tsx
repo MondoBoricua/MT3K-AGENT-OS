@@ -24,6 +24,7 @@ type Props = {
   onClose: () => void;
   onExpand: (agent: AgentRow, paneId: string) => void;
   onToast?: (text: string, live: boolean, ms?: number) => void;
+  onOpenPath?: (path: string, host?: string) => void;
 };
 
 const TONE_CLS = {
@@ -46,7 +47,7 @@ export default function Mosaic(props: Props) {
   return <MosaicBody {...props} />;
 }
 
-function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
+function MosaicBody({ sessions, onClose, onExpand, onToast, onOpenPath }: Props) {
   const [slots, setSlots] = useState<(Session | null)[]>(() => resolveSlots(loadLastSlots(), sessions));
   const [focus, setFocus] = useState<number | null>(() => {
     const initial = resolveSlots(loadLastSlots(), sessions);
@@ -328,6 +329,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
               onExpand={() => onExpand(slot.agent, slot.pane.paneId)}
               onRemove={() => removeSlot(idx)}
               onToast={onToast}
+              onOpenPath={onOpenPath}
             />
           ) : (
             <div

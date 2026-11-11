@@ -15,6 +15,7 @@ import {
 } from "../lib/alt-pane-wheel";
 import AgentLogo from "./AgentLogo";
 import { TerminalLine } from "./TerminalLines";
+import { useTerminalLinks } from "../lib/use-terminal-links";
 
 type Props = {
   agent: AgentRow | null; // the agent whose terminal/compose sheet is open (null = closed)
@@ -24,6 +25,7 @@ type Props = {
   focusPath?: string; // Focus mode: scope the visible sessions to this path and auto-launch into it
   onClose: () => void;
   onToast?: (text: string, live: boolean, ms?: number) => void;
+  onOpenPath?: (path: string, host?: string) => void; // file/branch links in the terminal → Files explorer
 };
 
 // status pill palette in the session picker (same as PaneTile)
@@ -37,7 +39,7 @@ const PICKER_TONE_CLS = {
 // Shared sheet: session picker → fullscreen terminal (live view + docked compose).
 // Used from both Agents View (the room) and the sidebar quick-access list.
 // One session → opens straight into fullscreen; many → pick one, then fullscreen.
-export default function AgentTerminalSheet({ agent, initialPaneId, projects = [], focusProjectId, focusPath, onClose, onToast }: Props) {
+export default function AgentTerminalSheet({ agent, initialPaneId, projects = [], focusProjectId, focusPath, onClose, onToast, onOpenPath }: Props) {
   const [paneId, setPaneId] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [enterOnSend, setEnterOnSend] = useState(true);
@@ -89,6 +91,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
   );
   const activePane = panes.find((p) => p.paneId === paneId) ?? (panes.length === 1 ? panes[0] : null);
   const paneToWatch = activePane?.paneId;
+  const links = useTerminalLinks({ cwd: activePane?.cwd, host, onOpenPath });
 
   // reset whenever a different agent is opened (by host:id); a single-pane agent jumps straight to fullscreen.
   // launch target is remembered per agent+host (localStorage) so repeat opens are one tap.
@@ -643,12 +646,12 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
 
         {/* sanitized HTML: ansiToHtml escapes all text; spans carry only numeric-derived colors */}
         <div className="relative flex min-h-0 flex-1 flex-col">
-          <pre ref={termRef} onScroll={onTermScroll} onWheel={onTermWheel}
+          <pre ref={termRef} onScroll={onTermScroll} onWheel={onTermWheel} onClick={links.onClick}
             onTouchStart={onTermTouchStart} onTouchEnd={onTermTouchEnd} onTouchCancel={onTermTouchEnd}
             style={{ fontSize: termFont }}
             className="flex-1 overflow-y-auto overscroll-contain overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono leading-none text-white/90">
             {term.length > 0 && !(term.length === 1 && term[0] === "")
-              ? term.map((line, index) => <TerminalLine key={index} line={line} last={index === term.length - 1} />)
+              ? term.map((line, index) => <TerminalLine key={index} line={line} last={index === term.length - 1} branches={links.branches} />)
               : <span style={{ opacity: .4 }}>cargando terminal…</span>}
           </pre>
           {/* alt-screen TUI: no scrollback exists — say so, and (where it works) page the TUI itself */}

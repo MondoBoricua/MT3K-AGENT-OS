@@ -49,6 +49,7 @@ export default function App() {
   const [sheetInitialPaneId, setSheetInitialPaneId] = useState<string | undefined>(undefined);
   const [mosaicOpen, setMosaicOpen] = useState(false);
   const canMosaic = useMediaQuery(MOSAIC_QUERY);
+  const [filesRequest, setFilesRequest] = useState<{ path: string; host?: string; nonce: number } | null>(null);
   const [toasts, setToasts] = useState<{ id: number; text: string; live: boolean }[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pendingSel, setPendingSel] = useState<{ project: string; id: string } | null>(null);
@@ -195,6 +196,11 @@ export default function App() {
   // tracks the live agent (panes refresh on each poll) even across federated hosts.
   const openAgent = (a: AgentRow) => { setSheetInitialPaneId(undefined); setSheetAgentId(agentKey(a)); setNavOpen(false); };
   const expandFromMosaic = (a: AgentRow, paneId: string) => { setMosaicOpen(false); setSheetInitialPaneId(paneId); setSheetAgentId(agentKey(a)); };
+  // terminal links (file paths, local branches) → Files page at that path; closes the overlays on top
+  const openInFiles = useCallback((path: string, host?: string) => {
+    setFilesRequest({ path, host, nonce: Date.now() });
+    setPage("Files"); setSheetAgentId(null); setSheetInitialPaneId(undefined); setMosaicOpen(false);
+  }, []);
   const sheetAgent = sheetAgentId ? agents.find((a) => agentKey(a) === sheetAgentId) ?? null : null;
   const viewSessions = viewAgents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
 
@@ -336,7 +342,7 @@ export default function App() {
         {page === "Skills" && <Skills />}
         {page === "Memory" && <Memory />}
         {page === "Activity" && <Activity />}
-        {page === "Files" && <Files onToast={pushToast} focusPath={focus?.path} />}
+        {page === "Files" && <Files onToast={pushToast} focusPath={focus?.path} request={filesRequest} />}
         {page === "Agents View" && <AgentsView agents={viewAgents} onOpen={openAgent} onOpenMosaic={canMosaic ? () => setMosaicOpen(true) : undefined} onToast={pushToast} focusPath={focus?.path} />}
         {page === "Settings" && <Settings manifest={manifest} onChanged={() => loadManifest(`?t=${Date.now()}`)} />}
       </main>
@@ -349,9 +355,9 @@ export default function App() {
       )}
 
       {/* shared terminal/compose sheet — opened from Agents View or the sidebar quick-access list */}
-      <AgentTerminalSheet agent={sheetAgent} initialPaneId={sheetInitialPaneId} projects={manifest?.projects ?? []} focusProjectId={focus?.id} focusPath={focus?.path} onClose={() => { setSheetAgentId(null); setSheetInitialPaneId(undefined); }} onToast={pushToast} />
+      <AgentTerminalSheet agent={sheetAgent} initialPaneId={sheetInitialPaneId} projects={manifest?.projects ?? []} focusProjectId={focus?.id} focusPath={focus?.path} onClose={() => { setSheetAgentId(null); setSheetInitialPaneId(undefined); }} onToast={pushToast} onOpenPath={openInFiles} />
 
-      <Mosaic open={mosaicOpen && canMosaic} sessions={viewSessions} onClose={() => setMosaicOpen(false)} onExpand={expandFromMosaic} onToast={pushToast} />
+      <Mosaic open={mosaicOpen && canMosaic} sessions={viewSessions} onClose={() => setMosaicOpen(false)} onExpand={expandFromMosaic} onToast={pushToast} onOpenPath={openInFiles} />
 
       {/* Focus picker — mobile first-visit asks here; the header chip reopens it anywhere */}
       {focusPickerOpen && (

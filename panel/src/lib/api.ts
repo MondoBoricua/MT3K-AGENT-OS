@@ -1,3 +1,4 @@
+import type { GitRefs } from "./terminal-links";
 export interface SkillRow { name: string; slug: string; description: string }
 export interface LogEntry { date: string; content: string }
 export interface PaneRef {
@@ -209,3 +210,5 @@ export const fsMove = (from: string, to: string, overwrite = false, host?: strin
   jpost<{ ok: boolean; path?: string; exists?: boolean; err?: string }>(`/api/fs/move${hostQ(host)}`, { from, to, overwrite });
 export const fsDelete = (path: string, host?: string) =>
   jpost<{ ok: boolean; err?: string }>(`/api/fs/delete${hostQ(host)}`, { path });
+// read-only branch list for a pane's repo; null on any failure (the viewer then just has no branch links)
+export const getGitRefs = (cwd: string, host?: string) => jget<GitRefs>(`/api/git/refs?cwd=${encodeURIComponent(cwd)}${hostAmp(host)}`);
