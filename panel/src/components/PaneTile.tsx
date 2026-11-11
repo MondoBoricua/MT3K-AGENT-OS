@@ -210,7 +210,7 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
           ref={termRef}
           onScroll={onScroll}
           style={{ fontSize: TILE_FONT_PX }}
-          className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-2.5 py-2 font-mono leading-none text-white/90"
+          className="flex-1 overflow-y-auto overscroll-contain overflow-x-hidden whitespace-pre-wrap break-words bg-black px-2.5 py-2 font-mono leading-none text-white/90"
         >
           {term.length > 0 && !(term.length === 1 && term[0] === "")
             ? term.map((line, idx) => <TerminalLine key={idx} line={line} last={idx === term.length - 1} />)

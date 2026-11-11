@@ -296,7 +296,7 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
         </div>
 
         {/* scroll starts at the first agent on mobile (mx-auto centers it only when it fits) */}
-        <div className="room-scroll absolute inset-0 z-10 flex snap-x items-end justify-start overflow-x-auto pb-[6%] sm:justify-center">
+        <div className="room-scroll absolute inset-0 z-10 flex snap-x items-end justify-start overflow-x-auto overscroll-contain pb-[6%] sm:justify-center">
           <div className="room-crowd mx-auto flex items-end gap-0 px-3 sm:gap-8 sm:px-8">
             {agents.map((a, i) => {
               const hue = (i * 53) % 360;

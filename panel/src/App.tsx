@@ -234,7 +234,7 @@ export default function App() {
           <span className="font-mono text-[10px] uppercase tracking-wider text-white/35">Agents</span>
           <span className="font-mono text-[10px] text-emerald-300/70">{runningCount} live</span>
         </div>
-        <div className="flex flex-col gap-1.5 overflow-y-auto">
+        <div className="flex flex-col gap-1.5 overflow-y-auto overscroll-contain">
           {viewAgents.map((a) => {
             const sendable = (a.panes?.length ?? 0) > 0;
             const caps = a.capabilities;
@@ -362,7 +362,7 @@ export default function App() {
             <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-white/20 sm:hidden" />
             <h2 className="mb-1 text-sm font-semibold">¿En qué vas a trabajar?</h2>
             <p className="mb-3 font-mono text-[11px] text-white/45">enfoca agentes, files y el grafo en un proyecto — se recuerda en este dispositivo</p>
-            <div className="flex max-h-[60vh] flex-col gap-1.5 overflow-y-auto pr-0.5">
+            <div className="flex max-h-[60vh] flex-col gap-1.5 overflow-y-auto overscroll-contain pr-0.5">
               <button onClick={() => pickFocus(null)}
                 className={`rounded-xl border px-3 py-2.5 text-left font-mono text-xs transition ${!focus ? "border-accent/60 bg-accent/15 text-white" : "border-ink-line bg-ink-850/50 text-white/70 hover:border-accent/40"}`}>
                 🌐 Todo — la sala de control completa

@@ -646,7 +646,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
           <pre ref={termRef} onScroll={onTermScroll} onWheel={onTermWheel}
             onTouchStart={onTermTouchStart} onTouchEnd={onTermTouchEnd} onTouchCancel={onTermTouchEnd}
             style={{ fontSize: termFont }}
-            className="flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono leading-none text-white/90">
+            className="flex-1 overflow-y-auto overscroll-contain overflow-x-hidden whitespace-pre-wrap break-words bg-black px-3 py-2 font-mono leading-none text-white/90">
             {term.length > 0 && !(term.length === 1 && term[0] === "")
               ? term.map((line, index) => <TerminalLine key={index} line={line} last={index === term.length - 1} />)
               : <span style={{ opacity: .4 }}>cargando terminal…</span>}
@@ -757,7 +757,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="fixed inset-x-0 bottom-0 z-50 mx-auto flex max-h-[92vh] w-full max-w-lg flex-col overflow-y-auto rounded-t-2xl border border-ink-line bg-ink-900/95 p-4 shadow-2xl"
+      <div className="fixed inset-x-0 bottom-0 z-50 mx-auto flex max-h-[92vh] w-full max-w-lg flex-col overflow-y-auto overscroll-contain rounded-t-2xl border border-ink-line bg-ink-900/95 p-4 shadow-2xl"
         style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom))" }}>
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-white/20" />
         <header className="mb-3 flex items-center justify-between">

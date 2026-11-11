@@ -344,7 +344,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast }: Props) {
                   sin sesiones libres
                 </div>
               ) : (
-                <div className="grid flex-1 grid-cols-2 content-start gap-1.5 overflow-y-auto">
+                <div className="grid flex-1 grid-cols-2 content-start gap-1.5 overflow-y-auto overscroll-contain">
                   {freeSessions.map((s) => {
                     const st = paneStatus(s.pane);
                     const tone = statusTone(st);
