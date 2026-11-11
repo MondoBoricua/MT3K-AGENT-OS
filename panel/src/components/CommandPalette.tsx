@@ -46,7 +46,7 @@ export default function CommandPalette({ onClose, onPick }: { onClose: () => voi
           {!loading && q && results.length === 0 && <div className="px-3 py-4 text-center text-sm text-white/40">sin resultados</div>}
           {results.map((r, i) => (
             <button key={`${r.project}-${r.id}`} onMouseEnter={() => setActive(i)} onClick={() => onPick(r)}
-              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition ${i === active ? "bg-accent/12" : "hover:bg-white/5"}`}>
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left ${i === active ? "bg-accent/12" : "hover:bg-white/5"}`}>
               <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: communityColor(r.community) }} />
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-mono text-sm text-white/90">{r.label}</span>

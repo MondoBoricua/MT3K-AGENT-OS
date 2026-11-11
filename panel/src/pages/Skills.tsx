@@ -26,7 +26,7 @@ export default function Skills() {
       </div>
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 xl:grid-cols-3">
         {filtered.map((k) => (
-          <div key={k.slug} className="surface surface-hover p-4">
+          <div key={k.slug} className="surface p-4">
             <div className="mb-1 flex items-center gap-2">
               <span className="text-accent">✦</span>
               <span className="truncate font-mono text-sm font-semibold">{k.name}</span>

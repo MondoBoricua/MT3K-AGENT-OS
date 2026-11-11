@@ -32,7 +32,7 @@ export default function MosaicSlotStrip({ slots, active, visible = [], onSelect 
             title={title}
             aria-label={title}
             onClick={() => onSelect(idx)}
-            className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1 font-mono text-xs transition ${
+            className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1 font-mono text-xs ${
               active === idx
                 ? "border-accent/60 bg-accent/15 text-white"
                 : visible.includes(idx)

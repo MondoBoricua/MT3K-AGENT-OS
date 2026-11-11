@@ -322,7 +322,7 @@ export default function App() {
               </button>
             )}
             <div className="flex shrink-0 items-center gap-2 rounded-full border border-ink-line bg-ink-850/60 px-3 py-1 text-xs">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400 shadow-[0_0_8px] shadow-emerald-400" />
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px] shadow-emerald-400" />
               <span className="text-emerald-300">{runningCount} live</span>
               <span className="text-white/25">·</span>
               <span className="text-white/45">{onlineCount} ready</span>
