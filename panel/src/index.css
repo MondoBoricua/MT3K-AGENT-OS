@@ -91,7 +91,16 @@
   font-display: swap;
 }
 
-:root { color-scheme: dark; }
+:root {
+  color-scheme: dark;
+  /* motion tokens — the only curves/durations new motion may use */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-fast: 150ms;
+  --dur-pop: 180ms;
+  --dur-sheet: 300ms;
+}
 
 html, body, #root { height: 100%; }
 body {
@@ -267,4 +276,12 @@ body {
     max-width: 132px; /* the name plate must not widen the station — fewer fit per row */
   }
   .station .font-mono.font-semibold { max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+/* ───────── motion + native feel (feat/panel-motion) ───────── */
+@media (prefers-reduced-motion: reduce) {
+  .sprite, .sprite-idle, .sprite-laptop,
+  .monitor.live .codeline,
+  .skeleton::after,
+  .animate-pulse { animation: none; }
 }
