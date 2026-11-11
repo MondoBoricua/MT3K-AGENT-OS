@@ -52,8 +52,10 @@
   .mosaic > footer > div:last-child > button { padding: 0 8px; }
   .mosaic button, .mosaic select { white-space: nowrap; }
   .mosaic :is(button, select, textarea):focus-visible { outline: 2px solid #e87979; outline-offset: -2px; }
-  .mosaic button:enabled:hover { border-color: #e8797980; background-color: #ffffff12; }
   .mosaic > footer label { flex-shrink: 0; }
+}
+@media (min-width: 600px) and (hover: hover) and (pointer: fine) {
+  .mosaic button:enabled:hover { border-color: #e8797980; background-color: #ffffff12; }
 }
 
 /* The faded edge signals more keys; trailing space keeps the last key clear at the end. */
@@ -127,11 +129,13 @@ body {
     background: linear-gradient(180deg, oklch(23% 0.02 260 / 0.75), oklch(17% 0.015 260 / 0.7));
     box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.045), 0 10px 28px -20px oklch(0% 0 0 / 0.9);
   }
-  .surface-hover { transition: transform .35s cubic-bezier(.16,1,.3,1), border-color .35s, box-shadow .35s; }
-  .surface-hover:hover {
-    border-color: oklch(62% 0.23 25 / 0.5);
-    transform: translateY(-3px);
-    box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.07), 0 22px 44px -24px oklch(60% 0.23 25 / 0.45);
+  .surface-hover { transition: transform 200ms var(--ease-out), border-color var(--dur-fast) ease, box-shadow 200ms ease; }
+  @media (hover: hover) and (pointer: fine) {
+    .surface-hover:hover {
+      border-color: oklch(62% 0.23 25 / 0.5);
+      transform: translateY(-3px);
+      box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.07), 0 22px 44px -24px oklch(60% 0.23 25 / 0.45);
+    }
   }
   .skeleton { position: relative; overflow: hidden; background: oklch(18% 0.015 270); }
   .skeleton::after {
@@ -297,4 +301,8 @@ button, [role="button"] { -webkit-user-select: none; user-select: none; }
 :is(button, [role="button"], a):active { transition-duration: 0ms; }
 @media (pointer: coarse) {
   :is(button, [role="button"], a):not(:disabled):active { opacity: 0.7; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .surface-hover:hover { transform: none; }
 }
