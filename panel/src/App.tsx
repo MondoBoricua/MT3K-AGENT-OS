@@ -201,11 +201,11 @@ export default function App() {
   return (
     <div className="relative flex h-dvh overflow-hidden text-white">
       {/* mobile backdrop */}
-      {navOpen && <div className="fixed inset-0 z-30 bg-black/55 lg:hidden" onClick={() => setNavOpen(false)} />}
+      {navOpen && <div className="backdrop-enter fixed inset-0 z-30 bg-black/55 lg:hidden" onClick={() => setNavOpen(false)} />}
 
       {/* sidebar — static on lg, slide-in drawer on mobile */}
       <aside style={{ paddingTop: "calc(1rem + env(safe-area-inset-top))", paddingLeft: "calc(1rem + env(safe-area-inset-left))" }}
-        className={`fixed inset-y-0 left-0 z-40 flex w-[220px] shrink-0 flex-col border-r border-ink-line bg-ink-850/95 p-4 backdrop-blur transition-transform duration-300 lg:static lg:translate-x-0 lg:bg-ink-850/40 ${navOpen ? "translate-x-0" : "-translate-x-full"}`}>
+        className={`fixed inset-y-0 left-0 z-40 flex w-[220px] shrink-0 flex-col border-r border-ink-line bg-ink-850/95 p-4 backdrop-blur transition-transform duration-[var(--dur-sheet)] ease-[var(--ease-drawer)] motion-reduce:transition-none lg:static lg:translate-x-0 lg:bg-ink-850/40 ${navOpen ? "translate-x-0" : "-translate-x-full"}`}>
         <div className="mb-7 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="grid h-9 w-9 place-items-center overflow-hidden rounded-xl border border-accent/30 bg-ink-900 shadow-[0_0_18px_-6px] shadow-accent">
