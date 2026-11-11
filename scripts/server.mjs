@@ -7,6 +7,7 @@
  *   POST /api/refresh  { projectId }      → `graphify update` + re-ingest, appends an activity log
  *   POST /api/send     { paneId, text, enter? } → types text into an agent's tmux pane (LAN-only)
  *   POST /api/upload   { name, data }       → saves a base64 image to data/uploads/, returns its path
+ *   GET  /api/git/refs ?cwd=              → local branches of the repo at cwd: pushed?, GitHub url, worktree (read-only, no network)
  *   GET  /api/fs/list|read|raw ?path=  +  POST /api/fs/write|upload|move|delete → file browser / manager
  *   GET  /api/agents                      → installed agent CLIs + their live tmux panes (auto-discovered, with status: working|blocked|idle|done, optional name)
  *   GET  /api/pane-explain ?id=           → rule, region, matched snippet & tail explaining a pane's state
@@ -84,6 +85,7 @@ import {
 } from "./lib/session-snapshot.mjs";
 import { runRestore as runRestoreWithLock } from "./lib/restore-run.mjs";
 import { tmuxServerAbsent } from "./lib/tmux-absent.mjs";
+import { gitRefs } from "./lib/git-refs.mjs";
 import { createKillTombstones } from "./lib/kill-tombstones.mjs";
 import { createLedgerStore } from "./lib/ledger-store.mjs";
 
@@ -2285,6 +2287,14 @@ async function api(req, res, path) {
     // one-tap destinations: home, every tracked project, the panel's own uploads
     const quick = [{ name: "~", path: homedir() }, ...projects().map((pr) => ({ name: pr.name || pr.id, path: expand(pr.path) })), { name: "uploads", path: UPLOADS_DIR }];
     return sendJSON(res, 200, { ok: true, path: dir, parent: dirname(dir), home: homedir(), quick, entries });
+  }
+
+  // read-only branch list of the repo containing ?cwd= (terminal branch links). Same gate as /api/fs/list:
+  // this sits behind the /api/* authorized() check and ?host= proxying in createServer; git runs via
+  // execFile with a fixed argv (scripts/lib/git-refs.mjs), never the network.
+  if (path === "/api/git/refs") {
+    const r = await gitRefs(new URL(req.url, "http://x").searchParams.get("cwd") || "");
+    return sendJSON(res, r.ok ? 200 : r.err === "cwd inválido" ? 400 : 500, r);
   }
 
   if (path === "/api/fs/read") {
