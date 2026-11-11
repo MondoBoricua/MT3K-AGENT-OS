@@ -356,8 +356,8 @@ export default function App() {
       {/* Focus picker — mobile first-visit asks here; the header chip reopens it anywhere */}
       {focusPickerOpen && (
         <>
-          <div className="fixed inset-0 z-[75] bg-black/60 backdrop-blur-sm" onClick={() => { focusAsked.current = true; try { if (localStorage.getItem("mt3k.focus") === null) localStorage.setItem("mt3k.focus", ""); } catch { /* private */ } setFocusPickerOpen(false); }} />
-          <div className="fixed inset-x-0 bottom-0 z-[80] mx-auto w-full max-w-md rounded-t-2xl border border-ink-line bg-ink-900/95 p-4 shadow-2xl backdrop-blur-xl sm:bottom-auto sm:top-1/3 sm:rounded-2xl"
+          <div className="backdrop-enter fixed inset-0 z-[75] bg-black/60 backdrop-blur-sm" onClick={() => { focusAsked.current = true; try { if (localStorage.getItem("mt3k.focus") === null) localStorage.setItem("mt3k.focus", ""); } catch { /* private */ } setFocusPickerOpen(false); }} />
+          <div className="sheet-enter sheet-center fixed inset-x-0 bottom-0 z-[80] mx-auto w-full max-w-md rounded-t-2xl border border-ink-line bg-ink-900/95 p-4 shadow-2xl backdrop-blur-xl sm:bottom-auto sm:top-1/3 sm:rounded-2xl"
             style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom))" }}>
             <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-white/20 sm:hidden" />
             <h2 className="mb-1 text-sm font-semibold">¿En qué vas a trabajar?</h2>

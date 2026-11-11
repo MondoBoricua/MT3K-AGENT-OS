@@ -756,8 +756,8 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
   // Bottom sheet: only the "no session" message or the session picker. Picking a session opens fullscreen.
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="fixed inset-x-0 bottom-0 z-50 mx-auto flex max-h-[92dvh] w-full max-w-lg flex-col overflow-y-auto overscroll-contain rounded-t-2xl border border-ink-line bg-ink-900/95 p-4 shadow-2xl"
+      <div className="backdrop-enter fixed inset-0 z-40 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="sheet-enter fixed inset-x-0 bottom-0 z-50 mx-auto flex max-h-[92dvh] w-full max-w-lg flex-col overflow-y-auto overscroll-contain rounded-t-2xl border border-ink-line bg-ink-900/95 p-4 shadow-2xl"
         style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom))" }}>
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-white/20" />
         <header className="mb-3 flex items-center justify-between">

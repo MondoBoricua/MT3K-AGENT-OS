@@ -306,3 +306,18 @@ button, [role="button"] { -webkit-user-select: none; user-select: none; }
 @media (prefers-reduced-motion: reduce) {
   .surface-hover:hover { transform: none; }
 }
+
+.sheet-enter { transition: transform var(--dur-sheet) var(--ease-drawer); }
+.backdrop-enter { transition: opacity var(--dur-sheet) var(--ease-out); }
+@starting-style {
+  .sheet-enter { transform: translateY(100%); }
+  .backdrop-enter { opacity: 0; }
+}
+@media (min-width: 640px) {
+  .sheet-enter.sheet-center { transition: transform var(--dur-pop) var(--ease-out), opacity var(--dur-pop) var(--ease-out); }
+  @starting-style { .sheet-enter.sheet-center { transform: scale(0.97); opacity: 0; } }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet-enter, .sheet-enter.sheet-center { transition: opacity var(--dur-fast) ease; }
+  @starting-style { .sheet-enter, .sheet-enter.sheet-center { transform: none; opacity: 0; } }
+}
