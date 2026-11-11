@@ -122,7 +122,7 @@ export default function KnowledgeGraph({ manifest, selected, setSelected, data, 
 function ProjectCard({ p, active, onClick }: { p: ProjectMeta; active: boolean; onClick: () => void }) {
   return (
     <button onClick={onClick}
-      className={`min-w-[150px] surface surface-hover transition-none px-3 py-2 text-left ${active ? "!border-accent/70 shadow-[0_0_30px_-12px] shadow-accent" : ""}`}>
+      className={`min-w-[150px] surface surface-hover [transition-property:transform] px-3 py-2 text-left ${active ? "!border-accent/70 shadow-[0_0_30px_-12px] shadow-accent" : ""}`}>
       <div className="flex items-center justify-between gap-2">
         <span className="truncate text-[13px] font-semibold">{p.name}</span>
         <span className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px] uppercase" style={{ background: langTint(p.lang) + "22", color: langTint(p.lang) }}>{p.lang}</span>

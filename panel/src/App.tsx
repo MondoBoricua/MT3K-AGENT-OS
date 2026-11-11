@@ -199,13 +199,13 @@ export default function App() {
   const viewSessions = viewAgents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
 
   return (
-    <div className="relative flex h-dvh overflow-hidden text-white">
+    <div className="relative flex h-screen supports-[height:100dvh]:h-dvh overflow-hidden text-white">
       {/* mobile backdrop */}
       {navOpen && <div className="backdrop-enter fixed inset-0 z-30 bg-black/55 lg:hidden" onClick={() => setNavOpen(false)} />}
 
       {/* sidebar — static on lg, slide-in drawer on mobile */}
       <aside style={{ paddingTop: "calc(1rem + env(safe-area-inset-top))", paddingLeft: "calc(1rem + env(safe-area-inset-left))" }}
-        className={`fixed inset-y-0 left-0 z-40 flex w-[220px] shrink-0 flex-col border-r border-ink-line bg-ink-850/95 p-4 backdrop-blur transition-transform duration-[var(--dur-sheet)] ease-[var(--ease-drawer)] motion-reduce:transition-none lg:static lg:translate-x-0 lg:bg-ink-850/40 ${navOpen ? "translate-x-0" : "-translate-x-full"}`}>
+        className={`fixed inset-y-0 left-0 z-40 flex w-[220px] shrink-0 flex-col border-r border-ink-line bg-ink-850/95 p-4 backdrop-blur transition-transform ${navOpen ? "duration-[var(--dur-sheet)]" : "duration-200"} ease-[var(--ease-drawer)] motion-reduce:transition-none lg:static lg:translate-x-0 lg:bg-ink-850/40 ${navOpen ? "translate-x-0" : "-translate-x-full"}`}>
         <div className="mb-7 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="grid h-9 w-9 place-items-center overflow-hidden rounded-xl border border-accent/30 bg-ink-900 shadow-[0_0_18px_-6px] shadow-accent">
@@ -284,7 +284,7 @@ export default function App() {
           <div className="mb-3 flex gap-1.5 border-t border-ink-line pt-3">
             {SOCIALS.map(({ name, href, Icon }) => (
               <a key={name} href={href} target="_blank" rel="noopener noreferrer" title={name}
-                className="grid h-8 flex-1 place-items-center rounded-lg border border-ink-line text-white/50 transition hover:-translate-y-0.5 hover:border-accent/50 hover:text-accent hover:shadow-[0_0_18px_-8px] hover:shadow-accent">
+                className="grid h-8 flex-1 place-items-center rounded-lg border border-ink-line text-white/50 transition hover:-translate-y-0.5 motion-reduce:hover:translate-y-0 hover:border-accent/50 hover:text-accent hover:shadow-[0_0_18px_-8px] hover:shadow-accent">
                 <Icon className="h-4 w-4" />
               </a>
             ))}

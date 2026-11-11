@@ -301,12 +301,16 @@ button, [role="button"] { -webkit-user-select: none; user-select: none; }
 :is(button, [role="button"], a):active { transition-duration: 0ms; }
 @media (pointer: coarse) {
   :is(button, [role="button"], a):not(:disabled):active { opacity: 0.7; }
+  /* a pressed link/button inside a role=button container dims alone; the container stays opaque */
+  [role="button"]:has(:is(a, button):active) { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .surface-hover:hover { transform: none; }
 }
 
+/* Entrance classes. Tailwind emits variant utilities (sm:, hover:, motion-reduce:, ...) AFTER this block,
+   so a future sm:transition-* / sm:opacity-* on an element with .sheet-enter / .toast-enter / .backdrop-enter would win. */
 .sheet-enter { transition: transform var(--dur-sheet) var(--ease-drawer); }
 .backdrop-enter { transition: opacity var(--dur-sheet) var(--ease-out); }
 @starting-style {
