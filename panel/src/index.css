@@ -285,3 +285,16 @@ body {
   .skeleton::after,
   .animate-pulse { animation: none; }
 }
+
+html {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+button, [role="button"], a, select, label { touch-action: manipulation; }
+button, [role="button"] { -webkit-user-select: none; user-select: none; }
+/* press snaps in, release eases back on the element's own transition (asymmetric timing) */
+:is(button, [role="button"], a):active { transition-duration: 0ms; }
+@media (pointer: coarse) {
+  :is(button, [role="button"], a):not(:disabled):active { opacity: 0.7; }
+}
