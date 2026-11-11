@@ -74,8 +74,8 @@ export function createGitResolver({ find = findGit, now = Date.now, ttl = NOT_FO
 const resolver = createGitResolver();
 
 // every call: absolute git, fixed argv (nothing request-controlled), fsmonitor off, no stderr kept.
-// If the cached executable vanished or lost its mode (ENOENT/EACCES), look it up again once.
-export async function runGitWith(res, exec, args, cwd, maxBuffer = GIT_MAX_BUFFER) {
+// If the cached executable vanished or lost its mode (and ENOENT/EACCES says so), look it up again once.
+export async function runGitWith(res, exec, args, cwd, maxBuffer = GIT_MAX_BUFFER, stillExecutable = isExecutableFile) {
   const once = (git) => new Promise((resolve) => {
     exec(git, ["-c", "core.fsmonitor=false", ...args], {
       cwd, timeout: GIT_TIMEOUT_MS, maxBuffer, windowsHide: true,
@@ -86,6 +86,8 @@ export async function runGitWith(res, exec, args, cwd, maxBuffer = GIT_MAX_BUFFE
   if (!git) return { ok: false, code: "ENOENT" };
   const r = await once(git);
   if (r.ok || (r.code !== "ENOENT" && r.code !== "EACCES")) return r;
+  // a bad/unreadable cwd reports ENOENT/EACCES too: only re-resolve when the cached binary itself is gone
+  if (stillExecutable(git)) return r;
   res.invalidate();
   const again = res.get();
   return again && again !== git ? once(again) : r;

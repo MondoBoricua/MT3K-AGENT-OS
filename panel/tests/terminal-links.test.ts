@@ -96,6 +96,15 @@ test("branch: neighbouring word characters across span boundaries block the link
   assert.deepEqual(link("(\x1b[38;5;153mmaster\x1b[0m)"), ["master"]);
 });
 
+test("branch: whitespace inside the run keeps the link; only the trimmed token's real neighbours count (N1)", () => {
+  const link = (s: string) => branchLinks(ansiToHtml(s, { branches: BR }));
+  assert.deepEqual(link("on\x1b[38;5;153m master \x1b[0mnow"), ["master"]);
+  assert.deepEqual(link("use \x1b[38;5;153mmaster \x1b[39mnow"), ["master"]);
+  assert.deepEqual(link("\x1b[38;5;153mmaster\x1b[1mful\x1b[0m"), []);
+  assert.deepEqual(link("pre\x1b[38;5;153mmaster\x1b[0m"), []);
+  assert.deepEqual(link("origin/\x1b[38;5;153mmaster\x1b[0m"), []);
+});
+
 test("paths truncated by the TUI with an ellipsis are not linked", () => {
   assert.deepEqual(fsLinks(ansiToHtml("/Users/mondo/…/panel-l…")), []);
   assert.deepEqual(fsLinks(ansiToHtml("see /Users/mondo/MT3K-AGENT-OS/pan… ok")), []);

@@ -185,7 +185,7 @@ test("runGitWith: ENOENT/EACCES on the cached path re-resolves once and retries;
   const mk = (paths) => { let i = 0; return { get: () => paths[Math.min(i, paths.length - 1)], invalidate: () => { i++; } }; };
   const tried = [];
   const exec = (bin, args, opts, cb) => { tried.push(bin); if (bin === "/old/git") cb(Object.assign(new Error("x"), { code: "EACCES" })); else cb(null, "out"); };
-  assert.deepEqual(await runGitWith(mk(["/old/git", "/new/git"]), exec, ["status"], "/"), { ok: true, out: "out" });
+  assert.deepEqual(await runGitWith(mk(["/old/git", "/new/git"]), exec, ["status"], "/", undefined, () => false), { ok: true, out: "out" });
   assert.deepEqual(tried, ["/old/git", "/new/git"]);
   const exec2 = (bin, a, o, cb) => cb(Object.assign(new Error("x"), { code: 1 }));
   assert.deepEqual(await runGitWith(mk(["/a", "/b"]), exec2, [], "/"), { ok: false, code: 1 });
@@ -236,4 +236,15 @@ test("gitRefs: heads survive a failed origin listing; git missing vs git failed 
   assert.deepEqual(r.branches, [{ name: "master", current: true, pushed: false, url: null, worktree: null }]);
   assert.deepEqual(await gitRefs(dir, async () => ({ ok: false, code: 1 })), { ok: false, err: "git falló" });
   assert.deepEqual(await gitRefs(dir, async () => ({ ok: false, code: "ENOENT" })), { ok: false, err: "git no disponible" });
+});
+
+test("runGitWith: EACCES/ENOENT caused by a bad cwd does not drop the cached git; a vanished binary re-resolves once", async () => {
+  let invalidations = 0;
+  const res = { get: () => (invalidations ? "/new/git" : "/old/git"), invalidate: () => { invalidations++; } };
+  const badCwd = (bin, a, o, cb) => cb(Object.assign(new Error("x"), { code: "ENOENT" }));
+  assert.deepEqual(await runGitWith(res, badCwd, [], "/gone", undefined, () => true), { ok: false, code: "ENOENT" });
+  assert.equal(invalidations, 0);
+  const vanished = (bin, a, o, cb) => (bin === "/old/git" ? cb(Object.assign(new Error("x"), { code: "ENOENT" })) : cb(null, "ok"));
+  assert.deepEqual(await runGitWith(res, vanished, [], "/", undefined, (p) => p !== "/old/git"), { ok: true, out: "ok" });
+  assert.equal(invalidations, 1);
 });

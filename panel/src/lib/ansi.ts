@@ -109,7 +109,11 @@ function linkWholeBranch(run: string, branches: BranchTitles, before: string, af
   const name = run.slice(start, end);
   const title = branches.get(name);
   if (title === undefined) return null;
-  if ((before && WORD_CHAR.test(before)) || (after && WORD_CHAR.test(after))) return null;
+  // adjacent character of the TRIMMED token: inside this run when there is slack (whitespace/backtick/punctuation: fine),
+  // otherwise the neighbouring run's edge character
+  const left = start === 0 ? before : run[start - 1];
+  const right = end === run.length ? after : run[end];
+  if ((left && WORD_CHAR.test(left)) || (right && WORD_CHAR.test(right))) return null;
   return `${esc(run.slice(0, start))}<a data-git-branch="${escAttr(name)}" title="${escAttr(title)}" ${LINK_STYLE}>${esc(name)}</a>${esc(run.slice(end))}`;
 }
 
