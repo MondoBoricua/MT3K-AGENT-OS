@@ -52,6 +52,7 @@ import { missingHooks } from "./lib/tmux-hooks.mjs";
 import { decideResume, hasResumableHistory } from "./lib/resume-history.mjs";
 import { createPasteToPane } from "./lib/tmux-paste.mjs";
 import { buildRunningSet } from "./lib/running-set.mjs";
+import { isAgentRunning } from "./lib/agent-live.mjs";
 import { WIN32_PS_COMMAND, createWin32ProcessSource, withoutWindowsApps } from "./lib/proc-tree-win32.mjs";
 import { nvmBinDirs } from "./lib/bin-dirs.mjs";
 import { createPaneNotifier } from "./lib/pane-notify.mjs";
@@ -285,6 +286,10 @@ const AGENT_DEFS = [
   // `zcode` is an sh wrapper that execs node (~/.zcode/runtime/…/zcode.mjs); the TUI then
   // re-titles its processes `zcode-cli`, so that's the live pane/run signal (tmux shows "node").
   { id: "zcode", name: "ZCode", bins: ["zcode"], paths: ["~/.zcode"], proc: ["zcode", "zcode-cli"] },
+  // Hermes: el intérprete python se re-titula `hermes` (comm). Un servicio `hermes … gateway run`
+  // corre siempre (PPID 1, sin tty) con el mismo nombre → `paneOnly`: solo un Hermes interactivo
+  // dentro de un panel de tmux cuenta como running.
+  { id: "hermes", name: "Hermes", bins: ["hermes"], paths: ["~/.hermes"], proc: ["hermes"], paneOnly: true },
   // DeepSeek Harness (dsh): no TUI profile — its interactive surface is `dsh web` on a local
   // port. `web` marks it as a web-UI agent: a port probe drives "running" and the panel offers
   // an "abrir UI web" link instead of a tmux terminal.
@@ -595,7 +600,6 @@ async function detectAgentsImpl() {
     }
     const installed = a.bins.some(onPath) || a.paths.some((p) => existsSync(expand(p)));
     const proc = a.proc || [];
-    const isRunning = installed && proc.some((name) => running.has(name));
     // every pane whose process tree contains this agent's binary — supports multiple sessions of the same CLI.
     // segment match: the agent name may be the basename, a vendor/arch name ("codex-aarch64-…"),
     // or a directory in the executable's path (".../cursor-agent/versions/x.y/node").
@@ -603,6 +607,7 @@ async function detectAgentsImpl() {
       ? panes.filter((pn) => pn.comms.some((comm) => proc.some((name) => procMatches(comm, name))))
           .map((pn) => ({ paneId: pn.paneId, panePid: pn.panePid, label: pn.label, window: pn.window, cwd: pn.cwd }))
       : [];
+    const isRunning = isAgentRunning(a, { installed, running, agentPanes });
     // launchable = a real TUI CLI we can spawn inside tmux (GUI-only apps have empty `proc`)
     const web = a.web && webUp.has(a.id) ? a.web : undefined;
     return { id: a.id, name: a.name, online: installed, running: isRunning || !!web, launchable: HAS_TMUX && a.bins.some(onPath) && proc.length > 0, panes: agentPanes, ...(web ? { webPort: a.webProxy || web, webTls: PROXY_HTTPS } : a.web && installed && a.webCmd ? { webOff: true } : {}), ...adapterMeta };
