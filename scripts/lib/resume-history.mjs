@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdirSync, realpathSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -73,6 +73,7 @@ function zcodeHasSession(dbPath, dirs, useNodeSqlite) {
   } catch { return false; }
 }
 
+const JUNIE_SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const historyChecks = {
   claude: (dir, home, realDir) => readdirSync(join(home, ".claude", "projects", realDir(dir).replace(/[^A-Za-z0-9]/g, "-"))).some((f) => f.endsWith(".jsonl")),
   grok: (dir, home, realDir) => hasSubdirectory(join(home, ".grok", "sessions", encodeURIComponent(realDir(dir)))),
@@ -97,6 +98,49 @@ const historyChecks = {
     }
     zcodeProbes.set(key, { at: now, mtimeMs, value });
     return value;
+  },
+  // Junie stores sessions in ~/.junie/sessions/index.jsonl — one JSON object per line with
+  // fields: sessionId, projectDir, createdAt, updatedAt, taskName, lastPromptAt.
+  // Session ids on disk follow the shape "session-YYMMDD-HHMMSS-xxxx" (alphanumeric + hyphens).
+  // A session counts only if its projectDir (resolved through realDir) equals realDir(dir)
+  // AND the session directory still exists on disk as a directory (deleted sessions must not count).
+  junie: (dir, home, realDir) => {
+    const indexPath = join(home, ".junie", "sessions", "index.jsonl");
+    let data;
+    try {
+      const st = statSync(indexPath);
+      // cap at 1 MiB — the index is a few KB in practice; anything larger is corrupt
+      if (st.size > 1_048_576) return false;
+      data = readFileSync(indexPath, "utf8");
+    } catch { return false; }
+    const sessionsDir = join(home, ".junie", "sessions");
+    let targetReal;
+    try { targetReal = realDir(dir); } catch { return false; }
+    for (const raw of data.split("\n")) {
+      const line = raw.trim();
+      if (!line.length) continue;
+      let entry;
+      try { entry = JSON.parse(line); } catch { continue; }
+      // skip non-objects (null, arrays, numbers, strings, booleans)
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      // guard against wrong types
+      if (typeof entry.projectDir !== "string" || typeof entry.sessionId !== "string") continue;
+      // sessionId must be a plain folder name: starts with a letter or digit, then letters, digits, ".", "_" or "-",
+      // and never "..". That rules out "", ".", separators and traversal, so the join below stays inside sessionsDir.
+      if (!JUNIE_SESSION_ID_RE.test(entry.sessionId) || entry.sessionId.includes("..")) continue;
+      // resolve the recorded projectDir through realDir to handle symlink equivalence
+      let recordedReal;
+      try { recordedReal = realDir(entry.projectDir); } catch { /* folder gone → skip */ continue; }
+      // exact match only — parent/child/prefix must not match
+      if (recordedReal !== targetReal) continue;
+      // the session entry must be an existing directory inside the sessions folder
+      const sessionDir = join(sessionsDir, entry.sessionId);
+      let st;
+      try { st = statSync(sessionDir); } catch { continue; }
+      if (!st.isDirectory()) continue;
+      return true;
+    }
+    return false;
   },
 };
 
