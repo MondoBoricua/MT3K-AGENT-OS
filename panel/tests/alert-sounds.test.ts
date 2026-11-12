@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  ALERT_COOLDOWN_MS, DEFAULT_SOUND_SETTINGS, SOUND_SETTINGS_KEY, diffAlerts, loadSoundSettings, saveSoundSettings,
+  ALERT_COOLDOWN_MS, DEFAULT_SOUND_SETTINGS, SOUND_SETTINGS_KEY, diffAlerts, loadSoundSettings, resetSoundSettingsMemory, saveSoundSettings, summarizeAlerts,
   type StatusMap,
 } from "../src/lib/alert-sounds.ts";
 
@@ -109,6 +109,7 @@ test("settings: defaults for missing, corrupt or wrong-shaped values", () => {
   const throwing = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } };
   assert.deepEqual(loadSoundSettings(throwing), DEFAULT_SOUND_SETTINGS);
   assert.doesNotThrow(() => saveSoundSettings(DEFAULT_SOUND_SETTINGS, throwing));
+  resetSoundSettingsMemory(); // el guardado fallido deja copia en memoria: no filtrarla a otros tests
 });
 
 test("settings: volume is clamped and values round-trip", () => {
@@ -117,4 +118,50 @@ test("settings: volume is clamped and values round-trip", () => {
   const st = fakeStorage();
   saveSoundSettings({ enabled: true, volume: 2, blocked: false, done: true }, st);
   assert.deepEqual(loadSoundSettings(st), { enabled: true, volume: 1, blocked: false, done: true });
+});
+
+test("flapping blocked -> working -> blocked inside the cooldown alerts once; after it, alerts again", () => {
+  let r = diffAlerts(first({ [A]: "working" }), { [A]: "blocked" }, T0 + 1000);
+  assert.equal(r.events.length, 1);
+  r = diffAlerts(r.state, { [A]: "working" }, T0 + 2000);
+  r = diffAlerts(r.state, { [A]: "blocked" }, T0 + 3000);
+  assert.deepEqual(r.events, []);
+  r = diffAlerts(r.state, { [A]: "working" }, T0 + 4000);
+  r = diffAlerts(r.state, { [A]: "blocked" }, T0 + 1000 + ALERT_COOLDOWN_MS);
+  assert.deepEqual(r.events, [{ key: A, kind: "blocked" }]);
+});
+
+test("settings: a storage whose setItem throws keeps the last value in memory", () => {
+  resetSoundSettingsMemory();
+  const broken = { getItem: () => null, setItem: () => { throw new Error("private mode"); } };
+  saveSoundSettings({ enabled: true, volume: 0.3, blocked: false, done: true }, broken);
+  assert.deepEqual(loadSoundSettings(broken), { enabled: true, volume: 0.3, blocked: false, done: true });
+  assert.deepEqual(loadSoundSettings(null), { enabled: true, volume: 0.3, blocked: false, done: true });
+  const ok = fakeStorage();
+  saveSoundSettings({ enabled: false, volume: 0.5, blocked: true, done: true }, ok);
+  assert.equal(loadSoundSettings(ok).volume, 0.5, "a successful save clears the in-memory copy");
+  resetSoundSettingsMemory();
+});
+
+const describe = (k: string) => ({ who: k.startsWith("local:claude") ? "Claude" : "Codex", where: "proj" });
+const both = { blocked: true, done: true };
+const ev = (key: string, kind: "blocked" | "done") => ({ key, kind });
+
+test("summarizeAlerts: none, one, many, mixed, kind disabled", () => {
+  assert.deepEqual(summarizeAlerts([], both, describe), { cues: [], toasts: [] });
+  assert.deepEqual(summarizeAlerts([ev(A, "blocked")], both, describe), {
+    cues: ["blocked"], toasts: [{ kind: "blocked", text: "Claude necesita input · proj" }],
+  });
+  assert.deepEqual(summarizeAlerts([ev(B, "done")], both, describe).toasts, [{ kind: "done", text: "Codex terminó · proj" }]);
+  const many = summarizeAlerts([ev(A, "blocked"), ev(B, "blocked"), ev("x|%3", "blocked")], both, describe);
+  assert.deepEqual(many.cues, ["blocked"]);
+  assert.deepEqual(many.toasts, [{ kind: "blocked", text: "3 agentes necesitan input" }]);
+  const doneMany = summarizeAlerts([ev(A, "done"), ev(B, "done")], both, describe);
+  assert.equal(doneMany.toasts[0].text, "2 agentes terminaron");
+  const mixed = summarizeAlerts([ev(B, "done"), ev(A, "blocked"), ev("x|%3", "done")], both, describe);
+  assert.deepEqual(mixed.cues, ["blocked", "done"]);
+  assert.deepEqual(mixed.toasts.map((t) => t.text), ["Claude necesita input · proj", "2 agentes terminaron"]);
+  const off = summarizeAlerts([ev(A, "blocked"), ev(B, "done")], { blocked: false, done: true }, describe);
+  assert.deepEqual(off.cues, ["done"]);
+  assert.equal(off.toasts.length, 1);
 });

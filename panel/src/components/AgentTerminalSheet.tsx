@@ -30,6 +30,7 @@ type Props = {
   onClose: () => void;
   onToast?: (text: string, live: boolean, ms?: number) => void;
   onOpenPath?: (path: string, host?: string) => void; // file/branch links in the terminal → Files explorer
+  onActivePaneChange?: (paneId: string | null) => void; // pane activo (null = ninguno o hoja cerrada), para los avisos sonoros
 };
 
 // status pill palette in the session picker (same as PaneTile)
@@ -43,7 +44,7 @@ const PICKER_TONE_CLS = {
 // Shared sheet: session picker → fullscreen terminal (live view + docked compose).
 // Used from both Agents View (the room) and the sidebar quick-access list.
 // One session → opens straight into fullscreen; many → pick one, then fullscreen.
-export default function AgentTerminalSheet({ agent, initialPaneId, projects = [], focusProjectId, focusPath, onClose, onToast, onOpenPath }: Props) {
+export default function AgentTerminalSheet({ agent, initialPaneId, projects = [], focusProjectId, focusPath, onClose, onToast, onOpenPath, onActivePaneChange }: Props) {
   const [paneId, setPaneId] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [enterOnSend, setEnterOnSend] = useState(true);
@@ -95,6 +96,10 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
   );
   const activePane = panes.find((p) => p.paneId === paneId) ?? (panes.length === 1 ? panes[0] : null);
   const paneToWatch = activePane?.paneId;
+  const activePaneCb = useRef(onActivePaneChange);
+  activePaneCb.current = onActivePaneChange;
+  useEffect(() => { activePaneCb.current?.(paneToWatch ?? null); }, [paneToWatch]);
+  useEffect(() => () => activePaneCb.current?.(null), []);
   const links = useTerminalLinks({ cwd: activePane?.cwd, host, onOpenPath });
 
   // reset whenever a different agent is opened (by host:id); a single-pane agent jumps straight to fullscreen.

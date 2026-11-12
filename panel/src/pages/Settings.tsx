@@ -4,7 +4,7 @@ import { herdrChoice } from "../lib/herdr-pane";
 import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, moveHost, updateFleet, getMacros, saveMacros, getRestoreConfig, setRestoreConfig, getLaunchBackend, setLaunchBackend, type LaunchBackend, type LaunchBackendState, type SystemStatus, type FedHost } from "../lib/api";
 import { fmt } from "../lib/ui";
 import { loadSoundSettings, saveSoundSettings, type SoundSettings } from "../lib/alert-sounds";
-import { playAlertSound, unlockAudio } from "../lib/alert-audio";
+import { playAlertSequence, unlockAudio } from "../lib/alert-audio";
 
 const REFRESH_KEY = "mt3k.refreshMs";
 const INTERVALS = [
@@ -29,9 +29,9 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
     const next = { ...sound, ...patch };
     setSound(next);
     saveSoundSettings(next);
-    if (patch.enabled) unlockAudio();
+    if (patch.enabled) void unlockAudio();
   };
-  const tryCue = (kind: "blocked" | "done") => { unlockAudio(); playAlertSound(kind, sound.volume); };
+  const tryCue = (kind: "blocked" | "done") => { void playAlertSequence([kind], sound.volume, true); };
 
   const refresh = () => getStatus().then(setSt);
   useEffect(() => { refresh(); }, []);

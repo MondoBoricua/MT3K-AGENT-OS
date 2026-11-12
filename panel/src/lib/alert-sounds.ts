@@ -79,7 +79,13 @@ function defaultStorage(): KeyValueStorage | null {
   try { return typeof localStorage === "undefined" ? null : localStorage; } catch { return null; }
 }
 
+// Copia en memoria del último guardado que el storage rechazó (modo privado): UI y App coinciden
+// mientras viva la página. Se limpia en cuanto un guardado sí persiste.
+let unpersisted: SoundSettings | null = null;
+export function resetSoundSettingsMemory(): void { unpersisted = null; }
+
 export function loadSoundSettings(storage: KeyValueStorage | null = defaultStorage()): SoundSettings {
+  if (unpersisted) return { ...unpersisted };
   try {
     const raw = storage?.getItem(SOUND_SETTINGS_KEY);
     if (!raw) return { ...DEFAULT_SOUND_SETTINGS };
@@ -97,7 +103,46 @@ export function loadSoundSettings(storage: KeyValueStorage | null = defaultStora
 }
 
 export function saveSoundSettings(s: SoundSettings, storage: KeyValueStorage | null = defaultStorage()): void {
+  const normalized: SoundSettings = { ...s, volume: clampVolume(s.volume) };
   try {
-    storage?.setItem(SOUND_SETTINGS_KEY, JSON.stringify({ ...s, volume: clampVolume(s.volume) }));
-  } catch { /* modo privado: se queda en memoria */ }
+    if (!storage) throw new Error("sin storage");
+    storage.setItem(SOUND_SETTINGS_KEY, JSON.stringify(normalized));
+    unpersisted = null;
+  } catch {
+    unpersisted = normalized; // modo privado: se queda en memoria
+  }
+}
+
+// ---- ráfagas: un solo aviso por tipo y poll ----
+
+export type AlertLabel = { who: string; where: string };
+export type AlertSummary = {
+  /** Sonidos a reproducir, en orden y sin repetir tipo: "blocked" antes que "done". */
+  cues: AlertKind[];
+  toasts: { text: string; kind: AlertKind }[];
+};
+
+const KINDS: readonly AlertKind[] = ["blocked", "done"];
+
+/** Agrupa los eventos de un poll: un cue por tipo y un toast por tipo (específico si es uno, conteo si son varios). */
+export function summarizeAlerts(
+  events: readonly AlertEvent[],
+  enabledKinds: Readonly<Record<AlertKind, boolean>>,
+  describe: (key: string) => AlertLabel,
+): AlertSummary {
+  const cues: AlertKind[] = [];
+  const toasts: AlertSummary["toasts"] = [];
+  for (const kind of KINDS) {
+    if (!enabledKinds[kind]) continue;
+    const of = events.filter((e) => e.kind === kind);
+    if (of.length === 0) continue;
+    cues.push(kind);
+    if (of.length === 1) {
+      const { who, where } = describe(of[0].key);
+      toasts.push({ kind, text: `${who} ${kind === "blocked" ? "necesita input" : "terminó"} · ${where}` });
+    } else {
+      toasts.push({ kind, text: `${of.length} agentes ${kind === "blocked" ? "necesitan input" : "terminaron"}` });
+    }
+  }
+  return { cues, toasts };
 }

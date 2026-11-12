@@ -16,8 +16,8 @@ import Mosaic from "./components/Mosaic";
 import AgentLogo from "./components/AgentLogo";
 import { MOSAIC_QUERY, useMediaQuery } from "./lib/use-media-query";
 import { paneStatus } from "./lib/pane-status";
-import { diffAlerts, loadSoundSettings, paneAlertKey, type AlertState, type StatusMap } from "./lib/alert-sounds";
-import { installAudioUnlock, playAlertSound } from "./lib/alert-audio";
+import { diffAlerts, loadSoundSettings, paneAlertKey, summarizeAlerts, type AlertLabel, type AlertState, type StatusMap } from "./lib/alert-sounds";
+import { installAudioUnlock, playAlertSequence } from "./lib/alert-audio";
 
 const BASE = import.meta.env.BASE_URL;
 const NAV = [
@@ -62,6 +62,7 @@ export default function App() {
   const firstPoll = useRef(true);
   const alertState = useRef<AlertState | null>(null); // avisos sonoros: estado entre polls (null = aún sin primer snapshot)
   const sheetRef = useRef<{ agentId: string | null; paneId?: string }>({ agentId: null }); // el poll vive en un efecto [] y lee esto
+  const sheetActivePane = useRef<string | null | undefined>(undefined); // pane activo que reporta la hoja (undefined = aún sin reporte)
   // Focus mode: scope the panel to ONE tracked project (per device, localStorage). null = todo.
   // On phones the first visit asks "¿en qué vas a trabajar?" — on desktop it never interrupts.
   const [projectList, setProjectList] = useState<FocusProject[]>([]);
@@ -106,12 +107,12 @@ export default function App() {
   };
 
   // Avisos sonoros: agente que necesita input o termina. La lógica vive en lib/alert-sounds.
-  // focusedKey = pane que la persona mira (hoja de terminal abierta y pestaña visible): la hoja
-  // guarda su pane activo internamente, así que aquí solo se conoce si vino de Mosaic
-  // (initialPaneId) o si el agente tiene un único pane; con varios panes y sin initialPaneId → null.
+  // focusedKey = pane que la persona mira (hoja de terminal abierta y pestaña visible). El pane
+  // activo lo reporta la hoja (onActivePaneChange); hasta el primer reporte se usa initialPaneId
+  // o el único pane del agente.
   const raiseSoundAlerts = (rows: AgentRow[]) => {
     const statuses: Record<string, ReturnType<typeof paneStatus>> = {};
-    const labels: Record<string, { who: string; where: string }> = {};
+    const labels: Record<string, AlertLabel> = {};
     for (const a of rows) for (const p of a.panes ?? []) {
       const key = paneAlertKey(agentKey(a), p.paneId);
       statuses[key] = paneStatus(p);
@@ -119,19 +120,17 @@ export default function App() {
     }
     const { agentId, paneId } = sheetRef.current;
     const open = agentId ? rows.find((a) => agentKey(a) === agentId) : undefined;
-    const sheetPane = paneId ?? (open?.panes?.length === 1 ? open.panes[0].paneId : undefined);
+    const reported = sheetActivePane.current;
+    const sheetPane = reported !== undefined ? reported ?? undefined : paneId ?? (open?.panes?.length === 1 ? open.panes[0].paneId : undefined);
     const visible = typeof document === "undefined" || document.visibilityState === "visible";
     const focusedKey = open && sheetPane && visible ? paneAlertKey(agentKey(open), sheetPane) : null;
     const { events, state } = diffAlerts(alertState.current, statuses as StatusMap, Date.now(), { focusedKey });
     alertState.current = state;
     const cfg = loadSoundSettings();
     if (!cfg.enabled) return;
-    for (const ev of events) {
-      if (!cfg[ev.kind]) continue;
-      const { who, where } = labels[ev.key] ?? { who: "Agente", where: "" };
-      playAlertSound(ev.kind, cfg.volume);
-      pushToast(`${who} ${ev.kind === "blocked" ? "necesita input" : "terminó"} · ${where}`, ev.kind === "blocked");
-    }
+    const { cues, toasts: groups } = summarizeAlerts(events, cfg, (k) => labels[k] ?? { who: "Agente", where: "" });
+    if (cues.length) void playAlertSequence(cues, cfg.volume);
+    for (const t of groups) pushToast(t.text, t.kind === "blocked");
   };
   const raiseSoundAlertsRef = useRef(raiseSoundAlerts);
   raiseSoundAlertsRef.current = raiseSoundAlerts;
@@ -140,8 +139,10 @@ export default function App() {
   // daemon: poll system status on an interval (configurable in Settings) → live agent status
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | undefined;
-    const tick = () => getStatus().then((s) => {
-      if (!s) return;
+    let cancelled = false; // el cleanup del efecto (incl. StrictMode) descarta respuestas en vuelo
+    let latest = 0; // solo la respuesta del último request puede actualizar estado
+    const tick = () => { const id = ++latest; getStatus().then((s) => {
+      if (!s || cancelled || id !== latest) return;
       setAgents(s.agents);
       if (s.projectList) {
         setProjectList(s.projectList);
@@ -158,7 +159,7 @@ export default function App() {
       raiseSoundAlertsRef.current(s.agents);
       prevAgents.current = Object.fromEntries(s.agents.map((a) => [agentKey(a), a.running]));
       firstPoll.current = false;
-    });
+    }); };
     const start = () => {
       clearInterval(timer);
       tick();
@@ -167,7 +168,7 @@ export default function App() {
     };
     start();
     window.addEventListener("mt3k:refresh-change", start);
-    return () => { clearInterval(timer); window.removeEventListener("mt3k:refresh-change", start); };
+    return () => { cancelled = true; clearInterval(timer); window.removeEventListener("mt3k:refresh-change", start); };
   }, []);
 
   // keyboard shortcuts: Cmd/Ctrl+K or "/" → search · 1-9 → switch project
@@ -394,7 +395,7 @@ export default function App() {
       )}
 
       {/* shared terminal/compose sheet — opened from Agents View or the sidebar quick-access list */}
-      <AgentTerminalSheet agent={sheetAgent} initialPaneId={sheetInitialPaneId} projects={manifest?.projects ?? []} focusProjectId={focus?.id} focusPath={focus?.path} onClose={() => { setSheetAgentId(null); setSheetInitialPaneId(undefined); }} onToast={pushToast} onOpenPath={openInFiles} />
+      <AgentTerminalSheet agent={sheetAgent} initialPaneId={sheetInitialPaneId} projects={manifest?.projects ?? []} focusProjectId={focus?.id} focusPath={focus?.path} onClose={() => { setSheetAgentId(null); setSheetInitialPaneId(undefined); }} onToast={pushToast} onOpenPath={openInFiles} onActivePaneChange={(id) => { sheetActivePane.current = id; }} />
 
       <Mosaic open={mosaicOpen && canMosaic} sessions={viewSessions} onClose={() => setMosaicOpen(false)} onExpand={expandFromMosaic} onToast={pushToast} onOpenPath={openInFiles} />
 
