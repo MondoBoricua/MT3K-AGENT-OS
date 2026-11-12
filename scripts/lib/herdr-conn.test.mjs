@@ -276,3 +276,26 @@ test('R4-1: a fresh connection still in hello is never returned by a canSpawn th
   assert.equal(conn.stats().failures, 0);
   assert.ok(fake.children.length >= 1);
 });
+
+test('spawn env: the resolved runtime dir reaches hc connect; nothing resolved keeps the same env object', async t => {
+  const env = { EXAMPLE: 'yes' };
+  const withRuntime = setup(t, {}, { env, resolveEnv: async () => ({ XDG_RUNTIME_DIR: '/run/user/0' }) });
+  assert.equal((await withRuntime.conn.snapshot('t9')).ok, true);
+  assert.deepEqual(withRuntime.fake.children[0].options.env, { EXAMPLE: 'yes', XDG_RUNTIME_DIR: '/run/user/0' });
+  assert.deepEqual(env, { EXAMPLE: 'yes' }, 'input env is not mutated');
+  const plain = setup(t, {}, { env, resolveEnv: async () => ({}) });
+  assert.equal((await plain.conn.snapshot('t9')).ok, true);
+  assert.equal(plain.fake.children[0].options.env, env);
+});
+
+test('spawn env: a throwing resolver falls back to the plain env; canSpawn=false never resolves nor spawns', async t => {
+  const env = { EXAMPLE: 'yes' };
+  const throwing = setup(t, {}, { env, resolveEnv: async () => { throw new Error('boom'); } });
+  assert.equal((await throwing.conn.snapshot('t9')).ok, true);
+  assert.equal(throwing.fake.children[0].options.env, env);
+  let resolved = 0;
+  const denied = setup(t, {}, { env, canSpawn: async () => false, resolveEnv: async () => { resolved++; return {}; } });
+  assert.equal((await denied.conn.snapshot('t9')).ok, false);
+  assert.equal(denied.fake.children.length, 0);
+  assert.equal(resolved, 0);
+});

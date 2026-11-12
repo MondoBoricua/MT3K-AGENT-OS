@@ -8,6 +8,9 @@ import {
   addressOf,
   coreRunningFromStatus,
   coreSocketCandidates,
+  fallbackRuntimeDir,
+  locateHcCore,
+  resolveHcEnv,
   probeUnixSocket,
   createHerdr,
   decideKill,
@@ -199,12 +202,13 @@ test("findHc: win32 localAppData y .exe en PATH calificado", () => {
 });
 
 test("coreSocketCandidates: XDG_STATE_HOME, HOME, HC_SESSION y XDG_RUNTIME_DIR", () => {
-  assert.deepEqual(coreSocketCandidates({ env: { HOME: "/h" } }), ["/h/.local/state/herdr-core/default/default.sock"]);
+  const mac = { platform: "darwin", uid: 501 };
+  assert.deepEqual(coreSocketCandidates({ env: { HOME: "/h" }, ...mac }), ["/h/.local/state/herdr-core/default/default.sock"]);
   assert.deepEqual(
-    coreSocketCandidates({ env: { XDG_STATE_HOME: "/x", HC_SESSION: "s1", HOME: "/h", XDG_RUNTIME_DIR: "/r" } }),
+    coreSocketCandidates({ env: { XDG_STATE_HOME: "/x", HC_SESSION: "s1", HOME: "/h", XDG_RUNTIME_DIR: "/r" }, ...mac }),
     ["/r/herdr-core/s1.sock", "/x/herdr-core/s1/s1.sock"],
   );
-  assert.deepEqual(coreSocketCandidates({ env: {}, home: "/fallback" }), ["/fallback/.local/state/herdr-core/default/default.sock"]);
+  assert.deepEqual(coreSocketCandidates({ env: {}, home: "/fallback", ...mac }), ["/fallback/.local/state/herdr-core/default/default.sock"]);
 });
 
 test("probeUnixSocket: acepta, ENOENT y ECONNREFUSED (socket huérfano)", async () => {
@@ -232,13 +236,13 @@ test("running() POSIX: el probe recibe la ruta de HC_SESSION/XDG del env inyecta
   const seen = [];
   const exec = (_f, _a, _o, cb) => cb(null, '{"holder":{"current":true},"live":1}');
   const h = createHerdr({
-    hcPath: "/bin/hc", exec, platform: "linux",
+    hcPath: "/bin/hc", exec, platform: "linux", uid: null,
     env: { HC_SESSION: "zz", XDG_STATE_HOME: "/st" },
     probe: async (p) => { seen.push(p); return true; },
   });
   assert.equal(await h.running(), true);
   assert.deepEqual(seen, ["/st/herdr-core/zz/zz.sock"]);
-  assert.equal(coreSocketCandidates({ env: { HC_SESSION: "zz", XDG_STATE_HOME: "/st", XDG_RUNTIME_DIR: "/rt" } }).length, 2);
+  assert.equal(coreSocketCandidates({ env: { HC_SESSION: "zz", XDG_STATE_HOME: "/st", XDG_RUNTIME_DIR: "/rt" }, platform: "darwin" }).length, 2);
 });
 
 test("running() win32: no sondea socket, usa hc server status", async () => {
@@ -294,7 +298,7 @@ test("B2: el sondeo previo al exec es SIN caché positiva; el negativo se reutil
   let execs = 0;
   let t = 1000;
   const exec = (_f, _a, _o, cb) => { execs++; cb(null, "pantalla"); };
-  const h = createHerdr({ hcPath: "/bin/hc", exec, now: () => t, platform: "linux", probe: async () => { probes++; return alive; } });
+  const h = createHerdr({ hcPath: "/bin/hc", exec, now: () => t, platform: "linux", uid: null, probe: async () => { probes++; return alive; } });
   assert.equal((await h.read("hc:t1")).ok, true);
   assert.equal((await h.read("hc:t1")).ok, true);
   assert.equal(probes, 2); // un sondeo por exec
@@ -494,4 +498,115 @@ test("findHerdrApp: ~/.local/bin primero, luego PATH absoluto; ignora relativos 
   assert.equal(findHerdrApp({ home: "/zz", pathEnv: "rel:.", platform: "darwin", exists: ok }), null);
   const win = (p) => p === "C:\\L\\Programs\\herdr-app\\herdr-app.exe";
   assert.equal(findHerdrApp({ platform: "win32", localAppData: "C:\\L", pathEnv: "", exists: win }), "C:\\L\\Programs\\herdr-app\\herdr-app.exe");
+});
+
+// --- Linux sin XDG_RUNTIME_DIR: el core vive en /run/user/<uid> (servicio systemd) ---
+
+const LINUX_ENV = { HOME: "/root" }; // el servicio medido no trae XDG_RUNTIME_DIR ni XDG_STATE_HOME
+const STATE_SOCK = "/root/.local/state/herdr-core/default/default.sock";
+const RUNTIME_SOCK = "/run/user/0/herdr-core/default.sock";
+
+test("fallbackRuntimeDir: solo Linux, sin XDG_RUNTIME_DIR y con uid entero", () => {
+  assert.equal(fallbackRuntimeDir({ env: {}, platform: "linux", uid: 0 }), "/run/user/0");
+  assert.equal(fallbackRuntimeDir({ env: {}, platform: "linux", uid: 1000 }), "/run/user/1000");
+  assert.equal(fallbackRuntimeDir({ env: { XDG_RUNTIME_DIR: "/r" }, platform: "linux", uid: 0 }), null);
+  assert.equal(fallbackRuntimeDir({ env: {}, platform: "darwin", uid: 501 }), null);
+  assert.equal(fallbackRuntimeDir({ env: {}, platform: "win32", uid: 0 }), null);
+  assert.equal(fallbackRuntimeDir({ env: {}, platform: "linux", uid: null }), null);
+});
+
+test("coreSocketCandidates Linux: sin XDG_RUNTIME_DIR añade /run/user/<uid>; con él no lo duplica", () => {
+  assert.deepEqual(coreSocketCandidates({ env: LINUX_ENV, platform: "linux", uid: 0 }), [STATE_SOCK, RUNTIME_SOCK]);
+  assert.deepEqual(
+    coreSocketCandidates({ env: { ...LINUX_ENV, HC_SESSION: "s1" }, platform: "linux", uid: 1000 }),
+    ["/root/.local/state/herdr-core/s1/s1.sock", "/run/user/1000/herdr-core/s1.sock"],
+  );
+  assert.deepEqual(
+    coreSocketCandidates({ env: { ...LINUX_ENV, XDG_RUNTIME_DIR: "/rt" }, platform: "linux", uid: 0 }),
+    ["/rt/herdr-core/default.sock", STATE_SOCK],
+  );
+  // macOS y Windows: candidatos sin cambios
+  assert.deepEqual(coreSocketCandidates({ env: LINUX_ENV, platform: "darwin", uid: 501 }), [STATE_SOCK]);
+  assert.deepEqual(coreSocketCandidates({ env: LINUX_ENV, platform: "win32", uid: 0 }), [STATE_SOCK]);
+});
+
+function linuxHerdr({ alive, env = LINUX_ENV, platform = "linux", uid = 0 }) {
+  const calls = [];
+  const probed = [];
+  const exec = (file, argv, opts, cb) => { calls.push({ file, argv, env: opts.env }); cb(null, "{}"); };
+  const h = createHerdr({ hcPath: "/bin/hc", exec, env, platform, uid, probe: async (p) => { probed.push(p); return alive.includes(p); } });
+  return { h, calls, probed };
+}
+
+test("Linux: solo vive el socket de /run/user/<uid> → TODO hc corre con XDG_RUNTIME_DIR=/run/user/<uid>", async () => {
+  const { h, calls } = linuxHerdr({ alive: [RUNTIME_SOCK] });
+  assert.equal((await h.read("hc:t1")).ok, true);
+  assert.equal((await h.get("hc:t1")).ok, true);
+  assert.equal((await h.send("hc:t1", "x")).ok, true);
+  assert.equal((await h.keys("hc:t1", ["enter"])).ok, true);
+  assert.equal((await h.interrupt("hc:t1")).ok, true);
+  assert.equal((await h.run({ argv: ["/bin/sh"], cwd: "/tmp", name: "mt3k-x" })).ok !== undefined, true);
+  assert.equal((await h.killTerminal("hc:t1", { force: true })).ok !== undefined, true);
+  assert.ok(calls.length >= 5);
+  for (const c of calls) assert.equal(c.env.XDG_RUNTIME_DIR, "/run/user/0", c.argv.join(" "));
+  assert.deepEqual(await h.hcEnv(), { XDG_RUNTIME_DIR: "/run/user/0" });
+  assert.equal(await h.coreAlive(), true);
+});
+
+test("Linux: vive el socket de state → el entorno de hc NO cambia", async () => {
+  const { h, calls } = linuxHerdr({ alive: [STATE_SOCK] });
+  assert.equal((await h.read("hc:t1")).ok, true);
+  assert.equal(calls.length, 1);
+  // runExec mezcla con process.env: lo único que no puede aparecer es un XDG_RUNTIME_DIR puesto por el adaptador
+  assert.equal(calls[0].env.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR);
+  assert.equal(calls[0].env.HOME, "/root");
+  assert.deepEqual(await h.hcEnv(), {});
+});
+
+test("Linux: viven ambos → gana el de state (lo que hc usaría sin cambios)", async () => {
+  const { h, calls } = linuxHerdr({ alive: [STATE_SOCK, RUNTIME_SOCK] });
+  assert.equal((await h.read("hc:t1")).ok, true);
+  assert.equal(calls[0].env.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR);
+});
+
+test("Linux: ninguno vivo → cero llamadas a hc, en todos los métodos", async () => {
+  const { h, calls, probed } = linuxHerdr({ alive: [] });
+  assert.equal(await h.running(), false);
+  assert.deepEqual(await h.list(), []);
+  assert.equal((await h.read("hc:t1")).ok, false);
+  assert.equal((await h.run({ argv: ["/bin/sh"], cwd: "/tmp", name: "mt3k-x" })).ok, false);
+  assert.deepEqual(await h.hcEnv(), {});
+  assert.equal(calls.length, 0);
+  assert.deepEqual(probed.slice(0, 2), [STATE_SOCK, RUNTIME_SOCK]); // se probaron los dos candidatos
+});
+
+test("Linux con XDG_RUNTIME_DIR ya definido: no se toca el entorno aunque viva su socket", async () => {
+  const env = { ...LINUX_ENV, XDG_RUNTIME_DIR: "/rt" };
+  const { h, calls } = linuxHerdr({ alive: ["/rt/herdr-core/default.sock"], env });
+  assert.equal((await h.read("hc:t1")).ok, true);
+  assert.equal(calls[0].env.XDG_RUNTIME_DIR, "/rt");
+});
+
+test("macOS y win32: sin sondeo extra ni XDG_RUNTIME_DIR añadido", async () => {
+  const mac = linuxHerdr({ alive: [RUNTIME_SOCK, STATE_SOCK], platform: "darwin", uid: 501 });
+  assert.equal((await mac.h.read("hc:t1")).ok, true);
+  assert.deepEqual(mac.probed, [STATE_SOCK]);
+  assert.equal(mac.calls[0].env.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR);
+  const macOnlyRuntime = linuxHerdr({ alive: [RUNTIME_SOCK], platform: "darwin", uid: 501 });
+  assert.equal((await macOnlyRuntime.h.read("hc:t1")).ok, false);
+  assert.equal(macOnlyRuntime.calls.length, 0);
+  const win = linuxHerdr({ alive: [], platform: "win32", uid: 0 });
+  assert.equal((await win.h.read("hc:t1")).ok, true);
+  assert.equal(win.probed.length, 0);
+});
+
+test("locateHcCore / resolveHcEnv: null sin core, {} con state vivo, overlay solo con runtime vivo", async () => {
+  const base = { env: LINUX_ENV, platform: "linux", uid: 0 };
+  assert.equal(await locateHcCore({ ...base, probe: async () => false }), null);
+  assert.deepEqual(await locateHcCore({ ...base, probe: async (p) => p === STATE_SOCK }), {});
+  assert.deepEqual(await locateHcCore({ ...base, probe: async (p) => p === RUNTIME_SOCK }), { XDG_RUNTIME_DIR: "/run/user/0" });
+  assert.deepEqual(await resolveHcEnv({ ...base, probe: async (p) => p === RUNTIME_SOCK }), { XDG_RUNTIME_DIR: "/run/user/0" });
+  assert.deepEqual(await resolveHcEnv({ ...base, probe: async () => false }), {});
+  assert.deepEqual(await resolveHcEnv({ env: LINUX_ENV, platform: "darwin", uid: 501, probe: async () => true }), {});
+  assert.deepEqual(base.env, LINUX_ENV); // no muta
 });

@@ -93,18 +93,51 @@ export function findHerdrApp(opts = {}) {
 }
 
 /**
+ * Linux sin XDG_RUNTIME_DIR en el entorno (p. ej. un servicio systemd): el core pudo arrancarse desde una sesión
+ * de login y escuchar en `/run/user/<uid>/herdr-core/<s>.sock`. Devuelve ese directorio, o null si no aplica
+ * (otra plataforma, XDG_RUNTIME_DIR ya definido o uid desconocido).
+ */
+export function fallbackRuntimeDir({ env = process.env, platform = process.platform, uid = process.getuid?.() } = {}) {
+  if (platform !== "linux" || env.XDG_RUNTIME_DIR) return null;
+  if (!Number.isInteger(uid) || uid < 0) return null;
+  return posix.join("/run/user", String(uid));
+}
+
+/**
  * Sockets unix donde puede escuchar el core en POSIX. Medido en esta Mac (hc 0.1.20):
  * sin XDG_RUNTIME_DIR → ${XDG_STATE_HOME:-~/.local/state}/herdr-core/<s>/<s>.sock; con XDG_RUNTIME_DIR
  * → $XDG_RUNTIME_DIR/herdr-core/<s>.sock. `core.json` solo trae id/name/machine_id (sin pid).
+ * En Linux sin XDG_RUNTIME_DIR se añade además `/run/user/<uid>/herdr-core/<s>.sock` (ver `fallbackRuntimeDir`).
  */
-export function coreSocketCandidates({ env = process.env, home = homedir(), isSocket = isSocketFile } = {}) {
+export function coreSocketCandidates({ env = process.env, home = homedir(), isSocket = isSocketFile, platform = process.platform, uid = process.getuid?.() } = {}) {
   const session = env.HC_SESSION || "default";
   const state = env.XDG_STATE_HOME || posix.join(env.HOME || home, ".local", "state");
   const out = [posix.join(state, "herdr-core", session, `${session}.sock`)];
   if (env.XDG_RUNTIME_DIR) out.unshift(posix.join(env.XDG_RUNTIME_DIR, "herdr-core", `${session}.sock`));
+  const runtimeDir = fallbackRuntimeDir({ env, platform, uid });
+  if (runtimeDir) out.push(posix.join(runtimeDir, "herdr-core", `${session}.sock`));
   // HC_SOCKET: se respeta solo si es una ruta absoluta a un socket que existe; si no, se ignora.
   if (env.HC_SOCKET && posix.isAbsolute(env.HC_SOCKET) && isSocket(env.HC_SOCKET)) out.unshift(env.HC_SOCKET);
   return out;
+}
+
+/**
+ * Sondea los sockets candidatos. Devuelve null si ninguno acepta conexiones; si no, el entorno extra que `hc` necesita
+ * para usar ese MISMO core: `{ XDG_RUNTIME_DIR }` solo cuando el único socket vivo es el de `/run/user/<uid>` (Linux sin
+ * XDG_RUNTIME_DIR, es el último candidato), `{}` en cualquier otro caso. Nunca arranca nada.
+ */
+export async function locateHcCore({ env = process.env, home = homedir(), isSocket = isSocketFile, platform = process.platform, uid = process.getuid?.(), probe = probeUnixSocket } = {}) {
+  const socks = coreSocketCandidates({ env, home, isSocket, platform, uid });
+  const alive = (await Promise.all(socks.map((sk) => probe(sk)))).map(Boolean);
+  if (!alive.some(Boolean)) return null;
+  const runtimeDir = fallbackRuntimeDir({ env, platform, uid });
+  const onlyRuntime = runtimeDir !== null && alive[alive.length - 1] && !alive.slice(0, -1).some(Boolean);
+  return onlyRuntime ? { XDG_RUNTIME_DIR: runtimeDir } : {};
+}
+
+/** Entorno extra para lanzar `hc` hacia el core vivo (`{}` si no hace falta o no hay core). */
+export async function resolveHcEnv(opts = {}) {
+  return (await locateHcCore(opts)) ?? {};
 }
 
 /** ¿Alguien acepta conexiones en este socket unix? ENOENT/ECONNREFUSED/timeout → false. Nunca lanza. */
@@ -324,6 +357,7 @@ export function createHerdr({
   now = Date.now,
   platform = process.platform,
   probe = probeUnixSocket,
+  uid = process.getuid?.(),
 } = {}) {
   let runningCache = null;
   let negative = null; // { at } último sondeo NEGATIVO (se reutiliza ≤ NEGATIVE_CACHE_MS)
@@ -335,22 +369,38 @@ export function createHerdr({
    * win32: `hc server status` nunca arranca un core (manual), no se sondea.
    */
   async function coreAlive() {
-    if (platform === "win32") return true;
-    if (!hcPath) return false;
+    return (await locateCore()) !== null;
+  }
+
+  /**
+   * Como `coreAlive`, pero devuelve el entorno extra que `hc` necesita para llegar a ese mismo core ({} si ninguno),
+   * o null si no hay core vivo. win32: siempre {}.
+   */
+  async function locateCore() {
+    if (platform === "win32") return {};
+    if (!hcPath) return null;
     const t = now();
-    if (negative && t - negative.at < NEGATIVE_CACHE_MS) return false;
-    const socks = coreSocketCandidates({ env: env ? { ...process.env, ...env } : process.env });
-    const alive = (await Promise.all(socks.map((sk) => probe(sk)))).some(Boolean);
-    if (alive) { negative = null; return true; }
-    negative = { at: t };
-    runningCache = { value: false, at: t };
-    return false;
+    if (negative && t - negative.at < NEGATIVE_CACHE_MS) return null;
+    const extra = await locateHcCore({ env: env ? { ...process.env, ...env } : process.env, platform, uid, probe });
+    if (extra === null) {
+      negative = { at: t };
+      runningCache = { value: false, at: t };
+      return null;
+    }
+    negative = null;
+    return extra;
+  }
+
+  /** Entorno extra para procesos de Herdr (hc, herdr-app) hacia el core vivo; {} si no hace falta o no hay core. */
+  async function hcEnv() {
+    return (await locateCore()) ?? {};
   }
 
   /** Única vía de ejecución de hc. */
   async function execHc(argv, timeout = HC_TIMEOUT_MS, maxBuffer = HC_MAX_BUFFER) {
-    if (!(await coreAlive())) return { ok: false, code: "NOCORE" };
-    return runExec(exec, hcPath, argv, { timeout, env, maxBuffer });
+    const extra = await locateCore();
+    if (extra === null) return { ok: false, code: "NOCORE" };
+    return runExec(exec, hcPath, argv, { timeout, env: Object.keys(extra).length ? { ...env, ...extra } : env, maxBuffer });
   }
   const unavailable = (r) => r.code === "ENOENT" || r.code === "NOCORE";
 
@@ -502,5 +552,5 @@ export function createHerdr({
     return { ok: true, removed: rm.ok, forced: decision.forced };
   }
 
-  return { running, coreAlive, coreUp, invalidate, list, get, read, send, keys, interrupt, run, markOwned, killTerminal };
+  return { running, coreAlive, hcEnv, coreUp, invalidate, list, get, read, send, keys, interrupt, run, markOwned, killTerminal };
 }

@@ -83,8 +83,13 @@ export function createHerdrLauncher({
   env,
   nameSuffix,
 } = {}) {
+  // mismo entorno que hc usa hacia el core vivo (Linux sin XDG_RUNTIME_DIR); {} si no hace falta
+  const appEnv = async () => {
+    const extra = await Promise.resolve(getHerdr()?.hcEnv?.()).catch(() => ({}));
+    return extra && Object.keys(extra).length ? { ...env, ...extra } : env;
+  };
   const appUp = async (appPath) => {
-    const r = await runApp(exec, appPath, ["status"], APP_STATUS_TIMEOUT_MS, env);
+    const r = await runApp(exec, appPath, ["status"], APP_STATUS_TIMEOUT_MS, await appEnv());
     return r.ok;
   };
 
@@ -100,11 +105,12 @@ export function createHerdrLauncher({
   }
 
   async function viaApp(appPath, { argv, cwd, agentId }) {
-    const ls = await runApp(exec, appPath, ["ls"], APP_LS_TIMEOUT_MS, env);
+    const e = await appEnv();
+    const ls = await runApp(exec, appPath, ["ls"], APP_LS_TIMEOUT_MS, e);
     if (!ls.ok) return { ok: false, retryable: true, err: "herdr-app ls falló" };
     const space = findSpaceByFolder(parseAppSpaces(ls.out), cwd);
     const doArgv = appDoArgv({ space: space?.id, folder: cwd, argv, agentName: String(agentId), spaceName: basename(cwd) || "home" });
-    const r = await runApp(exec, appPath, doArgv, APP_DO_TIMEOUT_MS, env);
+    const r = await runApp(exec, appPath, doArgv, APP_DO_TIMEOUT_MS, e);
     // exit ≠ 0 con {"error": …} = la app rechazó el comando sin crear nada → se puede caer a `hc run`.
     // Timeout o respuesta ilegible: puede haberse creado → NO se reintenta (evita duplicados).
     if (!r.ok) {

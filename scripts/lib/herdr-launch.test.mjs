@@ -215,3 +215,30 @@ test("fallo tras despachar hc run (timeout / respuesta ilegible / core muerto de
   const safe = fakeHc({ runs: [{ ok: false, err: "hc no disponible", code: "NOCORE" }] });
   assert.equal((await mk({ hc: safe, app: fakeApp({}) }).launch(INPUT)).reason, "no-core");
 });
+
+test("herdr-app corre con el mismo entorno que hc hacia el core (Linux: XDG_RUNTIME_DIR de /run/user)", async () => {
+  const seen = [];
+  const exec = (_file, argv, opts, cb) => {
+    seen.push({ cmd: argv[0], env: opts.env });
+    cb(null, argv[0] === "ls" ? LS : argv[0] === "do" ? '{"terminal":"t9"}' : "ok");
+  };
+  const hc = { ...fakeHc(), hcEnv: async () => ({ XDG_RUNTIME_DIR: "/run/user/0" }) };
+  const l = createHerdrLauncher({ getHerdr: () => hc, findApp: () => APP, exec, nameSuffix: "abc", env: { A: "1" } });
+  const r = await l.launch(INPUT);
+  assert.equal(r.ok, true);
+  assert.deepEqual(seen.map((c) => c.cmd), ["status", "ls", "do"]);
+  for (const c of seen) assert.deepEqual({ A: c.env.A, X: c.env.XDG_RUNTIME_DIR }, { A: "1", X: "/run/user/0" }, c.cmd);
+  assert.equal((await l.status()).app, true);
+});
+
+test("herdr-app: sin overlay (hcEnv {} o ausente) el entorno es el original", async () => {
+  const envs = [];
+  const exec = (_f, argv, opts, cb) => { envs.push(opts.env); cb(null, "ok"); };
+  const base = { A: "1" };
+  for (const hc of [{ ...fakeHc(), hcEnv: async () => ({}) }, fakeHc()]) {
+    const l = createHerdrLauncher({ getHerdr: () => hc, findApp: () => APP, exec, env: base });
+    await l.status();
+  }
+  assert.equal(envs.length, 2);
+  for (const e of envs) assert.equal(e.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR);
+});
