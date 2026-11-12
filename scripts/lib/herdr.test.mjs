@@ -10,6 +10,7 @@ import {
   coreSocketCandidates,
   probeUnixSocket,
   createHerdr,
+  decideKill,
   findHc,
   findHerdrApp,
   isHerdrId,
@@ -258,8 +259,8 @@ test("running() POSIX: socket vivo pero status sin sesiones → false", async ()
 
 test("parseHcGet: foreground.cwd manda sobre cwd de lanzamiento; cols/rows y where", () => {
   const t9 = '{"address":"t9","cols":96,"rows":43,"cwd":"/Users/x","foreground":{"cwd":"/Users/x/proj","name":"2.1"},"labels":{"where":"P / 1"}}';
-  assert.deepEqual(parseHcGet(t9), { cwd: "/Users/x/proj", cols: 96, rows: 43, where: "P / 1", labels: { where: "P / 1" } });
-  assert.deepEqual(parseHcGet('{"cwd":"/a","cols":0,"rows":"x"}'), { cwd: "/a", cols: null, rows: null, where: null, labels: {} });
+  assert.deepEqual(parseHcGet(t9), { cwd: "/Users/x/proj", cols: 96, rows: 43, where: "P / 1", labels: { where: "P / 1" }, state: null });
+  assert.deepEqual(parseHcGet('{"cwd":"/a","cols":0,"rows":"x"}'), { cwd: "/a", cols: null, rows: null, where: null, labels: {}, state: null });
   assert.deepEqual(parseHcGet('{"cwd":"/a","labels":{"mt3k.panel":"1","n":5,"x":null}}').labels, { "mt3k.panel": "1" });
   assert.equal(parseHcGet("nope"), null);
 });
@@ -268,7 +269,7 @@ test("createHerdr: get usa argv fijo y valida el id", async () => {
   const calls = [];
   const exec = (_f, argv, _o, cb) => { calls.push(argv); cb(null, '{"cwd":"/a","cols":80,"rows":24}'); };
   const h = createHerdr({ probe: async () => true, hcPath: "/bin/hc", exec });
-  assert.deepEqual(await h.get("hc:t9"), { ok: true, cwd: "/a", cols: 80, rows: 24, where: null, labels: {} });
+  assert.deepEqual(await h.get("hc:t9"), { ok: true, cwd: "/a", cols: 80, rows: 24, where: null, labels: {}, state: null });
   assert.deepEqual(calls, [["get", "t9", "--json"]]);
   assert.deepEqual(await h.get("hc:-x"), { ok: false, err: "terminal inválido" });
 });
@@ -426,32 +427,64 @@ test("markOwned: hc label <t> mt3k.panel=1", async () => {
   assert.equal((await h.markOwned("hc:-x")).ok, false);
 });
 
-test("killOwned: solo con etiqueta mt3k.panel=1 releída; kill y luego rm", async () => {
-  const owned = '{"address":"t4","cwd":"/a","labels":{"mt3k.panel":"1"}}';
-  let m = mkHerdr([{ out: owned }, { out: "{}" }, { out: '{"removed":"t4"}' }]);
-  assert.deepEqual(await m.h.killOwned("hc:t4"), { ok: true, removed: true });
+const LIVE = (labels) => `{"address":"t4","cwd":"/a","state":"live","labels":${labels}}`;
+const OWNED_LIVE = LIVE('{"mt3k.panel":"1"}');
+
+test("killTerminal: del panel (etiqueta releída) → get, kill y rm; sin force", async () => {
+  let m = mkHerdr([{ out: OWNED_LIVE }, { out: "{}" }, { out: '{"removed":"t4"}' }]);
+  assert.deepEqual(await m.h.killTerminal("hc:t4"), { ok: true, removed: true, forced: false });
   assert.deepEqual(m.calls.map((c) => c.argv), [["get", "t4", "--json"], ["kill", "t4", "--json"], ["rm", "t4", "--json"]]);
-  // rm falla (aún no terminado): sigue siendo éxito
-  m = mkHerdr([{ out: owned }, { out: "{}" }, { err: 1, out: "" }]);
-  assert.deepEqual(await m.h.killOwned("hc:t4"), { ok: true, removed: false });
-  // terminal ajeno (sin etiqueta o con otro valor): ni kill ni rm
+  m = mkHerdr([{ out: OWNED_LIVE }, { out: "{}" }, { err: 1, out: "" }]); // rm falla: sigue siendo éxito
+  assert.deepEqual(await m.h.killTerminal("hc:t4"), { ok: true, removed: false, forced: false });
+});
+
+test("killTerminal: ajeno sin force (o force no estrictamente true) → 409 needsConfirm y NO se mata", async () => {
   for (const labels of ["{}", '{"mt3k.panel":"0"}', '{"where":"x"}']) {
-    m = mkHerdr([{ out: `{"address":"t5","cwd":"/a","labels":${labels}}` }]);
-    const r = await m.h.killOwned("hc:t5");
-    assert.deepEqual([r.ok, r.status], [false, 400]);
+    for (const force of [undefined, false, "true", 1, "yes", null, {}]) {
+      const m = mkHerdr([{ out: LIVE(labels) }]);
+      const r = await m.h.killTerminal("hc:t4", { force });
+      assert.deepEqual([r.ok, r.status, r.needsConfirm], [false, 409, true]);
+      assert.match(r.err, /no la abrió el panel/);
+      assert.equal(m.calls.length, 1); // solo el get
+    }
+  }
+});
+
+test("killTerminal: ajeno con force === true → kill y rm, marcado forced", async () => {
+  const m = mkHerdr([{ out: LIVE("{}") }, { out: "{}" }, { out: "{}" }]);
+  assert.deepEqual(await m.h.killTerminal("hc:t4", { force: true }), { ok: true, removed: true, forced: true });
+  assert.deepEqual(m.calls.map((c) => c.argv[0]), ["get", "kill", "rm"]);
+});
+
+test("killTerminal: no vivo / inexistente / id inválido / core caído → no se mata (404/400), ni con force", async () => {
+  for (const state of ["finished", "exited", ""]) {
+    const m = mkHerdr([{ out: `{"address":"t4","state":"${state}","labels":{"mt3k.panel":"1"}}` }]);
+    assert.equal((await m.h.killTerminal("hc:t4", { force: true })).status, 404);
     assert.equal(m.calls.length, 1);
   }
-  // desaparecido / id inválido / core caído
+  let m = mkHerdr([{ out: '{"address":"t4","labels":{}}' }]); // sin state
+  assert.equal((await m.h.killTerminal("hc:t4", { force: true })).status, 404);
   m = mkHerdr([{ err: 3, out: "" }]);
-  assert.deepEqual([(await m.h.killOwned("hc:t9")).status], [404]);
-  assert.deepEqual([(await m.h.killOwned("nope")).status], [400]);
-  m = mkHerdr([], { alive: false });
-  assert.deepEqual([(await m.h.killOwned("hc:t9")).status], [404]);
+  assert.equal((await m.h.killTerminal("hc:t9", { force: true })).status, 404);
+  m = mkHerdr([]);
+  assert.equal((await m.h.killTerminal("nope", { force: true })).status, 400);
   assert.equal(m.calls.length, 0);
-  // kill falla → 500 y no se intenta rm
-  m = mkHerdr([{ out: owned }, { err: 1, out: "" }]);
-  assert.deepEqual([(await m.h.killOwned("hc:t4")).status], [500]);
+  m = mkHerdr([], { alive: false });
+  assert.equal((await m.h.killTerminal("hc:t9", { force: true })).status, 404);
+  assert.equal(m.calls.length, 0); // sin core NO se ejecuta hc
+  m = mkHerdr([{ out: OWNED_LIVE }, { err: 1, out: "" }]); // kill falla → 500, sin rm
+  assert.equal((await m.h.killTerminal("hc:t4")).status, 500);
   assert.equal(m.calls.length, 2);
+});
+
+test("decideKill: tabla pura", () => {
+  const info = (labels, state = "live") => ({ ok: true, labels, state });
+  assert.deepEqual(decideKill(info({ "mt3k.panel": "1" }), undefined), { kill: true, forced: false });
+  assert.deepEqual(decideKill(info({}), true), { kill: true, forced: true });
+  assert.equal(decideKill(info({}), "true").status, 409);
+  assert.equal(decideKill(info({}, "finished"), true).status, 404);
+  assert.equal(decideKill({ ok: false, err: "get falló" }, true).status, 404);
+  assert.equal(decideKill({ ok: false, err: "terminal inválido" }, true).status, 400);
 });
 
 test("findHerdrApp: ~/.local/bin primero, luego PATH absoluto; ignora relativos y '.'", () => {

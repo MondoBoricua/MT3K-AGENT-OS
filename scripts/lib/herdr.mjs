@@ -222,6 +222,7 @@ export function parseHcGet(jsonText) {
     rows: size(d.rows),
     where: typeof d.labels?.where === "string" ? d.labels.where : null,
     labels,
+    state: typeof d.state === "string" ? d.state : null,
   };
 }
 
@@ -274,6 +275,22 @@ function runInputError({ argv, cwd, name }) {
     if (typeof a !== "string" || a.length === 0 || a.includes("\0") || Buffer.byteLength(a, "utf8") > RUN_ARG_MAX_BYTES) return "comando inválido";
   }
   return null;
+}
+
+export const KILL_NEEDS_CONFIRM = "esta terminal no la abrió el panel; confirma para cerrarla";
+
+/**
+ * Decisión pura de cierre sobre el resultado de `get`: solo un terminal VIVO se cierra; uno del panel
+ * (mt3k.panel=1) siempre, uno ajeno solo con force === true (booleano estricto).
+ */
+export function decideKill(info, force) {
+  if (!info || info.ok !== true) {
+    return info?.err === "terminal inválido" ? { kill: false, status: 400, err: info.err } : { kill: false, status: 404, err: "ese pane ya no existe" };
+  }
+  if (info.state !== "live") return { kill: false, status: 404, err: "ese pane ya no existe" };
+  if (info.labels?.[PANEL_LABEL_KEY] === "1") return { kill: true, forced: false };
+  if (force === true) return { kill: true, forced: true };
+  return { kill: false, status: 409, needsConfirm: true, err: KILL_NEEDS_CONFIRM };
 }
 
 /** Dirección `tN` del JSON de `hc run`/`hc label`; null si no hay una válida. */
@@ -467,20 +484,23 @@ export function createHerdr({
   }
 
   /**
-   * Cierra SOLO un terminal creado por el panel: relee las etiquetas (`hc get`) justo antes y exige `mt3k.panel=1`.
+   * Cierra un terminal: relee `hc get` justo antes (debe existir y estar vivo). Los del panel (`mt3k.panel=1`) se cierran;
+   * los ajenos solo con `force === true`, si no 409 needsConfirm y no se toca nada (ver decideKill).
    * `hc kill` y luego `hc rm`; si rm falla (terminal aún no terminado) no es error: queda terminado y hc lo oculta.
    */
-  async function killOwned(id) {
-    const info = await get(id);
-    if (!info.ok) return info.err === "terminal inválido" ? { ok: false, status: 400, err: info.err } : { ok: false, status: 404, err: "ese pane ya no existe" };
-    if (info.labels?.[PANEL_LABEL_KEY] !== "1") return { ok: false, status: 400, err: "solo se pueden cerrar los terminales que abrió el panel" };
+  async function killTerminal(id, { force = false } = {}) {
+    const decision = decideKill(await get(id), force);
+    if (!decision.kill) {
+      const { kill: _k, ...denied } = decision;
+      return { ok: false, ...denied };
+    }
     const address = addressOf(id);
     const k = await execHc(["kill", address, "--json"]);
     if (!k.ok) return { ok: false, status: 500, err: unavailable(k) ? "hc no disponible" : "kill falló" };
     const rm = await execHc(["rm", address, "--json"]);
     invalidate();
-    return { ok: true, removed: rm.ok };
+    return { ok: true, removed: rm.ok, forced: decision.forced };
   }
 
-  return { running, coreAlive, coreUp, invalidate, list, get, read, send, keys, interrupt, run, markOwned, killOwned };
+  return { running, coreAlive, coreUp, invalidate, list, get, read, send, keys, interrupt, run, markOwned, killTerminal };
 }

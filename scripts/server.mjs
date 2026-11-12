@@ -93,6 +93,7 @@ import { createLedgerStore } from "./lib/ledger-store.mjs";
 import { isHerdrId } from "./lib/herdr.mjs";
 import { containsHerdrId, createHerdrPanes, herdrOccupies, herdrKeyArgs, herdrUnavailableBody } from "./lib/herdr-panes.mjs";
 import { createHerdrLauncher, herdrLaunchArgv } from "./lib/herdr-launch.mjs";
+import { LAUNCH_BACKENDS, parseLaunchBackend } from "./lib/launch-backend.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -1028,13 +1029,10 @@ function writeRestoreConfig(auto) {
 }
 
 // Dónde se crean las sesiones NUEVAS: "tmux" (por defecto, también si falta o está corrupto el archivo) o "herdr".
-const LAUNCH_BACKENDS = ["tmux", "herdr"];
 function readLaunchBackend() {
   if (process.env.MT3K_HERDR === "0") return "tmux";
   try {
-    if (!existsSync(LAUNCH_BACKEND_FILE)) return "tmux";
-    const b = readJSON(LAUNCH_BACKEND_FILE)?.backend;
-    return LAUNCH_BACKENDS.includes(b) ? b : "tmux";
+    return parseLaunchBackend(existsSync(LAUNCH_BACKEND_FILE) ? readFileSync(LAUNCH_BACKEND_FILE, "utf8") : null);
   } catch {
     return "tmux";
   }
@@ -2311,15 +2309,15 @@ async function api(req, res, path) {
 
   // kill an agent's tmux pane (its dedicated session dies with its last pane)
   if (path === "/api/kill" && req.method === "POST") {
-    const { paneId } = await body(req);
+    const { paneId, force } = await body(req);
     if (isHerdrId(paneId)) {
-      // solo terminales que abrió el panel (etiqueta mt3k.panel=1, releída por el adaptador al cerrar)
+      // los del panel (etiqueta mt3k.panel=1, releída al cerrar) se cierran; los ajenos solo con force === true
       const hc = herdrPanes.hc();
       if (!hc) return sendJSON(res, 400, herdrUnavailableBody());
-      const closed = await hc.killOwned(paneId);
+      const closed = await hc.killTerminal(paneId, { force: force === true });
       herdrPanes.invalidate();
-      if (!closed.ok) return sendJSON(res, closed.status, { ok: false, err: closed.err });
-      logEvent(`kill · ${paneId} · herdr`);
+      if (!closed.ok) return sendJSON(res, closed.status, { ok: false, err: closed.err, ...(closed.needsConfirm ? { needsConfirm: true } : {}) });
+      logEvent(`kill · ${paneId} · herdr${closed.forced ? " · forzado" : ""}`);
       return sendJSON(res, 200, { ok: true, paneId, ledger: "no-aplica" });
     }
     const paneCheck = validatePaneId(paneId);
