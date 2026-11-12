@@ -74,3 +74,45 @@ test("el logo existe en public/logos", () => {
   const svg = readFileSync(fileURLToPath(new URL("../../panel/public/logos/hermes.svg", import.meta.url)), "utf8");
   assert.match(svg, /^<svg /);
 });
+
+// ─── Junie ──────────────────────────────────────────────────────────────────────
+
+// El proceso real de Junie vive dentro de junie.app: `buildRunningSet` descarta los .app, así que el
+// conjunto `running` nunca lo trae. Por eso junie es `paneOnly`: vivo = un pane de tmux lo tiene.
+const JUNIE = { id: "junie", proc: ["junie"], paneOnly: true };
+const JUNIE_MAC_ROWS = rows([
+  [1, 0, "/sbin/launchd"],
+  [590, 1, "bash"], // el shim ~/.local/bin/junie
+  [600, 590, "/Users/x/.local/share/junie/versions/1/Applications/junie.app/Contents/MacOS/junie"],
+]);
+
+test("server.mjs declara junie en AGENT_DEFS con paneOnly", () => {
+  const src = readFileSync(fileURLToPath(new URL("../server.mjs", import.meta.url)), "utf8");
+  const line = src.split("\n").find((l) => /^\s*\{ id: "junie"/.test(l));
+  assert.ok(line, "falta la entrada junie");
+  assert.match(line, /bins: \["junie"\]/);
+  assert.match(line, /paths: \["~\/\.junie"\]/);
+  assert.match(line, /proc: \["junie"\]/);
+  assert.match(line, /paneOnly: true/);
+});
+
+test("junie: el logo existe, es un SVG estático y no usa currentColor (se carga con <img>)", () => {
+  const svg = readFileSync(fileURLToPath(new URL("../../panel/public/logos/junie.svg", import.meta.url)), "utf8");
+  assert.match(svg, /^<svg /);
+  assert.doesNotMatch(svg, /currentColor|<script|\son[a-z]+=|href=|<use|<image|foreignObject/i);
+});
+
+test("junie: su proceso dentro de junie.app no entra en el conjunto running (premisa del paneOnly)", () => {
+  assert.equal(buildRunningSet(JUNIE_MAC_ROWS).has("junie"), false);
+});
+
+test("junie: vivo cuando un pane de tmux lo tiene, aunque el conjunto running no lo traiga", () => {
+  const running = buildRunningSet(JUNIE_MAC_ROWS);
+  assert.equal(isAgentRunning(JUNIE, { installed: true, running, agentPanes: [{ paneId: "%1" }] }), true);
+});
+
+test("junie: sin pane no cuenta como vivo; no instalado tampoco", () => {
+  const running = buildRunningSet(JUNIE_MAC_ROWS);
+  assert.equal(isAgentRunning(JUNIE, { installed: true, running, agentPanes: [] }), false);
+  assert.equal(isAgentRunning(JUNIE, { installed: false, running, agentPanes: [{ paneId: "%1" }] }), false);
+});

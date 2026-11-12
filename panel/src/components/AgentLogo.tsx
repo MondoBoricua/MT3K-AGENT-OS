@@ -1,7 +1,7 @@
 import { useState } from "react";
 // Per-agent brand logo (real SVGs in /public/logos). Agents without a brand mark
 // fall back to a generic terminal glyph. Dimmed + desaturated when offline.
-const BRAND = new Set(["claude", "codex", "grok", "copilot", "cursor", "antigravity", "opencode", "deepseek", "zcode", "hermes"]);
+const BRAND = new Set(["claude", "codex", "grok", "copilot", "cursor", "antigravity", "opencode", "deepseek", "zcode", "hermes", "junie"]);
 const BASE = import.meta.env.BASE_URL;
 
 function GenericGlyph({ className, dim }: { className: string; dim: string }) {

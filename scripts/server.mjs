@@ -290,6 +290,11 @@ const AGENT_DEFS = [
   // corre siempre (PPID 1, sin tty) con el mismo nombre → `paneOnly`: solo un Hermes interactivo
   // dentro de un panel de tmux cuenta como running.
   { id: "hermes", name: "Hermes", bins: ["hermes"], paths: ["~/.hermes"], proc: ["hermes"], paneOnly: true },
+  // Junie: el CLI es un bash shim (~/.local/bin/junie) que lanza el binario dentro de junie.app
+  // (…/junie.app/Contents/MacOS/junie). El conjunto `running` descarta todo lo que vive en un .app, así
+  // que ahí nunca aparece: `paneOnly` hace que cuente como vivo cuando un pane de tmux lo tiene en su
+  // árbol de procesos (el pane reporta `bash`; se reconoce por el segmento `junie` de la ruta).
+  { id: "junie", name: "Junie", bins: ["junie"], paths: ["~/.junie"], proc: ["junie"], paneOnly: true },
   // DeepSeek Harness (dsh): no TUI profile — its interactive surface is `dsh web` on a local
   // port. `web` marks it as a web-UI agent: a port probe drives "running" and the panel offers
   // an "abrir UI web" link instead of a tmux terminal.
