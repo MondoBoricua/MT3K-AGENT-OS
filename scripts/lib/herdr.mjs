@@ -1,5 +1,5 @@
 // Adaptador finito sobre `hc`: listar, leer y escribir en terminales Herdr que ya existen.
-// Crear (`run`) y cerrar (`killOwned`) solo con core vivo y solo terminales marcados `mt3k.panel=1`.
+// Crear (`run`) y cerrar (`killTerminal`) solo con core vivo; cerrar uno sin la marca `mt3k.panel=1` exige `force` estricto.
 // Nunca redimensiona ni arranca un core por su cuenta; solo execFile con argv fijo.
 import { execFile } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";

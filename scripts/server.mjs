@@ -146,7 +146,7 @@ function sendJSON(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 function body(req) {
-  return new Promise((resolve) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => { try { resolve(JSON.parse(d || "{}")); } catch { resolve({}); } }); });
+  return new Promise((resolve) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => { try { const v = JSON.parse(d || "{}"); resolve(v !== null && typeof v === "object" ? v : {}); } catch { resolve({}); } }); });
 }
 // big uploads travel as raw octet-stream bodies, never base64-in-JSON: at 500MB the base64
 // string would blow past phone-browser memory and flirt with V8's max string length

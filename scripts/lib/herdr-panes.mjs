@@ -221,9 +221,8 @@ export function createHerdrPanes({
           rows = await pollOnce(h, gen);
           settled = gen === generation;
         }
-        // Tope agotado (invalidate() en cada intento): se dejan las últimas filas en la caché pero CADUCADAS, para
-        // que `find`/`has` coincidan con lo devuelto y el siguiente refresh() vuelva a consultar.
-        if (!settled && cache.at === -Infinity) cache = { at: -Infinity, rows };
+        // Tope agotado (invalidate() en cada intento): se devuelven las últimas filas pero NO se guardan; la caché
+        // queda vacía y el siguiente refresh() consulta de nuevo (una muestra anterior a un invalidate no decide nada).
         return rows;
       } finally {
         // Se suelta el ciclo en el MISMO turno que la última comprobación de generación (sin `await` en medio): un

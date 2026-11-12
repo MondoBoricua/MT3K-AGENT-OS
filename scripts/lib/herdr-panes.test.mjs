@@ -635,7 +635,7 @@ test("invalidate justo cuando el ciclo termina: el refresh siguiente no se une a
   }
 });
 
-test("tope de repeticiones agotado: lo devuelto coincide con `find`, la caché queda caducada y el siguiente refresh consulta", async () => {
+test("tope de repeticiones agotado: no se guarda nada (una muestra anterior a un invalidate no decide) y el siguiente refresh consulta", async () => {
   let lists = 0;
   let p;
   const herdr = { async list() { lists++; p.invalidate(); return [{ ...ROWS[1], where: String(lists) }]; }, invalidate() {} };
@@ -643,7 +643,7 @@ test("tope de repeticiones agotado: lo devuelto coincide con `find`, la caché q
   const rows = await p.refresh();
   assert.equal(lists, 4); // 1 + MAX_REPOLLS
   assert.equal(rows[0].where, "4");
-  assert.equal(p.cachedRows()[0].where, "4");
+  assert.deepEqual(p.cachedRows(), []);
   await p.refresh();
   assert.equal(lists, 8); // caducada: volvió a consultar
 });
