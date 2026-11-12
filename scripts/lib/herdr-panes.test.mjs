@@ -510,12 +510,13 @@ test("invalidate durante un refresh en vuelo: el resultado viejo no repuebla la 
   const stale = p.refresh();
   await new Promise((r) => setImmediate(r));
   p.invalidate(); // p. ej. justo después de crear un terminal
-  const freshP = p.refresh(); // consulta nueva (espera a que acabe la vieja), no reutiliza su resultado
+  const freshP = p.refresh(); // se une al mismo ciclo, que repite la consulta tras el invalidate
   release();
   const fresh = await freshP;
   assert.deepEqual(fresh.map((r) => r.id), ["hc:t4", "hc:t9"]);
-  assert.equal((await stale).length, 1); // quien esperaba la vieja la recibe
-  assert.deepEqual(p.cachedRows().map((r) => r.id), ["hc:t4", "hc:t9"]); // pero la caché sigue siendo la nueva
+  assert.deepEqual((await stale).map((r) => r.id), ["hc:t4", "hc:t9"]); // nadie recibe la lista anterior al invalidate
+  assert.equal(call, 2);
+  assert.deepEqual(p.cachedRows().map((r) => r.id), ["hc:t4", "hc:t9"]);
 });
 
 test("herdrOccupies: mismo agente + misma carpeta normalizada; otra carpeta/agente o carpeta ilegible no", () => {
@@ -556,11 +557,63 @@ test("invalidate con un refresh viejo en vuelo (con get): lo viejo no escribe de
   assert.equal(lists, 1); // la nueva espera a que acabe la vieja: sin consultas simultáneas
   getGate.resolve();
   const [s, f1, f2] = await Promise.all([stale, fresh1, fresh2]);
-  assert.equal(s[0].cwd, "/old"); // quien esperaba la vieja recibe lo viejo
+  assert.equal(s[0].cwd, "/new"); // el ciclo repite la consulta: nadie recibe lo anterior al invalidate
   assert.equal(f1[0].cwd, "/new");
   assert.equal(f1, f2);
   assert.equal(p.cachedRows()[0].cwd, "/new");
   assert.equal(lists, 2);
   assert.equal(gets, 2); // el get viejo NO quedó en details: la consulta nueva tuvo que repetirlo
   assert.equal(maxActive, 1);
+});
+
+test("muchos invalidate durante una consulta: una sola `hc ls` a la vez, repeticiones acotadas y gana la última lista", async () => {
+  const gates = [];
+  let lists = 0, active = 0, maxActive = 0;
+  const herdr = {
+    async list() {
+      const n = ++lists; active++; maxActive = Math.max(maxActive, active);
+      try { await new Promise((r) => gates.push(r)); return [{ ...ROWS[1], where: `lista-${n}` }]; } finally { active--; }
+    },
+    invalidate() {},
+  };
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => 5000 });
+  const waiting = [p.refresh()];
+  await new Promise((r) => setImmediate(r));
+  for (let i = 0; i < 50; i++) { p.invalidate(); waiting.push(p.refresh()); }
+  for (let i = 0; i < 10 && lists <= 4; i++) { // suelta una consulta cada vez; nunca aparecen dos abiertas
+    gates.shift()?.();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+  }
+  const all = await Promise.all(waiting);
+  assert.equal(maxActive, 1);
+  assert.equal(lists, 2); // la inicial + UNA repetición: los 50 invalidate llegaron durante la primera
+  for (const rows of all) assert.equal(rows[0].where, "lista-2");
+  assert.equal(p.cachedRows()[0].where, "lista-2");
+});
+
+test("consulta anterior a un invalidate que vuelve vacía: no poda `details` ni tira el estado del core", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let lists = 0, gets = 0, probes = 0;
+  let t = 5000;
+  const herdr = {
+    async list() { lists++; if (lists === 2) { await gate; return []; } return [{ ...ROWS[1] }]; },
+    async get() { gets++; return { ok: true, cwd: "/w", cols: 80, rows: 24, where: null, labels: {} }; },
+    async coreAlive() { probes++; return false; },
+    invalidate() {},
+  };
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => t });
+  await p.refresh(); // siembra details (1 get)
+  assert.equal(gets, 1);
+  t += 2100; // caché caducada, details aún vigente
+  const old = p.refresh(); // consulta 2: quedará obsoleta y devolverá []
+  await new Promise((r) => setImmediate(r));
+  p.invalidate();
+  release();
+  const rows = await old; // el ciclo repite: consulta 3 trae la fila
+  assert.equal(rows.length, 1);
+  assert.equal(lists, 3);
+  assert.equal(gets, 1); // la lista vacía obsoleta no borró details: no hizo falta otro get
+  assert.equal(probes, 0); // ni sondeó/tiró el core por una lista obsoleta
 });

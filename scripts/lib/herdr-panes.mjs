@@ -10,6 +10,7 @@ export const HERDR_BLOCKED = "bloqueado: requiere a la persona";
 export const HERDR_LIST_TTL_MS = 2000;
 export const HERDR_STREAM_MIN_TICK_MS = 1000;
 const HERDR_FORCE_MIN_MS = 500;
+const MAX_REPOLLS = 3; // repeticiones de la consulta cuando llegan invalidate() mientras corre
 const HC_LOOKUP_MS = 30000;
 const READ_HISTORY_LINES = 1000;
 const TAIL_LINES = 12;
@@ -125,9 +126,8 @@ export function createHerdrPanes({
   let hcPath = null;
   let hcCheckedAt = -Infinity;
   let cache = { at: -Infinity, rows: [] };
-  let running = null; // { gen, p }: la consulta en curso
-  let next = null; // { gen, p }: como mucho UNA consulta nueva esperando a que acabe una anterior a un invalidate()
-  let generation = 0; // sube con cada invalidate(): un resultado de una generación anterior no toca la caché
+  let loop = null; // el ÚNICO ciclo de consulta en curso (una sola `hc ls` a la vez); lo comparten todos los refresh()
+  let generation = 0; // sube con cada invalidate(): una consulta de una generación anterior no escribe nada compartido
 
   // Con MT3K_HERDR=0 ni se busca hc. Con hc ausente tampoco hay trabajo (se reintenta cada 30 s).
   function client() {
@@ -153,9 +153,12 @@ export function createHerdrPanes({
   async function enrich(h, rows, gen = generation) {
     if (typeof h.get !== "function") return rows;
     const alive = new Set(rows.map((r) => r.address));
-    for (const k of details.keys()) if (!alive.has(k)) details.delete(k);
-    for (const k of colorState.keys()) if (!alive.has(k)) colorState.delete(k);
-    if (rows.length > 0) { // solo listas con datos: una lista vacía por core caído no cuenta como ausencia
+    const current = gen === generation; // lista de una generación anterior: no poda ni cuenta ausencias
+    if (current) {
+      for (const k of details.keys()) if (!alive.has(k)) details.delete(k);
+      for (const k of colorState.keys()) if (!alive.has(k)) colorState.delete(k);
+    }
+    if (current && rows.length > 0) { // solo listas con datos: una lista vacía por core caído no cuenta como ausencia
       for (const [k, g] of resizeGuard) {
         if (g.pausedUntil && g.pausedUntil <= now()) resizeGuard.delete(k);
         else if (alive.has(k)) g.misses = 0;
@@ -189,44 +192,50 @@ export function createHerdrPanes({
     // resizeGuard se conserva: una sonda fallida suelta no debe reiniciar la pausa de 10 min
   }
 
-  // Una consulta: lee la lista y la enriquece. Si hubo invalidate() mientras corría, su resultado no toca ni la caché
-  // ni `details` (solo lo recibe quien la esperaba).
-  function poll(h) {
-    const myGen = generation;
-    const p = (async () => {
-      let rows = [];
-      try { rows = await enrich(h, await h.list(), myGen); } catch { rows = []; }
-      if (myGen === generation && rows.length === 0 && (conn || details.size) && typeof h.coreAlive === "function" && !(await h.coreAlive())) {
+  // Una consulta: lee la lista y la enriquece. Cada escritura compartida (caché, `details`, estado del core) se hace
+  // solo si no hubo invalidate() desde que empezó; la comprobación se repite después de cada espera.
+  async function pollOnce(h, gen) {
+    let rows = [];
+    try { rows = await enrich(h, await h.list(), gen); } catch { rows = []; }
+    if (gen === generation && rows.length === 0 && (conn || details.size) && typeof h.coreAlive === "function") {
+      const alive = await h.coreAlive().catch(() => true); // sonda fallida = no se sabe: no se tira el estado
+      if (!alive && gen === generation) {
         dropState();
         details.clear();
       }
-      if (myGen === generation) cache = { at: now(), rows };
+    }
+    if (gen === generation) cache = { at: now(), rows };
+    return rows;
+  }
+
+  // Ciclo único: consulta y, si hubo invalidate() mientras corría, vuelve a consultar (hasta MAX_REPOLLS veces) para
+  // entregar una lista posterior al invalidate. Nunca hay dos `hc ls` a la vez ni consultas encoladas.
+  function startLoop(h) {
+    const p = (async () => {
+      let rows = [];
+      for (let i = 0; i <= MAX_REPOLLS; i++) {
+        const gen = generation;
+        rows = await pollOnce(h, gen);
+        if (gen === generation) break;
+      }
       return rows;
-    })().finally(() => { if (running?.p === p) running = null; });
-    running = { gen: myGen, p };
+    })().finally(() => { if (loop === p) loop = null; });
+    loop = p;
     return p;
   }
 
-  /** Lista cacheada ≤ ttlMs (500 ms si se fuerza). Máximo una consulta en curso; tras un invalidate() solo una más en espera. */
+  /** Lista cacheada ≤ ttlMs (500 ms si se fuerza). Máximo una consulta en curso, compartida por todos los llamadores. */
   async function refresh(force = false) {
     const h = client();
     if (!h) return [];
     if (now() - cache.at < (force ? HERDR_FORCE_MIN_MS : ttlMs)) return cache.rows;
-    if (!running) return poll(h);
-    if (running.gen === generation) return running.p;
-    if (next?.gen === generation) return next.p;
-    const gen = generation;
-    const p = running.p.then(() => {}, () => {}).then(() => (now() - cache.at < HERDR_FORCE_MIN_MS ? cache.rows : poll(h)));
-    next = { gen, p };
-    p.finally(() => { if (next?.p === p) next = null; }).catch(() => {});
-    return p;
+    return loop || startLoop(h);
   }
 
   /** Olvida la lista cacheada (y las cachés del adaptador): tras crear o cerrar un terminal se lee de nuevo. */
   function invalidate() {
     generation++;
     cache = { at: -Infinity, rows: [] };
-    next = null;
     herdr?.invalidate?.();
   }
 
