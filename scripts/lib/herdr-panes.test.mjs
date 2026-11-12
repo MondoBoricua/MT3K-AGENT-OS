@@ -438,6 +438,35 @@ test("S3: pausado por sin visor, pero un visor llega y saca el terminal del tama
   assert.deepEqual(snaps[1], { cols: 160, rows: 41, history: 1000 });
 });
 
+test("S3: en pausa, la comprobación de tamaño es como mucho una cada 5 s aunque `hc get` falle o lleguen 100 vistas a la vez", async () => {
+  let failing = false;
+  let gets = 0;
+  let snaps = 0;
+  const herdr = {
+    async list() { return ROWS; },
+    async get() { gets++; if (failing) return { ok: false }; return { ok: true, cwd: "/c", ...(snaps ? { cols: 200, rows: 120 } : { cols: 91, rows: 17 }), where: null }; },
+    async read() { return { ok: true, text: "plano" }; },
+    async coreAlive() { return true; },
+  };
+  const conn = { snapshot: async () => { snaps++; return { ok: true, bytes: Buffer.alloc(1), cols: 200, rows: 120 }; }, close() {} };
+  const { clock, panes } = mk({ createHerdr: () => herdr, createConn: () => conn, paint: () => ({ lines: ["c"], complete: true }), log: () => {} });
+  await panes.refresh();
+  await panes.view("hc:t9"); // attach → 200x120 → pausa
+  failing = true;
+  clock.adv(6000);
+  const g0 = gets;
+  await Promise.all(Array.from({ length: 100 }, () => panes.view("hc:t9"))); // a la vez, con get fallando
+  for (let i = 0; i < 100; i++) await panes.view("hc:t9"); // y en serie, mismo instante
+  assert.ok(gets - g0 <= 1, `gets extra: ${gets - g0}`);
+  assert.equal(snaps, 1);
+  failing = false;
+  clock.adv(6000);
+  const g1 = gets;
+  await Promise.all(Array.from({ length: 100 }, () => panes.view("hc:t9")));
+  assert.ok(gets - g1 <= 1, `gets extra con get correcto: ${gets - g1}`);
+  assert.equal(snaps, 1); // sigue en 200x120: sin nuevos attaches
+});
+
 test("B2: con el core muerto se cierra el hc connect, se vacía el estado y no se llama a hc", async () => {
   let alive = true;
   let closed = 0;

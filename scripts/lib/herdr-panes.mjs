@@ -281,8 +281,13 @@ export function createHerdrPanes({
     if (guard && guard.pausedUntil > now()) {
       // Pausado por "sin visor". Si el terminal ya NO está en el tamaño headless es que un visor lo acomodó (la app
       // abrió su pestaña después de nuestro attach): se levanta la pausa. `currentSize` cachea el `hc get` 5 s.
+      // Como mucho UNA comprobación cada 5 s por terminal, también si `hc get` falla o llegan vistas a la vez
+      // (la marca se pone antes de esperar).
+      if (now() - (guard.checkedAt ?? -Infinity) < SIZE_MAX_AGE_MS) return null;
+      guard.checkedAt = now();
       const sz = await currentSize(h, id, address);
       if (!sz || (sz.cols === HEADLESS.cols && sz.rows === HEADLESS.rows)) return null; // sigue sin visor: texto plano
+      if (resizeGuard.get(address) !== guard) return null; // otra vista ya resolvió la pausa mientras se esperaba
       guard = null;
       resizeGuard.delete(address);
     }
