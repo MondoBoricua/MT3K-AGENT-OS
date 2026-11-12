@@ -246,10 +246,10 @@ export function parseHcLs(jsonText) {
 const ARGV_MAX_ITEMS = 64;
 const ARGV_ITEM_MAX = 512;
 
-/** Lista de strings acotada (≤ 64 items, cada uno truncado a 512); cualquier otra cosa → []. Los items no string se omiten. */
+/** Lista de strings acotada (≤ 64 items, cada uno truncado a 512); cualquier otra cosa → []. Un item no string invalida TODA la lista (quitarlo movería las posiciones). */
 function boundedArgv(v) {
-  if (!Array.isArray(v)) return [];
-  return v.filter((x) => typeof x === "string").slice(0, ARGV_MAX_ITEMS).map((x) => x.slice(0, ARGV_ITEM_MAX));
+  if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) return [];
+  return v.slice(0, ARGV_MAX_ITEMS).map((x) => x.slice(0, ARGV_ITEM_MAX));
 }
 
 /**

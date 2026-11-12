@@ -86,3 +86,38 @@ test("commandOf: envolturas acotadas (6 pelados), entradas raras → null, sin m
   assert.equal(refineAgent("shell", null, undefined, M), "shell");
   assert.equal(refineAgent("shell", ["/x/junie"], [], undefined), "shell");
 });
+
+test("env: operandos de -u/--unset y -C/--chdir se consumen; -- termina opciones; -S no se parsea", () => {
+  assert.equal(refineAgent("shell", [], ["env", "-u", "NODE_OPTIONS", "junie"], M), "junie");
+  assert.equal(commandOf(["env", "-u", "NODE_OPTIONS", "junie"]), "junie");
+  assert.equal(refineAgent("shell", [], ["env", "-u", "junie", "vim"], M), "shell");
+  assert.equal(refineAgent("shell", [], ["env", "--unset", "junie", "vim"], M), "shell");
+  assert.equal(refineAgent("shell", [], ["env", "-C", "/w", "junie"], M), "junie");
+  assert.equal(refineAgent("shell", [], ["env", "--chdir", "junie", "vim"], M), "shell");
+  assert.equal(refineAgent("shell", [], ["env", "--unset=X", "--chdir=/w", "-i", "-0", "-v", "-z", "junie"], M), "junie");
+  assert.equal(refineAgent("shell", [], ["env", "--", "junie"], M), "junie");
+  assert.equal(commandOf(["env", "-S", "junie --brave"]), null);
+  assert.equal(commandOf(["env", "-iS", "junie"]), null);
+  assert.equal(commandOf(["env", "--split-string=junie"]), null);
+  assert.equal(commandOf(["env", "--split-string", "junie"]), null);
+});
+
+test("shell -c: solo se pela una envoltura de paso puro; otro texto → sin comando", () => {
+  assert.equal(refineAgent("shell", [], ["bash", "-c", 'printf "%s\\n" "$1"', "bash", "junie"], M), "shell");
+  assert.equal(commandOf(["bash", "-c", 'printf "%s\\n" "$1"', "bash", "junie"]), null);
+  assert.equal(commandOf(["bash", "-c", 'exec "$@"', "bash", "/x/junie"]), "/x/junie");
+  assert.equal(commandOf(["fish", "-c", "command $argv[2..]", "fish", "/x/junie"]), "/x/junie");
+  assert.equal(commandOf(["bash", "-c", '  "$@"; exec "$0" -li', "bash", "/x/junie"]), "/x/junie");
+  assert.equal(commandOf(["bash", "-c", 'echo "$@"', "bash", "/x/junie"]), null);
+});
+
+test("arranque: solo con primer plano vacío o un intérprete sin nombre de agente; vim, ssh, shells y env zsh -li → shell", () => {
+  assert.equal(refineAgent("shell", JUNIE_START, ["vim", "README.md"], M), "shell");
+  assert.equal(refineAgent("shell", JUNIE_START, ["env", "zsh", "-li"], M), "shell");
+  assert.equal(refineAgent("shell", JUNIE_START, ["ssh", "host"], M), "shell");
+  assert.equal(refineAgent("shell", JUNIE_START, ["git", "status"], M), "shell");
+  assert.equal(refineAgent("shell", JUNIE_START, [], M), "junie");
+  assert.equal(refineAgent("shell", wrapper("/usr/bin/env", "/Users/x/.local/bin/hermes"), HERMES_FG, M), "hermes");
+  assert.equal(refineAgent("shell", JUNIE_START, ["node", "/Users/x/app/server.js"], M), "shell"); // el comando es el script, no el intérprete
+  assert.equal(refineAgent("shell", JUNIE_START, ["node", "-e", "setInterval(()=>{},1)"], M), "junie"); // intérprete sin nombre (script en línea)
+});

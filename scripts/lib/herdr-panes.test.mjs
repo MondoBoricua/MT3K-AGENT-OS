@@ -821,3 +821,58 @@ test("frescura: un get fallido no conserva la atribución anterior (vuelve a she
   clock.adv(31000);
   assert.equal((await panes.refresh())[0].agent, "junie");
 });
+
+// get de tamaño pausado (la 2ª llamada a get): ver la generación guardada en currentSize
+function gatedSizeGet({ first, gated, later }) {
+  let resolveGate; const gate = new Promise((r) => { resolveGate = r; });
+  let calls = 0;
+  const state = { where: null };
+  const herdr = {
+    async list() { return [{ ...ZSH_ROW, where: state.where }]; },
+    async get() {
+      calls++;
+      if (calls === 1) return first;
+      if (calls === 2) { await gate; return gated; }
+      return typeof later === "function" ? later(calls) : later;
+    },
+    async read() { return { ok: true, text: "plano" }; },
+    invalidate() {},
+  };
+  const conn = { async snapshot() { return { ok: true, cols: 90, rows: 30, bytes: "x" }; }, close() {}, stats() { return {}; } };
+  return { herdr, conn, state, release: () => resolveGate() };
+}
+const GOT = (argv) => ({ ok: true, cwd: "/w", cols: 90, rows: 30, labels: {}, argv, fgArgv: [] });
+
+test("currentSize con generación vieja: un get de tamaño que resuelve tras invalidate() no pisa la atribución nueva (éxito con junie tras volverse shell)", async () => {
+  const { herdr, conn, release } = gatedSizeGet({ first: GOT(["/bin/zsh"]), gated: GOT(JUNIE_ARGV), later: GOT(["/bin/zsh"]) });
+  const { clock, panes } = mk({ createHerdr: () => herdr, createConn: () => conn, paint: () => ({ complete: true, lines: ["a"] }), agentMatchers: MATCHERS });
+  assert.equal((await panes.refresh())[0].agent, "shell");
+  clock.adv(6000);
+  const view = panes.view("hc:t20"); // currentSize: get pausado
+  await new Promise((r) => setImmediate(r));
+  panes.invalidate();
+  clock.adv(2100);
+  assert.equal((await panes.refresh())[0].agent, "shell");
+  release();
+  await view;
+  clock.adv(2100);
+  assert.equal((await panes.refresh())[0].agent, "shell");
+  assert.equal(herdrOccupies(panes.cachedRows(), "junie", "/w", (p) => p), false);
+});
+
+test("currentSize con generación vieja: un get de tamaño FALLIDO tras invalidate() no tumba la atribución nueva a shell", async () => {
+  const { herdr, conn, state, release } = gatedSizeGet({ first: GOT(JUNIE_ARGV), gated: { ok: false }, later: (n) => GOT(n === 3 ? JUNIE_ARGV : ["/bin/zsh"]) });
+  const { clock, panes } = mk({ createHerdr: () => herdr, createConn: () => conn, paint: () => ({ complete: true, lines: ["a"] }), agentMatchers: MATCHERS });
+  assert.equal((await panes.refresh())[0].agent, "junie");
+  clock.adv(6000);
+  const view = panes.view("hc:t20");
+  await new Promise((r) => setImmediate(r));
+  panes.invalidate();
+  state.where = "B / 1"; // cambia `where`: la consulta nueva hace su propio get (el 3º) y ve junie; los siguientes verían shell
+  assert.equal((await panes.refresh())[0].agent, "junie");
+  release();
+  await view;
+  clock.adv(2100);
+  assert.equal((await panes.refresh())[0].agent, "junie");
+  assert.equal(herdrOccupies(panes.cachedRows(), "junie", "/w", (p) => p), true);
+});

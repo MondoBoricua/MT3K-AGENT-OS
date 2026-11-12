@@ -272,13 +272,14 @@ export function createHerdrPanes({
   async function currentSize(h, id, address, fresh = false) {
     let d = details.get(address);
     if (fresh || !d || d.cols === null || now() - d.at > SIZE_MAX_AGE_MS) {
+      const gen = generation; // un get de una generación anterior (hubo invalidate()) no escribe `details`
       const g = typeof h.get === "function" ? await h.get(id).catch(() => ({ ok: false })) : { ok: false };
       if (!g.ok) {
-        if (d?.argvAgent && d.argvAgent !== "shell") details.set(address, { ...d, argvAgent: "shell" });
+        if (gen === generation && d?.argvAgent && d.argvAgent !== "shell") details.set(address, { ...d, argvAgent: "shell" });
         return null;
       }
       d = { ...(d || { where: null, status: null }), at: now(), cwd: g.cwd, cols: g.cols, rows: g.rows, argvAgent: argvAgentOf(g) };
-      details.set(address, d);
+      if (gen === generation) details.set(address, d);
     }
     return d.cols && d.rows ? { cols: d.cols, rows: d.rows } : null;
   }

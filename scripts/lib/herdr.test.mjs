@@ -276,8 +276,11 @@ test("parseHcGet: foreground.cwd manda sobre cwd de lanzamiento; cols/rows y whe
 });
 
 test("parseHcGet: argv de arranque y de primer plano, acotados (64 items, 512 chars); lo que no es lista → []", () => {
-  const d = parseHcGet(JSON.stringify({ cwd: "/a", argv: ["/bin/zsh", 7, null, "/Users/x/.local/bin/junie"], foreground: { argv: ["bash", "x".repeat(700)] } }));
+  const d = parseHcGet(JSON.stringify({ cwd: "/a", argv: ["/bin/zsh", "/Users/x/.local/bin/junie"], foreground: { argv: ["bash", "x".repeat(700)] } }));
   assert.deepEqual(d.argv, ["/bin/zsh", "/Users/x/.local/bin/junie"]);
+  // un item que no es string invalida TODA la lista: quitarlo movería las posiciones de comando
+  const shifted = parseHcGet(JSON.stringify({ argv: [42, "junie"], foreground: { argv: [null, "junie"] } }));
+  assert.deepEqual([shifted.argv, shifted.fgArgv], [[], []]);
   assert.equal(d.fgArgv.length, 2);
   assert.equal(d.fgArgv[1].length, 512);
   const many = parseHcGet(JSON.stringify({ argv: Array.from({ length: 100 }, (_, i) => `a${i}`) }));

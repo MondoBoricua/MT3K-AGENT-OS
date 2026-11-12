@@ -13,13 +13,30 @@ const PYTHON_RE = /^python[0-9.]*$/;
 const baseOf = (item) => item.split("/").pop();
 const isString = (x) => typeof x === "string";
 const isAssignment = (x) => ENV_ASSIGNMENT_RE.test(x);
-const isShellName = (item) => isString(item) && SHELLS.has(baseOf(item).replace(/^-/, "")); // "-zsh" = shell de login
+// Guion de envoltura de lanzamiento puro (`"$@"; exec "$0" -li` de la app, o `command $argv[2..]` en fish): solo reenvía los argumentos.
+const PASS_THROUGH_SCRIPT_RE = /^(?:exec\s+)?"\$@"|^command\s+\$argv\[2\.\.\]/;
+const ENV_OPERAND_FLAGS = new Set(["-u", "--unset", "-C", "--chdir"]); // consumen un operando (las formas --x=v son un solo item)
+const isEnvSplitFlag = (item) => item === "--split-string" || item.startsWith("--split-string=") || /^-[^-]*S/.test(item);
 
 /** ¿Puede ser un comando? Sin espacios (un script en línea nunca), sin recortar, no vacío. */
 const isCommandLike = (item) => isString(item) && item.length > 0 && item.length < ARGV_ITEM_MAX_CHARS && !WHITESPACE_RE.test(item);
 
 /** ¿El item es una ruta/nombre de script que sigue a un shell o intérprete? (no opción, no KEY=valor) */
 const isScriptItem = (item) => isCommandLike(item) && !item.startsWith("-") && !isAssignment(item);
+
+/** Argumentos que quedan tras `env` y sus opciones; null si no hay comando analizable (`-S`: no se parsean cadenas). */
+function peelEnv(args) {
+  let i = 1;
+  while (i < args.length && isString(args[i])) {
+    const item = args[i];
+    if (item === "--") { i++; break; }
+    if (isEnvSplitFlag(item)) return null;
+    if (ENV_OPERAND_FLAGS.has(item)) i += 2;
+    else if (item.startsWith("-") || isAssignment(item)) i++;
+    else break;
+  }
+  return args.slice(i);
+}
 
 /**
  * Comando real de un argv: pela envolturas (`env`, `shell -c script $0 args…`) hasta MAX_PEELS veces.
@@ -32,14 +49,15 @@ export function commandOf(argv) {
     if (!isCommandLike(first)) return null;
     const base = baseOf(first);
     if (base === "env") {
-      let i = 1;
-      while (i < args.length && isString(args[i]) && (args[i].startsWith("-") || isAssignment(args[i]))) i++;
-      args = args.slice(i);
+      const rest = peelEnv(args);
+      if (rest === null) return null;
+      args = rest;
       continue;
     }
     const second = args[1];
     if (SHELLS.has(base) && isString(second) && COMMAND_STRING_FLAGS_RE.test(second)) {
-      // [shell, -…c…, script, $0, ...args]: sin args no hay comando (el texto del script no se interpreta)
+      // [shell, -…c…, script, $0, ...args]: solo se pela una envoltura de lanzamiento pura; otro texto no se interpreta
+      if (!isString(args[2]) || !PASS_THROUGH_SCRIPT_RE.test(args[2].trim())) return null;
       args = args.slice(4);
       continue;
     }
@@ -61,16 +79,19 @@ function matchCommand(command, matchers) {
 
 /**
  * Agente final de un terminal. `mapped` es lo que dio `mapAgent` sobre `hc ls`: si ya es un agente real se respeta.
- * Si es "shell": 1) comando del primer plano; 2) solo si el primer plano está vacío o NO es un shell inactivo
- * (p. ej. el `python3 -I -c …` de Hermes), comando del argv de arranque; 3) "shell". Un `zsh -li` inactivo
- * nunca hereda el agente del arranque. `matchers`: lista inyectada `{ id, proc: [nombres] }`.
+ * Si es "shell": 1) comando del primer plano; 2) el argv de arranque SOLO si el primer plano está vacío o es un
+ * intérprete (node, python) que no se llama por el agente (p. ej. el `python3 -I -c …` de Hermes); cualquier otro
+ * primer plano (vim, ssh, un shell inactivo, `env zsh -li`) → "shell"; 3) "shell".
+ * `matchers`: lista inyectada `{ id, proc: [nombres] }`.
  */
 export function refineAgent(mapped, startArgv, foregroundArgv, matchers = []) {
   if (mapped && mapped !== "shell") return mapped;
   if (!Array.isArray(matchers) || matchers.length === 0) return "shell";
-  const foreground = matchCommand(commandOf(foregroundArgv), matchers);
+  const foregroundCommand = commandOf(foregroundArgv);
+  const foreground = matchCommand(foregroundCommand, matchers);
   if (foreground) return foreground;
-  const idleShell = Array.isArray(foregroundArgv) && foregroundArgv.length > 0 && isShellName(foregroundArgv[0]);
-  if (idleShell) return "shell";
+  const noForeground = !Array.isArray(foregroundArgv) || foregroundArgv.length === 0;
+  const unnamedInterpreter = isCommandLike(foregroundCommand) && (baseOf(foregroundCommand) === "node" || PYTHON_RE.test(baseOf(foregroundCommand)));
+  if (!noForeground && !unnamedInterpreter) return "shell";
   return matchCommand(commandOf(startArgv), matchers) ?? "shell";
 }
