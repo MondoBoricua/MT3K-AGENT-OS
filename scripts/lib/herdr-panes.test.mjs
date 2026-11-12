@@ -424,3 +424,36 @@ test("N10: explain lee solo la pantalla (lines 0), no 1000 líneas", async () =>
   assert.deepEqual(reads, [0]);
   assert.equal(panes.failure({ ok: false, err: "texto inválido" }).status, 400);
 });
+
+test("R4-2: terminales fuera de 20-500 x 5-300 no se atachan (texto plano, sin pausa falsa)", async () => {
+  for (const [cols, rows] of [[520, 60], [18, 40], [100, 4], [100, 301]]) {
+    let snaps = 0;
+    const herdr = { async list() { return ROWS; }, async get() { return { ok: true, cwd: "/c", cols, rows, where: null }; }, async read() { return { ok: true, text: "plano" }; }, async coreAlive() { return true; } };
+    const logs = [];
+    const { panes } = mk({ createHerdr: () => herdr, createConn: () => ({ snapshot: async () => { snaps++; return { ok: true, bytes: Buffer.alloc(1), cols, rows }; }, close() {} }), log: (x) => logs.push(x) });
+    await panes.refresh();
+    assert.equal((await panes.view("hc:t9")).text, "plano");
+    assert.equal(snaps, 0);
+    assert.equal(logs.length, 0);
+  }
+});
+
+test("R4-4: la pausa de 10 min sobrevive a un dropState por sonda fallida", async () => {
+  let alive = true;
+  let snaps = 0;
+  const herdr = {
+    async list() { return alive ? ROWS : []; },
+    async get() { return { ok: true, cwd: "/c", cols: 91, rows: 17, where: null }; },
+    async read() { return { ok: true, text: "plano" }; },
+    async coreAlive() { return alive; },
+  };
+  const conn = { snapshot: async () => { snaps++; return { ok: true, bytes: Buffer.alloc(1), cols: 200, rows: 120 }; }, close() {} };
+  const { clock, panes } = mk({ createHerdr: () => herdr, createConn: () => conn, paint: () => ({ lines: ["c"], complete: true }), log: () => {} });
+  await panes.refresh();
+  await panes.view("hc:t9"); // se redimensiona → pausa
+  assert.equal(snaps, 1);
+  alive = false; clock.adv(2100); await panes.refresh(); // dropState
+  alive = true; clock.adv(2100); await panes.refresh();
+  assert.equal((await panes.view("hc:t9")).text, "plano");
+  assert.equal(snaps, 1);
+});

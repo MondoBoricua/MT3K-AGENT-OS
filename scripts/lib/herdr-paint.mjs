@@ -86,7 +86,14 @@ export function paintToAnsiLines(bytes, options = {}) {
     const r = row(), x = Math.min(s.x, cols - 1);
     const start = mode === 0 ? x : 0, end = mode === 1 ? x + 1 : cols;
     if (start === 0 && end === cols) { if (charge(1)) { r.length = 0; r.pad = s.sgr; } } // fila entera: relleno perezoso, O(1)
-    else if (!s.sgr && end === cols) { if (charge(1)) r.length = Math.min(r.length, start); }
+    else if (!s.sgr && end === cols) {
+      // borrado parcial sin color: el relleno anterior solo se conserva en las celdas previas a `start`
+      if (charge(1 + (r.pad ? start : 0))) {
+        if (r.pad) for (let i = 0; i < start; i++) if (r[i] === undefined) r[i] = { ch: ' ', sgr: r.pad };
+        r.length = Math.min(r.length, start);
+        r.pad = '';
+      }
+    }
     else if (charge(end - start)) for (let i = start; i < end; i++) r[i] = { ch: ' ', sgr: s.sgr };
   }
   const save = () => { s.saved = { x: s.x, y: s.y, attrs: new Map(s.attrs) }; };

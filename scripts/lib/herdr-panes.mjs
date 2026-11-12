@@ -140,7 +140,13 @@ export function createHerdrPanes({
     const alive = new Set(rows.map((r) => r.address));
     for (const k of details.keys()) if (!alive.has(k)) details.delete(k);
     for (const k of colorState.keys()) if (!alive.has(k)) colorState.delete(k);
-    for (const k of resizeGuard.keys()) if (!alive.has(k)) resizeGuard.delete(k);
+    if (rows.length > 0) { // solo listas con datos: una lista vacía por core caído no cuenta como ausencia
+      for (const [k, g] of resizeGuard) {
+        if (g.pausedUntil && g.pausedUntil <= now()) resizeGuard.delete(k);
+        else if (alive.has(k)) g.misses = 0;
+        else if ((g.misses = (g.misses || 0) + 1) >= 2) resizeGuard.delete(k);
+      }
+    }
     const t = now();
     const changed = rows.filter((r) => { const d = details.get(r.address); return !d || d.where !== r.where || d.status !== r.status; });
     const stale = rows.filter((r) => { const d = details.get(r.address); return d && !changed.includes(r) && t - d.at >= DETAILS_TTL_MS; });
@@ -158,7 +164,7 @@ export function createHerdrPanes({
     conn?.close();
     conn = null;
     colorState.clear();
-    resizeGuard.clear();
+    // resizeGuard se conserva: una sonda fallida suelta no debe reiniciar la pausa de 10 min
   }
 
   /** Lista cacheada ≤ ttlMs (500 ms si se fuerza); una sola consulta en vuelo. */
@@ -214,6 +220,8 @@ export function createHerdrPanes({
     // S0: tamaño leído con `hc get` ANTES del primer snapshot de este terminal
     const size = await currentSize(h, id, address, !guard);
     if (!size) return null;
+    // fuera de 20..500 x 5..300 el snapshot se pediría con otro tamaño (y movería/ensuciaría la comparación): texto plano
+    if (size.cols < 20 || size.cols > 500 || size.rows < 5 || size.rows > 300) return null;
     const headless = size.cols === HEADLESS.cols && size.rows === HEADLESS.rows; // el attach no cambia nada
     conn ||= createConn(hcPath, { canSpawn: () => h.coreAlive() });
     let text = null;

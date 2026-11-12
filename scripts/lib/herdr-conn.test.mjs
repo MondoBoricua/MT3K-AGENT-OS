@@ -261,3 +261,18 @@ test('N8: cols/rows from attach reply and resize frames are clamped to 20..500 /
   assert.equal(r.ok, true);
   assert.deepEqual([r.cols, r.rows], [500, 300]);
 });
+
+test('R4-1: a fresh connection still in hello is never returned by a canSpawn that resolved late', async t => {
+  const answers = [[true, 50], [false, 5], [true, 0]];
+  let i = 0;
+  const { conn, fake } = setup(t, {}, { canSpawn: () => { const [v, ms] = answers[Math.min(i++, 2)]; return delay(ms).then(() => v); } });
+  assert.equal((await conn.snapshot('t9')).ok, true); // conexión inicial (respuestas ajenas al reproductor)
+  i = 0;
+  const a = conn.snapshot('t1'), b = conn.snapshot('t2'), c = conn.snapshot('t3');
+  const results = await Promise.all([a, b, c]);
+  assert.equal(results[0].ok, true, results[0].err); // la que esperó el canSpawn lento NO recibe la conexión nueva sin hello
+  assert.equal(results[1].ok, false); // su canSpawn dijo false
+  assert.ok(!/observer attach required/.test(results[2].err ?? ''));
+  assert.equal(conn.stats().failures, 0);
+  assert.ok(fake.children.length >= 1);
+});

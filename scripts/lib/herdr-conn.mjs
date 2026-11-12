@@ -138,11 +138,15 @@ export function createHerdrConn({ hcPath = 'hc', spawn = nodeSpawn, env = proces
     if (closed) return null;
     if (conn && !conn.dead && conn.framed) {
       if (!canSpawn) return conn;
+      const c = conn; // otra petición pudo reemplazar `conn` durante el await: solo se devuelve la que se comprobó
       let can = false;
       try { can = await canSpawn(); } catch { can = false; }
-      if (can) return conn;
-      fail(conn, 'core unavailable', true); // core muerto: se cierra el hijo y no se vuelve a lanzar
-      return null;
+      if (can && conn === c && !c.dead) return c;
+      if (!can) {
+        if (conn) fail(conn, 'core unavailable', true); // core muerto: se cierra el hijo y no se vuelve a lanzar
+        return null;
+      }
+      // can pero la conexión cambió o murió: camino normal de (re)conexión, esperando su hello
     }
     if (connecting) return connecting;
     connecting = (async () => {

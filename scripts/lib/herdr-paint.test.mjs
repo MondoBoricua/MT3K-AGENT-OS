@@ -153,3 +153,10 @@ test('N6: incomplete or invalid extended colours are dropped, never reinterprete
   assert.equal(run('\x1b[38;5;200mB'), '\x1b[38;5;200mB\x1b[0m');
   assert.equal(run('\x1b[38;2;1;2;3;1mB'), '\x1b[38;2;1;2;3;1mB\x1b[0m');
 });
+
+test('R4-3: an uncoloured partial erase drops the old fill from the erased cells', () => {
+  const r = paintToAnsiLines(Buffer.from('\x1b[41m\x1b[2K\x1b[0m\x1b[6G\x1b[K\x1b[11GX'), { cols: 20, rows: 2 });
+  const line = r.lines[0];
+  // columnas 1-5 conservan el rojo; 6-10 (borradas) y hasta X llevan fondo por defecto
+  assert.equal(line, '\x1b[41m     \x1b[0m     X');
+});
