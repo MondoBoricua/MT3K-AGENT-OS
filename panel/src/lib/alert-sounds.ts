@@ -75,7 +75,8 @@ export function diffAlerts(
       const stamp = prev?.lastAlert[`${key}|${kind}`];
       if (stamp !== undefined) lastAlert[`${key}|${kind}`] = stamp;
     }
-    if (before === undefined) continue;
+    // pane nuevo, o terminal reemplazado bajo la misma clave (el turno bajó): es otra sesión, no una transición
+    if (before === undefined || turnReset) continue;
     const kind = eventKind(before, after, alerted);
     if (!kind) continue;
     if (kind === "done" && key === focusedKey) continue;

@@ -239,3 +239,12 @@ test("turn: invalid turns are ignored", () => {
   const r = step(step(null, { [A]: bad(-1) }, T0).state, { [A]: bad(1.5) }, T0 + 10_000);
   assert.deepEqual(r.events, []);
 });
+
+test("terminal reemplazado bajo la misma clave (el turno baja): silencio aunque el anterior estuviera working", () => {
+  let r = diffAlerts(null, { p: { status: "working", turn: 9 } }, 0);
+  r = diffAlerts(r.state, { p: { status: "idle", turn: 0 } }, 10_000);
+  assert.deepEqual(r.events, []);
+  // y la sesión nueva alerta con normalidad después
+  r = diffAlerts(r.state, { p: { status: "idle", turn: 1 } }, 20_000);
+  assert.deepEqual(r.events.map((e) => e.kind), ["done"]);
+});
