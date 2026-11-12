@@ -183,6 +183,8 @@ export function mapAgent(app) {
   if (a === "copilot") return "copilot";
   if (a === "zcode") return "zcode";
   if (a === "dsh" || a === "deepseek") return "deepseek";
+  if (a === "hermes") return "hermes";
+  if (a === "junie") return "junie";
   return "shell";
 }
 
@@ -241,6 +243,15 @@ export function parseHcLs(jsonText) {
   return out;
 }
 
+const ARGV_MAX_ITEMS = 64;
+const ARGV_ITEM_MAX = 512;
+
+/** Lista de strings acotada (≤ 64 items, cada uno truncado a 512); cualquier otra cosa → []. Los items no string se omiten. */
+function boundedArgv(v) {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x) => typeof x === "string").slice(0, ARGV_MAX_ITEMS).map((x) => x.slice(0, ARGV_ITEM_MAX));
+}
+
 /**
  * `hc get <t> --json` → carpeta ACTUAL y tamaño. Medido (t9, hc 0.1.20): `foreground.cwd` es la carpeta del
  * proceso en primer plano (la de `cwd` es la de lanzamiento); `cols`/`rows` de primer nivel son el tamaño actual.
@@ -263,6 +274,8 @@ export function parseHcGet(jsonText) {
     where: typeof d.labels?.where === "string" ? d.labels.where : null,
     labels,
     state: typeof d.state === "string" ? d.state : null,
+    argv: boundedArgv(d.argv), // argv de arranque; sirve para atribuir agentes que `hc ls` reporta como shell
+    fgArgv: boundedArgv(d.foreground?.argv),
   };
 }
 

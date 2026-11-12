@@ -40,6 +40,8 @@ test("mapAgent: tabla del panel", () => {
   assert.equal(mapAgent("codex"), "codex");
   assert.equal(mapAgent("cursor-agent"), "cursor");
   assert.equal(mapAgent("agy"), "antigravity");
+  assert.equal(mapAgent("hermes"), "hermes");
+  assert.equal(mapAgent("Junie"), "junie");
   assert.equal(mapAgent("zsh"), "shell");
   assert.equal(mapAgent(null), "shell");
 });
@@ -267,17 +269,30 @@ test("running() POSIX: socket vivo pero status sin sesiones → false", async ()
 
 test("parseHcGet: foreground.cwd manda sobre cwd de lanzamiento; cols/rows y where", () => {
   const t9 = '{"address":"t9","cols":96,"rows":43,"cwd":"/Users/x","foreground":{"cwd":"/Users/x/proj","name":"2.1"},"labels":{"where":"P / 1"}}';
-  assert.deepEqual(parseHcGet(t9), { cwd: "/Users/x/proj", cols: 96, rows: 43, where: "P / 1", labels: { where: "P / 1" }, state: null });
-  assert.deepEqual(parseHcGet('{"cwd":"/a","cols":0,"rows":"x"}'), { cwd: "/a", cols: null, rows: null, where: null, labels: {}, state: null });
+  assert.deepEqual(parseHcGet(t9), { cwd: "/Users/x/proj", cols: 96, rows: 43, where: "P / 1", labels: { where: "P / 1" }, state: null, argv: [], fgArgv: [] });
+  assert.deepEqual(parseHcGet('{"cwd":"/a","cols":0,"rows":"x"}'), { cwd: "/a", cols: null, rows: null, where: null, labels: {}, state: null, argv: [], fgArgv: [] });
   assert.deepEqual(parseHcGet('{"cwd":"/a","labels":{"mt3k.panel":"1","n":5,"x":null}}').labels, { "mt3k.panel": "1" });
   assert.equal(parseHcGet("nope"), null);
+});
+
+test("parseHcGet: argv de arranque y de primer plano, acotados (64 items, 512 chars); lo que no es lista → []", () => {
+  const d = parseHcGet(JSON.stringify({ cwd: "/a", argv: ["/bin/zsh", 7, null, "/Users/x/.local/bin/junie"], foreground: { argv: ["bash", "x".repeat(700)] } }));
+  assert.deepEqual(d.argv, ["/bin/zsh", "/Users/x/.local/bin/junie"]);
+  assert.equal(d.fgArgv.length, 2);
+  assert.equal(d.fgArgv[1].length, 512);
+  const many = parseHcGet(JSON.stringify({ argv: Array.from({ length: 100 }, (_, i) => `a${i}`) }));
+  assert.equal(many.argv.length, 64);
+  assert.equal(many.argv[63], "a63");
+  const bad = parseHcGet(JSON.stringify({ argv: "junie", foreground: { argv: { 0: "junie" } } }));
+  assert.deepEqual([bad.argv, bad.fgArgv], [[], []]);
+  assert.deepEqual(parseHcGet('{"cwd":"/a","foreground":null}').fgArgv, []);
 });
 
 test("createHerdr: get usa argv fijo y valida el id", async () => {
   const calls = [];
   const exec = (_f, argv, _o, cb) => { calls.push(argv); cb(null, '{"cwd":"/a","cols":80,"rows":24}'); };
   const h = createHerdr({ probe: async () => true, hcPath: "/bin/hc", exec });
-  assert.deepEqual(await h.get("hc:t9"), { ok: true, cwd: "/a", cols: 80, rows: 24, where: null, labels: {}, state: null });
+  assert.deepEqual(await h.get("hc:t9"), { ok: true, cwd: "/a", cols: 80, rows: 24, where: null, labels: {}, state: null, argv: [], fgArgv: [] });
   assert.deepEqual(calls, [["get", "t9", "--json"]]);
   assert.deepEqual(await h.get("hc:-x"), { ok: false, err: "terminal inválido" });
 });

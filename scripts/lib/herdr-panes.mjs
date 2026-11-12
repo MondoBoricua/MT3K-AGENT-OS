@@ -2,6 +2,7 @@
 // Nunca toca el ledger, tombstones, notificaciones ni tmux: server.mjs solo llama a estas funciones.
 import { PANEL_LABEL_KEY, addressOf, createHerdr as realCreateHerdr, findHc as realFindHc, isHerdrId } from "./herdr.mjs";
 import { createHerdrConn as realCreateConn } from "./herdr-conn.mjs";
+import { refineAgent } from "./herdr-agent.mjs";
 import { paintToAnsiLines } from "./herdr-paint.mjs";
 import { runWait } from "./wait-loop.mjs";
 
@@ -117,9 +118,10 @@ export function createHerdrPanes({
   paint = paintToAnsiLines,
   perfNow = () => performance.now(),
   log = (m) => console.warn(m),
+  agentMatchers = [], // [{ id, proc }]: nombres de proceso por agente, los inyecta server.mjs
 } = {}) {
   let conn = null;
-  const details = new Map(); // address → { at, where, status, cwd, cols, rows }
+  const details = new Map(); // address → { at, where, status, cwd, cols, rows, labels, argvAgent }
   const colorState = new Map(); // address → { fails, until }
   const resizeGuard = new Map(); // address → { verified, pausedUntil }
   let herdr = null;
@@ -173,14 +175,16 @@ export function createHerdrPanes({
       const g = await h.get(r.id).catch(() => ({ ok: false }));
       const prev = details.get(r.address);
       const base = { at: now(), where: r.where, status: r.status };
-      local.set(r.address, g.ok ? { ...base, cwd: g.cwd, cols: g.cols, rows: g.rows, labels: g.labels || {} } : { ...(prev || { cwd: null, cols: null, rows: null }), ...base });
+      local.set(r.address, g.ok ? { ...base, cwd: g.cwd, cols: g.cols, rows: g.rows, labels: g.labels || {}, argvAgent: refineAgent("shell", g.argv, g.fgArgv, agentMatchers) } : { ...(prev || { cwd: null, cols: null, rows: null }), ...base });
     }));
     if (gen === generation) for (const [k, v] of local) details.set(k, v);
     return rows.map((r) => {
       const d = local.get(r.address) ?? details.get(r.address);
       const killable = d?.labels?.[PANEL_LABEL_KEY] === "1";
-      if (!d?.cwd && !killable) return r;
-      return { ...r, ...(d.cwd ? { cwd: d.cwd } : {}), ...(killable ? { killable: true } : {}) };
+      // `hc ls` manda: solo un terminal que reporta shell puede pasar a otro agente según su argv (nunca se degrada uno real)
+      const agent = r.agent === "shell" && d?.argvAgent && d.argvAgent !== "shell" ? d.argvAgent : null;
+      if (!d?.cwd && !killable && !agent) return r;
+      return { ...r, ...(d.cwd ? { cwd: d.cwd } : {}), ...(killable ? { killable: true } : {}), ...(agent ? { agent } : {}) };
     });
   }
 

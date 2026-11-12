@@ -718,3 +718,72 @@ test("tope de repeticiones agotado: no se guarda nada (una muestra anterior a un
   await p.refresh();
   assert.equal(lists, 8); // caducada: volvió a consultar
 });
+
+const MATCHERS = [{ id: "junie", proc: ["junie"] }, { id: "hermes", proc: ["hermes"] }];
+const JUNIE_ARGV = ["/bin/zsh", "-lic", '"$@"; exec "$0" -li', "/bin/zsh", "/usr/bin/env", "COLORTERM=truecolor", "/Users/x/.local/bin/junie", "--brave"];
+const ZSH_ROW = { ...ROWS[0], id: "hc:t20", address: "t20", cwd: "/Users/x/proj" };
+const AGENTS_WITH_JUNIE = [...AGENTS, { id: "junie", name: "Junie", online: true, running: false, panes: [] }];
+
+test("atribución: terminal reportado como zsh con argv de Junie queda bajo junie, cuenta como running y como ocupado", async () => {
+  const { herdr, calls } = richHerdr({ rows: [ZSH_ROW], getFn: () => ({ ok: true, cwd: "/Users/x/proj", cols: 90, rows: 30, labels: {}, argv: JUNIE_ARGV, fgArgv: [] }) });
+  const { panes } = mk({ createHerdr: () => herdr, agentMatchers: MATCHERS });
+  const rows = await panes.refresh();
+  assert.equal(rows[0].agent, "junie");
+  assert.equal(ZSH_ROW.agent, "shell"); // la fila de entrada no se muta
+  const merged = await panes.applyTo(AGENTS_WITH_JUNIE);
+  const junie = merged.find((r) => r.id === "junie");
+  assert.deepEqual(junie.panes.map((p) => p.paneId), ["hc:t20"]);
+  assert.equal(junie.running, true);
+  assert.deepEqual(merged.find((r) => r.id === "shell").panes, []);
+  assert.equal(herdrOccupies(panes.cachedRows(), "junie", "/Users/x/proj", (p) => p), true);
+  assert.equal(herdrOccupies(panes.cachedRows(), "shell", "/Users/x/proj", (p) => p), false);
+  assert.equal(calls.get.length, 1); // reutiliza el get de la carpeta: sin llamadas extra
+  await panes.refresh();
+  assert.equal(calls.get.length, 1);
+});
+
+test("atribución: sin matchers o sin argv usable el terminal sigue siendo shell; un agente real de hc ls no se degrada", async () => {
+  const get = () => ({ ok: true, cwd: "/w", cols: 90, rows: 30, labels: {}, argv: JUNIE_ARGV, fgArgv: [] });
+  const none = mk({ createHerdr: () => richHerdr({ rows: [ZSH_ROW], getFn: get }).herdr });
+  assert.equal((await none.panes.refresh())[0].agent, "shell");
+  const real = mk({ createHerdr: () => richHerdr({ rows: [ROWS[1]], getFn: get }).herdr, agentMatchers: MATCHERS });
+  assert.equal((await real.panes.refresh())[0].agent, "claude");
+  const hermesTyped = mk({ createHerdr: () => richHerdr({ rows: [ZSH_ROW], getFn: () => ({ ok: true, cwd: "/w", cols: 9, rows: 9, labels: {}, argv: ["/bin/bash"], fgArgv: ["/usr/bin/python3", "-I", "-c", "import x\nhermes"] }) }).herdr, agentMatchers: MATCHERS });
+  assert.equal((await hermesTyped.panes.refresh())[0].agent, "shell");
+});
+
+test("atribución: el argv cacheado solo se aplica cuando hc ls dice shell (la atribución no depende de lo que hc ls dijo al leerlo)", async () => {
+  let row = { ...ROWS[1] }; // claude según hc ls
+  const { herdr } = richHerdr({ rows: () => [row], getFn: () => ({ ok: true, cwd: "/w", cols: 9, rows: 9, labels: {}, argv: ["/x/bin/junie"], fgArgv: [] }) });
+  const { panes } = mk({ createHerdr: () => herdr, agentMatchers: MATCHERS });
+  assert.equal((await panes.refresh())[0].agent, "claude");
+  row = { ...ROWS[1], agent: "shell", app: "zsh" }; // mismo where/estado: usa lo cacheado del argv
+  panes.invalidate();
+  assert.equal((await panes.refresh())[0].agent, "junie");
+});
+
+test("atribución: una consulta de una generación anterior no escribe el agente refinado en details", async () => {
+  const defer = () => { let resolve; const p = new Promise((r) => { resolve = r; }); return { p, resolve }; };
+  const getGate = defer();
+  let gets = 0;
+  const herdr = {
+    async list() { return [ZSH_ROW]; },
+    async get() {
+      gets++;
+      if (gets === 1) { await getGate.p; return { ok: true, cwd: "/w", cols: 9, rows: 9, labels: {}, argv: JUNIE_ARGV, fgArgv: [] }; }
+      return { ok: true, cwd: "/w", cols: 9, rows: 9, labels: {}, argv: ["/bin/zsh"], fgArgv: [] };
+    },
+    invalidate() {},
+  };
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => 5000, agentMatchers: MATCHERS });
+  const stale = p.refresh();
+  await new Promise((r) => setImmediate(r));
+  p.invalidate();
+  const fresh = p.refresh();
+  getGate.resolve();
+  const [s, f] = await Promise.all([stale, fresh]);
+  assert.equal(gets, 2); // el get viejo no quedó en details: se repitió
+  assert.equal(s[0].agent, "shell"); // se entrega la consulta posterior al invalidate
+  assert.equal(f[0].agent, "shell");
+  assert.equal(p.cachedRows()[0].agent, "shell");
+});
