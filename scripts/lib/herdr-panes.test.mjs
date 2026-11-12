@@ -396,6 +396,48 @@ test("S3: tamaño estable (hay visor) → snapshots siempre; tamaño headless 20
   assert.deepEqual(head.calls.snap[0], { cols: 200, rows: 120, history: 1000 });
 });
 
+test("S3: cambio de tamaño que NO es el headless (un visor acomodó la pestaña) → sin pausa ni log; se vuelve a verificar", async () => {
+  // snapshot devuelve otro tamaño que el leído, pero no 200x120: lo movió la app, no nuestro attach
+  const viaSnap = guardHarness({ startSize: { cols: 80, rows: 24 }, snapSize: { cols: 160, rows: 41 }, afterSize: { cols: 160, rows: 41 } });
+  await viaSnap.panes.refresh();
+  for (let i = 0; i < 3; i++) { viaSnap.clock.adv(2000); assert.equal((await viaSnap.panes.view("hc:t9")).colored, true); }
+  assert.equal(viaSnap.calls.snap.length, 3); // sigue pidiendo snapshots: no hay pausa de 10 min
+  assert.deepEqual(viaSnap.calls.snap[1], { cols: 160, rows: 41, history: 1000 }); // con el tamaño nuevo, releído
+  assert.equal(viaSnap.logs.length, 0);
+  // el cambio lo detecta el `hc get` posterior
+  const viaGet = guardHarness({ startSize: { cols: 80, rows: 24 }, snapSize: { cols: 80, rows: 24 }, afterSize: { cols: 160, rows: 41 } });
+  await viaGet.panes.refresh();
+  await viaGet.panes.view("hc:t9");
+  viaGet.clock.adv(2000);
+  assert.equal((await viaGet.panes.view("hc:t9")).colored, true);
+  assert.equal(viaGet.calls.snap.length, 2);
+  assert.equal(viaGet.logs.length, 0);
+});
+
+test("S3: pausado por sin visor, pero un visor llega y saca el terminal del tamaño headless → vuelve el color sin esperar 10 min", async () => {
+  let cur = { cols: 91, rows: 17 };
+  const snaps = [];
+  const herdr = {
+    async list() { return ROWS; },
+    async get() { return { ok: true, cwd: "/c", cols: cur.cols, rows: cur.rows, where: null }; },
+    async read() { return { ok: true, text: "plano" }; },
+    async coreAlive() { return true; },
+  };
+  const conn = { snapshot: async (a, o) => { snaps.push(o); if (snaps.length === 1) cur = { cols: 200, rows: 120 }; return { ok: true, bytes: Buffer.alloc(1), cols: cur.cols, rows: cur.rows }; }, close() {} };
+  const logs = [];
+  const { clock, panes } = mk({ createHerdr: () => herdr, createConn: () => conn, paint: () => ({ lines: ["c"], complete: true }), log: (x) => logs.push(x) });
+  await panes.refresh();
+  await panes.view("hc:t9"); // nuestro attach lo llevó a 200x120 → pausa
+  assert.equal(logs.length, 1);
+  clock.adv(6000);
+  assert.equal((await panes.view("hc:t9")).text, "plano"); // sigue en 200x120: sin visor
+  assert.equal(snaps.length, 1);
+  cur = { cols: 160, rows: 41 }; // la app abre la pestaña y la acomoda
+  clock.adv(6000);
+  assert.equal((await panes.view("hc:t9")).colored, true);
+  assert.deepEqual(snaps[1], { cols: 160, rows: 41, history: 1000 });
+});
+
 test("B2: con el core muerto se cierra el hc connect, se vacía el estado y no se llama a hc", async () => {
   let alive = true;
   let closed = 0;
@@ -444,7 +486,7 @@ test("R4-4: la pausa de 10 min sobrevive a un dropState por sonda fallida", asyn
   let snaps = 0;
   const herdr = {
     async list() { return alive ? ROWS : []; },
-    async get() { return { ok: true, cwd: "/c", cols: 91, rows: 17, where: null }; },
+    async get() { return { ok: true, cwd: "/c", ...(snaps ? { cols: 200, rows: 120 } : { cols: 91, rows: 17 }), where: null }; }, // tras el attach se queda en headless
     async read() { return { ok: true, text: "plano" }; },
     async coreAlive() { return alive; },
   };

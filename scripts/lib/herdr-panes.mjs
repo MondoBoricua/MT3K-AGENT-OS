@@ -278,7 +278,14 @@ export function createHerdrPanes({
     const st = colorState.get(address) || { fails: 0, until: 0 };
     if (now() < st.until) return null;
     let guard = resizeGuard.get(address);
-    if (guard && guard.pausedUntil > now()) return null; // sin visor humano: texto plano hasta que pase la pausa
+    if (guard && guard.pausedUntil > now()) {
+      // Pausado por "sin visor". Si el terminal ya NO está en el tamaño headless es que un visor lo acomodó (la app
+      // abrió su pestaña después de nuestro attach): se levanta la pausa. `currentSize` cachea el `hc get` 5 s.
+      const sz = await currentSize(h, id, address);
+      if (!sz || (sz.cols === HEADLESS.cols && sz.rows === HEADLESS.rows)) return null; // sigue sin visor: texto plano
+      guard = null;
+      resizeGuard.delete(address);
+    }
     if (guard && guard.pausedUntil) { guard = null; resizeGuard.delete(address); }
     // S0: tamaño leído con `hc get` ANTES del primer snapshot de este terminal
     const size = await currentSize(h, id, address, !guard);
@@ -289,6 +296,7 @@ export function createHerdrPanes({
     conn ||= createConn(hcPath, { canSpawn: () => h.coreAlive() });
     let text = null;
     let resized = false;
+    let after = null; // tamaño visto DESPUÉS del attach, cuando difiere del pedido
     try {
       // OJO: un attach observer SIN espectador humano mueve el terminal al tamaño headless (200x120) pase lo
       // que pase (spike PROTOCOL.md §6; SIGWINCH al programa, persiste tras el detach) e `hc get` no dice si hay
@@ -298,20 +306,27 @@ export function createHerdrPanes({
       // lo evita por completo.
       const snap = await conn.snapshot(address, { cols: size.cols, rows: size.rows, history: READ_HISTORY_LINES });
       if (snap.ok) {
-        if (!headless && (snap.cols !== size.cols || snap.rows !== size.rows)) resized = true;
+        if (!headless && (snap.cols !== size.cols || snap.rows !== size.rows)) { resized = true; after = { cols: snap.cols, rows: snap.rows }; }
         if (!headless && !resized && !guard?.verified) {
           const g = await h.get(id).catch(() => ({ ok: false }));
-          if (g.ok && (g.cols !== size.cols || g.rows !== size.rows)) resized = true;
+          if (g.ok && (g.cols !== size.cols || g.rows !== size.rows)) { resized = true; after = { cols: g.cols, rows: g.rows }; }
         }
         const t0 = perfNow();
         const p = paint(snap.bytes, { cols: snap.cols, rows: snap.rows });
         if (p.complete && p.lines.length > 0 && perfNow() - t0 <= PAINT_SLOW_MS) text = p.lines.join("\n");
       }
     } catch { text = null; }
-    if (resized) {
+    // Solo cuenta como "sin visor" si el terminal acabó en el tamaño headless: eso es lo que hace NUESTRO attach.
+    // Un cambio a cualquier otro tamaño lo hizo un visor (p. ej. la app acomodando una pestaña recién creada):
+    // no se pausa; se olvida el tamaño leído y la siguiente vista vuelve a medir y a verificar.
+    const wentHeadless = resized && after?.cols === HEADLESS.cols && after?.rows === HEADLESS.rows;
+    if (wentHeadless) {
       resizeGuard.set(address, { verified: true, pausedUntil: now() + NO_VIEWER_PAUSE_MS });
       details.delete(address);
       log(`[mt3k] herdr: ${address} sin visor; vista en texto plano`);
+    } else if (resized) {
+      resizeGuard.delete(address);
+      details.delete(address);
     } else if (!guard) resizeGuard.set(address, { verified: true, pausedUntil: 0 });
     if (text !== null) colorState.set(address, { fails: 0, until: 0 });
     else {
