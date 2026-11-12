@@ -28,6 +28,8 @@
  *                                         carry a start sequence and a scan older than the last kill is rejected;
  *                                         tombstones accumulate pane ids + pane_pid (Windows label reuse)
  *   GET|POST /api/restore-config          → read/toggle automatic session restore on startup (data/restore.json)
+ *   GET|POST /api/launch-backend          → where NEW sessions are created: tmux (default) | herdr (data/launch-backend.json);
+ *                                         herdr only when a core is already running (never started), else tmux + `fallback`
  *   GET  /api/logs                        → data/logs/*.md (Memory / Activity pages)
  *   GET  /api/skills                      → reads ~/.agents/skills SKILL.md frontmatter (Skills page)
  *   GET  /api/manifest                    → current panel manifest
@@ -90,6 +92,7 @@ import { createKillTombstones } from "./lib/kill-tombstones.mjs";
 import { createLedgerStore } from "./lib/ledger-store.mjs";
 import { isHerdrId } from "./lib/herdr.mjs";
 import { containsHerdrId, createHerdrPanes, herdrKeyArgs, herdrUnavailableBody } from "./lib/herdr-panes.mjs";
+import { createHerdrLauncher, herdrLaunchArgv } from "./lib/herdr-launch.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -97,6 +100,7 @@ const LOGS = join(ROOT, "data", "logs");
 const PANE_LABELS_FILE = join(ROOT, "data", "pane-labels.json");
 const SNAPSHOT_FILE = join(ROOT, "data", "session-snapshot.json");
 const RESTORE_CFG_FILE = join(ROOT, "data", "restore.json");
+const LAUNCH_BACKEND_FILE = join(ROOT, "data", "launch-backend.json");
 const SKILLS_DIR = join(homedir(), ".agents", "skills");
 const GRAPHIFY = [join(homedir(), ".local/bin/graphify"), "graphify"].find((p) => p === "graphify" || existsSync(p));
 const PORT = Number(process.env.MT3K_PORT) || 4288;
@@ -344,6 +348,7 @@ const denyUnlessCap = (res, def, op) => {
 const herdrPanes = createHerdrPanes({ enabled: process.env.MT3K_HERDR !== "0", color: process.env.MT3K_HERDR_COLOR !== "0", tildify });
 // el único `hc connect` (vistas en color) no sobrevive al servidor
 process.on("exit", () => herdrPanes.close());
+const herdrLauncher = createHerdrLauncher({ getHerdr: () => herdrPanes.hc() });
 for (const sig of ["SIGTERM", "SIGINT"]) process.once(sig, () => process.exit(0));
 /** 400 uniforme para los endpoints que no soportan Herdr; true = ya respondió. */
 const denyHerdrId = (res, paneId) => {
@@ -1022,6 +1027,26 @@ function writeRestoreConfig(auto) {
   renameSync(tmp, RESTORE_CFG_FILE);
 }
 
+// Dónde se crean las sesiones NUEVAS: "tmux" (por defecto, también si falta o está corrupto el archivo) o "herdr".
+const LAUNCH_BACKENDS = ["tmux", "herdr"];
+function readLaunchBackend() {
+  if (process.env.MT3K_HERDR === "0") return "tmux";
+  try {
+    if (!existsSync(LAUNCH_BACKEND_FILE)) return "tmux";
+    const b = readJSON(LAUNCH_BACKEND_FILE)?.backend;
+    return LAUNCH_BACKENDS.includes(b) ? b : "tmux";
+  } catch {
+    return "tmux";
+  }
+}
+
+function writeLaunchBackend(backend) {
+  mkdirSync(dirname(LAUNCH_BACKEND_FILE), { recursive: true });
+  const tmp = `${LAUNCH_BACKEND_FILE}.mt3k-tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify({ backend }, null, 2) + "\n", "utf8");
+  renameSync(tmp, LAUNCH_BACKEND_FILE);
+}
+
 setInterval(() => { saveCurrentSnapshot().catch(() => {}); }, 60000).unref();
 
 // scan for graphified repos that aren't tracked yet: ~/Developer (deep) + home top-level (shallow,
@@ -1189,28 +1214,10 @@ async function waitOnHerdr({ res, paneId, until, timeoutSec, baseline = null, sa
   });
 }
 
-async function launchLocalSession(
-  { agentId, projectId, cwd: cwdIn, create, firstPrompt, fresh } = {},
-  { internalLabelName = "", replacesSessionName = "" } = {}
-) {
-  if (!HAS_TMUX) return { ok: false, status: 400, err: "tmux no está instalado en este host" };
-  const def = AGENT_DEFS.find((a) => a.id === agentId);
-  const isShell = agentId === "shell";
-  if (!def || (!isShell && !(def.proc && def.proc.length))) return { ok: false, status: 400, err: "agente no lanzable" };
-  const gate = requireCapability(def, adapterEnv(), "launch");
-  if (!gate.ok) return { ok: false, status: gate.status, err: gate.err };
-  const bin = isShell ? null : def.bins.map(absBin).find(Boolean);
-  if (!isShell && !bin) return { ok: false, status: 400, err: `${def.name} no está instalado` };
-  const target = await resolveLaunchCwd({ projectId, cwd: cwdIn });
-  if (target.err && !(target.missingDir && create)) {
-    const { status, cwd: _cwd, ...error } = target;
-    return { ok: false, status, ...error };
-  }
-  const cwd = target.cwd;
-  if (target.missingDir) {
-    try { mkdirSync(target.cwd, { recursive: true }); } catch { return { ok: false, status: 500, err: "no se pudo crear la carpeta" }; }
-  }
-  const session = mt3kSessionName(agentId, basename(cwd) || "home");
+// Executable + args + env of a NEW session, shared by every backend (tmux and herdr build their command from this one
+// result, so YOLO flags, the claude --settings overlay and resume args can never drift apart). It may reserve a resume
+// slot: the caller releases it (see RESUME_HOLD_MS) once the session exists or the launch is abandoned.
+async function composeLaunchCommand({ def, agentId, bin, isShell, cwd, fresh }) {
   let cmd = isShell ? [] : [bin];
   let launchEnvPairs = [];
   let resumed = false;
@@ -1246,6 +1253,94 @@ async function launchLocalSession(
     ownsResumeReservation = false;
   }
   if (!isShell && cmd.length === 1) cmd = composeTmuxArgv({ bin, envPairs: [], args: [] });
+  return { cmd, launchEnvPairs, resumed, reason, resumeReservation, ownsResumeReservation };
+}
+
+// Backend herdr de un lanzamiento (solo /api/launch con data/launch-backend.json = herdr). Devuelve
+// { result } si ya respondió (éxito o error sin tmux) o { fallback } para que el llamador abra en tmux.
+// Nunca arranca un core ni la app de Herdr: sin core vivo cae a tmux.
+const HERDR_FALLBACK_NO_CORE = "herdr no está corriendo; se abrió en tmux";
+const HERDR_FALLBACK_NOT_INSTALLED = "herdr no está instalado; se abrió en tmux";
+const HERDR_FALLBACK_WIN_ENV = "herdr no admite variables de entorno en Windows; se abrió en tmux";
+async function launchInHerdr({ agentId, session, cwd, cmd, launchEnvPairs, resumed, reason, firstPrompt }) {
+  if (IS_WIN && launchEnvPairs.length) return { fallback: HERDR_FALLBACK_WIN_ENV };
+  const argv = herdrLaunchArgv({ cmd, path: await agentPath(), platform: process.platform });
+  const made = await herdrLauncher.launch({ agentId, cwd, argv });
+  if (!made.ok) {
+    if (made.reason === "no-core") return { fallback: HERDR_FALLBACK_NO_CORE };
+    if (made.reason === "not-installed") return { fallback: HERDR_FALLBACK_NOT_INSTALLED };
+    return { result: { ok: false, status: 500, err: made.err || "no se pudo abrir en herdr" } };
+  }
+  herdrPanes.invalidate();
+  await herdrPanes.refresh(true); // el terminal nuevo ya es conocido (y su etiqueta leída) cuando el panel lo abre
+  const paneId = made.paneId;
+  const cleanCwd = tildify(cwd);
+  if (typeof firstPrompt === "string" && firstPrompt.trim() && firstPrompt.length <= 64000) {
+    (async () => {
+      let prev = "";
+      for (let i = 0; i < 10; i++) {
+        await new Promise((ok) => setTimeout(ok, 2000));
+        const cap = await herdrPanes.read(paneId, 0);
+        if (!cap.ok) return;
+        if (cap.text.trim() && cap.text === prev) break;
+        prev = cap.text;
+      }
+      const sent = await herdrPanes.send(paneId, firstPrompt.trim());
+      if (sent.ok) markPaneTurnStarted(paneId);
+      logEvent(`first-prompt · ${agentId} · herdr · "${firstPrompt.slice(0, 60).replace(/\s+/g, " ").trim()}"`);
+    })().catch(() => {});
+  }
+  markPaneLaunched(paneId);
+  logEvent(`launch · ${agentId} · ${session} · ${cleanCwd} · resumed=${resumed} · herdr(${made.via})`);
+  return {
+    result: {
+      ok: true,
+      status: 200,
+      paneId,
+      label: made.name || made.address,
+      session: made.name || made.address,
+      cwd: cleanCwd,
+      resumed,
+      reason,
+      ledger: "no-aplica", // las sesiones de herdr no entran al ledger de restauración (que reabre en tmux)
+      backend: "herdr",
+      ...(made.warning ? { warning: made.warning } : { killable: true }),
+    },
+  };
+}
+
+async function launchLocalSession(
+  { agentId, projectId, cwd: cwdIn, create, firstPrompt, fresh } = {},
+  { internalLabelName = "", replacesSessionName = "", allowHerdr = false } = {}
+) {
+  if (!HAS_TMUX) return { ok: false, status: 400, err: "tmux no está instalado en este host" };
+  const def = AGENT_DEFS.find((a) => a.id === agentId);
+  const isShell = agentId === "shell";
+  if (!def || (!isShell && !(def.proc && def.proc.length))) return { ok: false, status: 400, err: "agente no lanzable" };
+  const gate = requireCapability(def, adapterEnv(), "launch");
+  if (!gate.ok) return { ok: false, status: gate.status, err: gate.err };
+  const bin = isShell ? null : def.bins.map(absBin).find(Boolean);
+  if (!isShell && !bin) return { ok: false, status: 400, err: `${def.name} no está instalado` };
+  const target = await resolveLaunchCwd({ projectId, cwd: cwdIn });
+  if (target.err && !(target.missingDir && create)) {
+    const { status, cwd: _cwd, ...error } = target;
+    return { ok: false, status, ...error };
+  }
+  const cwd = target.cwd;
+  if (target.missingDir) {
+    try { mkdirSync(target.cwd, { recursive: true }); } catch { return { ok: false, status: 500, err: "no se pudo crear la carpeta" }; }
+  }
+  const session = mt3kSessionName(agentId, basename(cwd) || "home");
+  let { cmd, launchEnvPairs, resumed, reason, resumeReservation, ownsResumeReservation } = await composeLaunchCommand({ def, agentId, bin, isShell, cwd, fresh });
+  let fallback = "";
+  if (allowHerdr && readLaunchBackend() === "herdr") {
+    const viaHerdr = await launchInHerdr({ agentId, session, cwd, cmd, launchEnvPairs, resumed, reason, firstPrompt });
+    if (viaHerdr.result) {
+      if (ownsResumeReservation) setTimeout(() => resumeLaunchReservations.delete(resumeReservation), RESUME_HOLD_MS);
+      return viaHerdr.result;
+    }
+    fallback = viaHerdr.fallback;
+  }
   let r;
   try {
     const tmuxEnv = { PATH: await agentPath() };
@@ -1318,6 +1413,7 @@ async function launchLocalSession(
     // ledger: ok | pendiente (write failed, kept as a pending intent) | <error reason>
     ledger: launchLedger.applied || launchLedger.reason === "not-tracked" || launchLedger.reason === "unchanged" ? "ok" : launchLedger.queued ? "pendiente" : launchLedger.reason,
     ...(cleanLabelName ? { name: cleanLabelName } : {}),
+    ...(fallback ? { fallback } : {}),
   };
 }
 
@@ -1834,6 +1930,22 @@ async function api(req, res, path) {
     return sendJSON(res, 200, { ok: true, ...readRestoreConfig() });
   }
 
+  // dónde se abren las sesiones NUEVAS (tmux | herdr). Misma compuerta que restore-config: el token global de /api/*.
+  if (path === "/api/launch-backend" && req.method === "GET") {
+    return sendJSON(res, 200, { ok: true, backend: readLaunchBackend(), herdr: await herdrLauncher.status() });
+  }
+
+  if (path === "/api/launch-backend" && req.method === "POST") {
+    const { backend } = await body(req);
+    if (!LAUNCH_BACKENDS.includes(backend)) return sendJSON(res, 400, { ok: false, err: "backend inválido (tmux | herdr)" });
+    if (backend === "herdr" && !(await herdrLauncher.status()).installed) {
+      return sendJSON(res, 400, { ok: false, err: "Herdr no está instalado en este host" });
+    }
+    writeLaunchBackend(backend);
+    logEvent(`launch-backend · ${backend}`);
+    return sendJSON(res, 200, { ok: true, backend: readLaunchBackend() });
+  }
+
   if (path === "/api/restore-config" && req.method === "POST") {
     const { auto } = await body(req);
     writeRestoreConfig(Boolean(auto));
@@ -2190,7 +2302,7 @@ async function api(req, res, path) {
   // AGENT_DEFS (allowlist) — never from the client; cwd is a tracked project or a real dir.
   if (path === "/api/launch" && req.method === "POST") {
     const payload = await body(req);
-    const launched = await launchLocalSession(payload);
+    const launched = await launchLocalSession(payload, { allowHerdr: true });
     const { status, ...rest } = launched;
     return sendJSON(res, status || (launched.ok ? 200 : 400), rest);
   }
@@ -2198,7 +2310,16 @@ async function api(req, res, path) {
   // kill an agent's tmux pane (its dedicated session dies with its last pane)
   if (path === "/api/kill" && req.method === "POST") {
     const { paneId } = await body(req);
-    if (denyHerdrId(res, paneId)) return;
+    if (isHerdrId(paneId)) {
+      // solo terminales que abrió el panel (etiqueta mt3k.panel=1, releída por el adaptador al cerrar)
+      const hc = herdrPanes.hc();
+      if (!hc) return sendJSON(res, 400, herdrUnavailableBody());
+      const closed = await hc.killOwned(paneId);
+      herdrPanes.invalidate();
+      if (!closed.ok) return sendJSON(res, closed.status, { ok: false, err: closed.err });
+      logEvent(`kill · ${paneId} · herdr`);
+      return sendJSON(res, 200, { ok: true, paneId, ledger: "no-aplica" });
+    }
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "kill")) return;
