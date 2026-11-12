@@ -18,6 +18,8 @@ import {
 import AgentLogo from "./AgentLogo";
 import { TerminalLine } from "./TerminalLines";
 import { useTerminalLinks } from "../lib/use-terminal-links";
+import { usePathPreview } from "../lib/use-path-preview";
+import { PathPreviewCard } from "./PathPreviewCard";
 
 type Props = {
   agent: AgentRow | null; // the agent whose terminal/compose sheet is open (null = closed)
@@ -247,6 +249,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
   const [fittedMobileFont, setFittedMobileFont] = useState(11);
   const [termWide, setTermWide] = useState(false);
   const termFont = termWide ? userTermFont : fittedMobileFont;
+  const pathPreview = usePathPreview(termRef, host, `${paneToWatch}|${fullscreen}`);
   // Refs para que el debounce del RO no use fuente/host viejos si el efecto no se re-montó.
   const termFontLive = useRef(termFont);
   const hostLive = useRef(host);
@@ -657,6 +660,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
               ? term.map((line, index) => <TerminalLine key={index} line={line} last={index === term.length - 1} branches={links.branches} />)
               : <span style={{ opacity: .4 }}>cargando terminal…</span>}
           </pre>
+          <PathPreviewCard {...pathPreview} />
           {/* alt-screen TUI: no scrollback exists — say so, and (where it works) page the TUI itself */}
           {altPane && (
             <div className="pointer-events-none absolute right-2 top-2 flex flex-col items-end gap-1">

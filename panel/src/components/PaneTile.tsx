@@ -10,6 +10,8 @@ import { HerdrBadge } from "./HerdrBadge";
 import { HERDR_UNAVAILABLE_TITLE, isHerdrPane } from "../lib/herdr-pane";
 import { TerminalLine } from "./TerminalLines";
 import { useTerminalLinks } from "../lib/use-terminal-links";
+import { usePathPreview } from "../lib/use-path-preview";
+import { PathPreviewCard } from "./PathPreviewCard";
 
 type Props = {
   session: Session;
@@ -39,6 +41,7 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
   const [localName, setLocalName] = useState<string | null>(null);
   const latestTerm = useRef<string[]>([]);
   const termRef = useRef<HTMLPreElement>(null);
+  const pathPreview = usePathPreview(termRef, host, pane.paneId);
   const stickToBottom = useRef(true);
   const [scrolledUp, setScrolledUp] = useState(false);
   const resizeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -224,6 +227,7 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
             ? term.map((line, idx) => <TerminalLine key={idx} line={line} last={idx === term.length - 1} branches={links.branches} />)
             : <span className="opacity-40">cargando terminal…</span>}
         </pre>
+        <PathPreviewCard {...pathPreview} />
         {scrolledUp && (
           <button
             type="button"

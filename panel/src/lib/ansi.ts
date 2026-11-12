@@ -152,7 +152,8 @@ function linkify(raw: string): string {
       html += `<a href="${escAttr(h.text)}" target="_blank" rel="noopener noreferrer" ${URL_STYLE}>${esc(h.text)}</a>`;
     } else {
       const fsPath = h.text.replace(LINE_SUFFIX_RE, "");
-      html += `<a data-fs-path="${escAttr(fsPath)}" title="abrir en Files" ${LINK_STYLE}>${esc(h.text)}</a>`;
+      const line = /:(\d+)(?::\d+)?$/.exec(h.text)?.[1];
+      html += `<a${line ? ` data-fs-line="${escAttr(line)}"` : ""} data-fs-path="${escAttr(fsPath)}" title="abrir en Files" ${LINK_STYLE}>${esc(h.text)}</a>`;
     }
     i = h.end;
   }

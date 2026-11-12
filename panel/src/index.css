@@ -331,3 +331,12 @@ button, [role="button"] { -webkit-user-select: none; user-select: none; }
 @media (prefers-reduced-motion: reduce) {
   @starting-style { .toast-enter { transform: none; } }
 }
+
+@keyframes path-preview-enter {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.path-preview { animation: path-preview-enter var(--dur-fast) var(--ease-out); }
+@media (prefers-reduced-motion: reduce) {
+  .path-preview { animation: none; }
+}
