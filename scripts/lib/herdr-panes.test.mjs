@@ -315,6 +315,7 @@ test("color: el tamaño se refresca con get si tiene más de 5 s", async () => {
   const conn = { snapshot: async () => ({ ok: true, bytes: Buffer.alloc(1), cols: 90, rows: 30 }), close() {} };
   const { clock, panes } = mk({ createHerdr: () => herdr, createConn: () => conn, paint: () => ({ lines: ["a"], complete: true }) });
   await panes.refresh();
+  await panes.view("hc:t9"); // primera vista: S0 fresco + verificación posterior
   const g0 = calls.get.length;
   await panes.view("hc:t9");
   assert.equal(calls.get.length, g0);
@@ -341,4 +342,85 @@ test("B1: una conversión lenta (>150 ms) o incompleta cuenta como fallo; 3 → 
   c.adv(61000);
   await panes.view("hc:t9");
   assert.equal(n, 4);
+});
+
+function guardHarness({ startSize, snapSize, afterSize }) {
+  let cur = startSize;
+  const calls = { get: 0, snap: [] };
+  const herdr = {
+    async list() { return ROWS; },
+    async get() { calls.get++; return { ok: true, cwd: "/c", cols: cur.cols, rows: cur.rows, where: null }; },
+    async read() { return { ok: true, text: "plano" }; },
+    async coreAlive() { return true; },
+  };
+  const conn = { snapshot: async (a, o) => { calls.snap.push(o); cur = afterSize || cur; return { ok: true, bytes: Buffer.alloc(1), cols: snapSize.cols, rows: snapSize.rows }; }, close() {} };
+  const logs = [];
+  const m = mk({ createHerdr: () => herdr, createConn: () => conn, paint: () => ({ lines: ["c"], complete: true }), log: (x) => logs.push(x) });
+  return { ...m, calls, logs };
+}
+
+test("S3: si el attach cambió el tamaño (sin visor) → una línea de log y 10 min de texto plano, luego reintento", async () => {
+  const { clock, panes, calls, logs } = guardHarness({ startSize: { cols: 91, rows: 17 }, snapSize: { cols: 200, rows: 120 }, afterSize: { cols: 200, rows: 120 } });
+  await panes.refresh();
+  assert.equal((await panes.view("hc:t9")).colored, true); // la primera vista sí se sirve
+  assert.deepEqual(logs, ["[mt3k] herdr: t9 sin visor; vista en texto plano"]);
+  assert.equal(calls.snap.length, 1);
+  for (let i = 0; i < 5; i++) { clock.adv(2000); assert.equal((await panes.view("hc:t9")).text, "plano"); }
+  assert.equal(calls.snap.length, 1); // sin más attaches
+  assert.equal(logs.length, 1);
+  clock.adv(10 * 60 * 1000);
+  await panes.view("hc:t9");
+  assert.equal(calls.snap.length, 2);
+});
+
+test("S3: un `hc get` posterior al primer snapshot también detecta el resize", async () => {
+  const { panes, calls, logs } = guardHarness({ startSize: { cols: 91, rows: 17 }, snapSize: { cols: 91, rows: 17 }, afterSize: { cols: 200, rows: 120 } });
+  await panes.refresh();
+  await panes.view("hc:t9");
+  assert.equal(logs.length, 1);
+  await panes.view("hc:t9");
+  assert.equal(calls.snap.length, 1);
+});
+
+test("S3: tamaño estable (hay visor) → snapshots siempre; tamaño headless 200x120 → siempre permitido", async () => {
+  const stable = guardHarness({ startSize: { cols: 96, rows: 43 }, snapSize: { cols: 96, rows: 43 } });
+  await stable.panes.refresh();
+  for (let i = 0; i < 4; i++) { stable.clock.adv(2000); assert.equal((await stable.panes.view("hc:t9")).colored, true); }
+  assert.equal(stable.calls.snap.length, 4);
+  assert.equal(stable.logs.length, 0);
+  const head = guardHarness({ startSize: { cols: 200, rows: 120 }, snapSize: { cols: 200, rows: 120 } });
+  await head.panes.refresh();
+  for (let i = 0; i < 3; i++) await head.panes.view("hc:t9");
+  assert.equal(head.calls.snap.length, 3);
+  assert.deepEqual(head.calls.snap[0], { cols: 200, rows: 120, history: 1000 });
+});
+
+test("B2: con el core muerto se cierra el hc connect, se vacía el estado y no se llama a hc", async () => {
+  let alive = true;
+  let closed = 0;
+  const herdr = {
+    async list() { return alive ? ROWS : []; },
+    async get() { return { ok: true, cwd: "/c", cols: 96, rows: 43, where: null }; },
+    async read() { return { ok: true, text: "plano" }; },
+    async coreAlive() { return alive; },
+  };
+  const conn = { snapshot: async () => ({ ok: true, bytes: Buffer.alloc(1), cols: 96, rows: 43 }), close() { closed++; } };
+  const { clock, panes } = mk({ createHerdr: () => herdr, createConn: () => conn, paint: () => ({ lines: ["c"], complete: true }) });
+  await panes.refresh();
+  await panes.view("hc:t9");
+  alive = false;
+  clock.adv(2100);
+  assert.deepEqual(await panes.refresh(), []);
+  assert.equal(closed, 1);
+  assert.equal(panes.connStats(), null);
+});
+
+test("N10: explain lee solo la pantalla (lines 0), no 1000 líneas", async () => {
+  const reads = [];
+  const herdr = { async list() { return ROWS; }, async read(id, o) { reads.push(o.lines); return { ok: true, text: "a\nb" }; } };
+  const { panes } = mk({ createHerdr: () => herdr });
+  await panes.refresh();
+  await panes.explain("hc:t9");
+  assert.deepEqual(reads, [0]);
+  assert.equal(panes.failure({ ok: false, err: "texto inválido" }).status, 400);
 });

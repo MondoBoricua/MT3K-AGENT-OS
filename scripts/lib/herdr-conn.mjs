@@ -27,7 +27,9 @@ export function encodeObserverWrite(message, framed) {
 }
 
 /** One lazy, read-only hc connect transport. No other hc command is invoked. */
-export function createHerdrConn({ hcPath = 'hc', spawn = nodeSpawn, env = process.env, now = Date.now, idleMs = 30000 } = {}) {
+export function createHerdrConn({ hcPath = 'hc', spawn = nodeSpawn, env = process.env, now = Date.now, idleMs = 30000, canSpawn = null } = {}) {
+  // canSpawn: async () => boolean, se consulta justo antes de CADA spawn (y respawn) de `hc connect`: en POSIX
+  // `hc connect` autoarranca un core si no hay ninguno. Carrera ~1 ms entre sondeo y spawn, inevitable.
   let closed = false, conn = null, connecting = null, active = 0, nextId = 1;
   let failures = 0, retryAt = 0, spawns = 0, idle = null;
   const timers = new Map(), inflight = new Map(), queue = [];
@@ -84,7 +86,7 @@ export function createHerdrConn({ hcPath = 'hc', spawn = nodeSpawn, env = proces
       const cols = payload.readUInt16LE(0), rows = payload.readUInt16LE(2);
       if (!cols || !rows) throw new Error('invalid size');
       // A resize followed by replacement paint invalidates previous collected bytes.
-      p.cols = cols; p.rows = rows; p.chunks = []; p.length = 0;
+      p.cols = clamp(cols, 20, 500, p.cols); p.rows = clamp(rows, 5, 300, p.rows); p.chunks = []; p.length = 0;
       clear(p.quiet); p.quiet = null;
     } else if (kind === 0) {
       if (!payload.length) return; // Empty DATA must not grow the chunk list.
@@ -111,6 +113,7 @@ export function createHerdrConn({ hcPath = 'hc', spawn = nodeSpawn, env = proces
         const reply = JSON.parse(c.hello.subarray(0, c.helloLength).toString('utf8'));
         if (reply.id !== c.helloId || reply.result?.framed !== true) throw new Error('framed hello refused');
         c.framed = true; c.hello = null; clear(c.helloTimer);
+        failures = 0; retryAt = 0; // hello correcto: el backoff empieza de cero
         c.ready(c); c.ready = null;
         continue;
       }
@@ -133,11 +136,23 @@ export function createHerdrConn({ hcPath = 'hc', spawn = nodeSpawn, env = proces
   }
   async function ensure() {
     if (closed) return null;
-    if (conn && !conn.dead && conn.framed) return conn;
+    if (conn && !conn.dead && conn.framed) {
+      if (!canSpawn) return conn;
+      let can = false;
+      try { can = await canSpawn(); } catch { can = false; }
+      if (can) return conn;
+      fail(conn, 'core unavailable', true); // core muerto: se cierra el hijo y no se vuelve a lanzar
+      return null;
+    }
     if (connecting) return connecting;
     connecting = (async () => {
-      if (retryAt > now() && !await sleep(retryAt - now())) return null;
+      if (retryAt > now()) return null; // reintento pendiente: el llamador cae a texto plano, no se duerme dentro de la petición
       if (closed) return null;
+      if (canSpawn) {
+        let can = false;
+        try { can = await canSpawn(); } catch { can = false; }
+        if (!can || closed) return null;
+      }
       let child;
       try { child = spawn(hcPath, ['connect'], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }); }
       catch { retryAt = now() + Math.min(30000, 1000 * 2 ** Math.min(failures++, 5)); return null; }
@@ -182,8 +197,9 @@ export function createHerdrConn({ hcPath = 'hc', spawn = nodeSpawn, env = proces
       const channel = reply?.channel;
       if (!Number.isInteger(channel) || channel < 1 || channel > 0xffffffff || c.channels.has(channel)) throw new Error('invalid attach channel');
       p.channel = channel;
-      if (Number.isInteger(reply?.terminal?.cols) && reply.terminal.cols > 0) p.cols = reply.terminal.cols;
-      if (Number.isInteger(reply?.terminal?.rows) && reply.terminal.rows > 0) p.rows = reply.terminal.rows;
+      // tamaño autoritativo del terminal, acotado a los mismos límites que la petición
+      if (Number.isInteger(reply?.terminal?.cols) && reply.terminal.cols > 0) p.cols = clamp(reply.terminal.cols, 20, 500, p.cols);
+      if (Number.isInteger(reply?.terminal?.rows) && reply.terminal.rows > 0) p.rows = clamp(reply.terminal.rows, 5, 300, p.rows);
       c.channels.set(channel, p);
       p.first = later(() => p.finish(error('no repaint received')), 2000);
     });

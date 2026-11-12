@@ -116,7 +116,7 @@ test('child exit during attach fails request, then lazy respawn respects backoff
   await delay(10); assert.equal(fake.children.length, 1, 'no eager reconnect');
   time = 11000;
   assert.equal((await conn.snapshot('t9')).ok, true); assert.equal(fake.children.length, 2);
-  fake.children[1].kill(); assert.equal(conn.stats().retryAt, 13000);
+  fake.children[1].kill(); assert.equal(conn.stats().retryAt, 12000, 'a good hello reset the backoff');
 });
 test('close interrupts a pending reconnect delay and clears every timer', async t => {
   const { conn } = setup(t, { exitFirst: true });
@@ -220,4 +220,44 @@ test('empty DATA does not start a capture or retain chunks', async t => {
     send(frame(channel, 0, Buffer.from('nonempty')));
   } });
   assert.equal((await conn.snapshot('t9')).bytes.toString(), 'nonempty');
+});
+
+test('S4: while a retry is pending snapshot() returns at once (no sleeping) and failures reset after hello', async t => {
+  let time = 10000;
+  const { conn, fake } = setup(t, { exitFirst: true }, { now: () => time });
+  assert.equal((await conn.snapshot('t9')).ok, false);
+  const t0 = performance.now();
+  const r = await conn.snapshot('t9');
+  assert.equal(r.ok, false);
+  assert.ok(performance.now() - t0 < 50, 'must not wait for the 1 s backoff');
+  assert.equal(fake.children.length, 1);
+  time = 11000;
+  assert.equal((await conn.snapshot('t9')).ok, true);
+  assert.equal(conn.stats().failures, 0);
+});
+
+test('B2: canSpawn is checked before every spawn; false never spawns and closes a live child', async t => {
+  let allowed = false, checks = 0;
+  const { conn, fake } = setup(t, {}, { canSpawn: async () => { checks++; return allowed; } });
+  assert.equal((await conn.snapshot('t9')).ok, false);
+  assert.equal(fake.children.length, 0);
+  allowed = true;
+  assert.equal((await conn.snapshot('t9')).ok, true);
+  assert.equal(fake.children.length, 1);
+  allowed = false; // el core murió con el hijo vivo
+  assert.equal((await conn.snapshot('t9')).ok, false);
+  assert.equal(fake.children[0].killCount, 1);
+  assert.equal(fake.children.length, 1);
+  assert.equal(conn.stats().connected, false);
+  assert.ok(checks >= 3);
+});
+
+test('N8: cols/rows from attach reply and resize frames are clamped to 20..500 / 5..300', async t => {
+  const { conn } = setup(t, { afterAttach({ channel, send, frame }) {
+    const size = Buffer.alloc(4); size.writeUInt16LE(9000); size.writeUInt16LE(9000, 2);
+    send(frame(channel, 3, size)); send(frame(channel, 0, Buffer.from('z')));
+  } });
+  const r = await conn.snapshot('t9');
+  assert.equal(r.ok, true);
+  assert.deepEqual([r.cols, r.rows], [500, 300]);
 });
