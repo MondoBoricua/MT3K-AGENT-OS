@@ -2,6 +2,9 @@
 // column (including CJK/emoji), except Unicode combining marks, which are zero.
 const ESC = '\x1b';
 const LIMIT = 2 * 1024 * 1024;
+// Presupuesto de trabajo por llamada (escrituras de celda, filas borradas/creadas, desplazamientos): al agotarlo
+// se devuelve complete:false y el llamador cae a texto plano. Acota el coste a ms aunque la entrada sea hostil.
+const WORK_BUDGET = 2000000;
 const MARK = /\p{Mark}/u;
 const dimension = (n, fallback, max) => Number.isFinite(n) ? Math.max(1, Math.min(max, Math.trunc(n))) : fallback;
 
@@ -31,9 +34,10 @@ export function paintToAnsiLines(bytes, options = {}) {
     if (b.length > LIMIT) complete = false;
     source = b.subarray(0, LIMIT).toString('utf8');
   } catch { return { lines: [], complete: false }; }
-  const fresh = () => ({ grid: Array.from({ length: rows }, () => []), top: 0, x: 0, y: 0, saved: null, attrs: new Map(), sgr: '' });
+  let work = 0, stopped = false;
+  const fresh = () => { work += rows; if (work > WORK_BUDGET) { complete = false; stopped = true; } return ({ grid: Array.from({ length: rows }, () => []), top: 0, x: 0, y: 0, saved: null, attrs: new Map(), sgr: '' }); };
   let s = fresh(), main = null;
-  let stopped = false;
+  const charge = (n) => { work += n; if (work > WORK_BUDGET) { complete = false; stopped = true; } return !stopped; };
   const row = () => s.grid[s.top + s.y];
   const setSgr = () => { s.sgr = s.attrs.size ? `${ESC}[${[...s.attrs.values()].join(';')}m` : ''; };
   function sgr(raw) {
@@ -44,10 +48,11 @@ export function paintToAnsiLines(bytes, options = {}) {
       if (!Number.isInteger(n) || n < 0 || n > 255) continue;
       if (n === 0) s.attrs.clear();
       else if ([38, 48, 58].includes(n)) {
+        // Colores extendidos estrictos: una secuencia incompleta o inválida se descarta entera, nunca se reinterpreta.
         const count = p[i + 1] === 2 ? 4 : p[i + 1] === 5 ? 2 : 0;
-        if (count && i + count < p.length && p.slice(i + 1, i + count + 1).every(v => Number.isInteger(v) && v >= 0 && v <= 255)) {
-          s.attrs.set(n, p.slice(i, i + count + 1).join(';')); i += count;
-        }
+        if (!count || i + count >= p.length) break;
+        if (p.slice(i + 1, i + count + 1).every(v => Number.isInteger(v) && v >= 0 && v <= 255)) s.attrs.set(n, p.slice(i, i + count + 1).join(';'));
+        i += count;
       } else if ((n >= 30 && n <= 37) || (n >= 90 && n <= 97)) s.attrs.set(38, `${n}`);
       else if ((n >= 40 && n <= 47) || (n >= 100 && n <= 107)) s.attrs.set(48, `${n}`);
       else if ([39, 49, 59].includes(n)) s.attrs.delete(n - 1);
@@ -73,14 +78,16 @@ export function paintToAnsiLines(bytes, options = {}) {
     if (s.y < rows - 1) s.y++;
     else {
       if (s.grid.length + (main?.grid.length ?? 0) >= 5000) { complete = false; stopped = true; return; }
+      if (!charge(1)) return;
       s.top++; s.grid.push([]);
     }
   }
   function eraseLine(mode) {
     const r = row(), x = Math.min(s.x, cols - 1);
     const start = mode === 0 ? x : 0, end = mode === 1 ? x + 1 : cols;
-    if (!s.sgr && end === cols) r.length = Math.min(r.length, start);
-    else for (let i = start; i < end; i++) r[i] = { ch: ' ', sgr: s.sgr };
+    if (start === 0 && end === cols) { if (charge(1)) { r.length = 0; r.pad = s.sgr; } } // fila entera: relleno perezoso, O(1)
+    else if (!s.sgr && end === cols) { if (charge(1)) r.length = Math.min(r.length, start); }
+    else if (charge(end - start)) for (let i = start; i < end; i++) r[i] = { ch: ' ', sgr: s.sgr };
   }
   const save = () => { s.saved = { x: s.x, y: s.y, attrs: new Map(s.attrs) }; };
   const restore = () => { if (s.saved) { s.x = s.saved.x; s.y = s.saved.y; s.attrs = new Map(s.saved.attrs); setSgr(); } };
@@ -109,12 +116,12 @@ export function paintToAnsiLines(bytes, options = {}) {
       case 'K': if (p[0] <= 2) eraseLine(p[0]); break;
       case 'J': {
         const mode = p[0];
-        if (mode === 3) { s.grid = s.grid.slice(s.top); s.top = 0; }
+        if (mode === 3) { if (charge(s.grid.length)) { s.grid = s.grid.slice(s.top); s.top = 0; } }
         else if (mode <= 2) {
           const y = s.y;
           if (mode === 0 || mode === 1) eraseLine(mode);
           const start = mode === 0 ? y + 1 : 0, end = mode === 1 ? y : rows;
-          for (let i = start; i < end; i++) { s.y = i; eraseLine(2); }
+          for (let i = start; i < end && !stopped; i++) { s.y = i; eraseLine(2); }
           s.y = y;
         }
         break;
@@ -170,7 +177,7 @@ export function paintToAnsiLines(bytes, options = {}) {
     while (end && (!r[end - 1] || r[end - 1].ch === ' ')) end--;
     let text = '', attr = '';
     for (let i = 0; i < end; i++) {
-      const cell = r[i], next = cell?.sgr ?? '';
+      const cell = r[i], next = cell ? cell.sgr : (r.pad ?? '');
       if (attr !== next) { if (attr) text += `${ESC}[0m`; text += next; attr = next; }
       text += cell?.ch ?? ' ';
     }

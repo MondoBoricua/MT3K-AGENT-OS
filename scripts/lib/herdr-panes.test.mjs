@@ -322,3 +322,23 @@ test("color: el tamaño se refresca con get si tiene más de 5 s", async () => {
   await panes.view("hc:t9");
   assert.equal(calls.get.length, g0 + 1);
 });
+
+test("B1: una conversión lenta (>150 ms) o incompleta cuenta como fallo; 3 → 60 s en texto plano", async () => {
+  const { herdr } = richHerdr();
+  let n = 0;
+  let clock = 0;
+  const conn = { snapshot: async () => { n++; return { ok: true, bytes: Buffer.alloc(1), cols: 90, rows: 30 }; }, close() {} };
+  const { clock: c, panes } = mk({
+    createHerdr: () => herdr, createConn: () => conn,
+    paint: () => { clock += 200; return { lines: ["a"], complete: true }; },
+    perfNow: () => clock,
+  });
+  await panes.refresh();
+  for (let i = 0; i < 3; i++) assert.equal((await panes.view("hc:t9")).text, "plano");
+  assert.equal(n, 3);
+  await panes.view("hc:t9");
+  assert.equal(n, 3);
+  c.adv(61000);
+  await panes.view("hc:t9");
+  assert.equal(n, 4);
+});

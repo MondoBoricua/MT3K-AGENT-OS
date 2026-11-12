@@ -18,6 +18,7 @@ const DETAILS_TTL_MS = 30000; // carpeta actual: refresco máximo cada 30 s por 
 const DETAILS_MAX_PER_POLL = 5; // `hc get` por ciclo de lista
 const SIZE_MAX_AGE_MS = 5000; // el tamaño del snapshot nunca es más viejo que esto
 const COLOR_FAIL_LIMIT = 3;
+const PAINT_SLOW_MS = 150; // una conversión más lenta cuenta como fallo (bloquearía el servidor)
 const COLOR_BACKOFF_MS = 60000;
 
 /** Cuerpo 400 uniforme de los endpoints que Herdr no soporta. */
@@ -99,6 +100,7 @@ export function createHerdrPanes({
   color = true,
   createConn = (hcPath) => realCreateConn({ hcPath }),
   paint = paintToAnsiLines,
+  perfNow = () => performance.now(),
 } = {}) {
   let conn = null;
   const details = new Map(); // address → { at, where, status, cwd, cols, rows }
@@ -199,8 +201,9 @@ export function createHerdrPanes({
       // humano no hay resize; sin él, el cambio es inevitable y es el límite conocido de esta vista.
       const snap = await conn.snapshot(address, { cols: size.cols, rows: size.rows, history: READ_HISTORY_LINES });
       if (snap.ok) {
+        const t0 = perfNow();
         const p = paint(snap.bytes, { cols: snap.cols, rows: snap.rows });
-        if (p.complete && p.lines.length > 0) text = p.lines.join("\n");
+        if (p.complete && p.lines.length > 0 && perfNow() - t0 <= PAINT_SLOW_MS) text = p.lines.join("\n");
       }
     } catch { text = null; }
     if (text !== null) colorState.set(address, { fails: 0, until: 0 });

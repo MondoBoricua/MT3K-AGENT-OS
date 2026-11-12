@@ -109,3 +109,47 @@ test('pathological inputs each finish within 200ms', t => {
     if (!input.endsWith('C')) assert.equal(result.complete, false);
   }
 });
+
+test('B1: coloured erase flood is bounded (complete:false) in milliseconds at both sizes', () => {
+  const payload = Buffer.from('\x1b[41m' + '\x1b[2J'.repeat(524000));
+  for (const [cols, rows] of [[200, 120], [500, 300]]) {
+    const t0 = performance.now();
+    const r = paintToAnsiLines(payload, { cols, rows });
+    const ms = performance.now() - t0;
+    assert.equal(r.complete, false);
+    assert.ok(ms < 250, `${cols}x${rows} took ${ms.toFixed(0)} ms`);
+  }
+});
+
+test('B1: other per-area loops are budgeted (EL with colour, ED3, alt toggles, scroll)', () => {
+  const cases = [
+    '\x1b[41m\x1b[5G\x1b[K'.repeat(400000),
+    '\x1b[41m\x1b[1K\x1b[0K'.repeat(300000),
+    'x\n'.repeat(3000) + '\x1b[3J'.repeat(400000),
+    ('\x1b[?1049h' + 'X\n' + '\x1b[?1049l').repeat(60000),
+  ];
+  for (const c of cases) {
+    const t0 = performance.now();
+    const r = paintToAnsiLines(Buffer.from(c), { cols: 500, rows: 300 });
+    assert.ok(performance.now() - t0 < 250);
+    assert.equal(typeof r.complete, 'boolean');
+  }
+});
+
+test('B1: lazy full-row erase keeps the fill colour for holes and still trims the tail', () => {
+  const r = paintToAnsiLines(Buffer.from('\x1b[41m\x1b[2J\x1b[1;4HX\x1b[0m'), { cols: 10, rows: 3 });
+  assert.equal(r.complete, true);
+  assert.equal(r.lines[0], '\x1b[41m   X\x1b[0m');
+  assert.equal(r.lines[1], '');
+});
+
+test('N6: incomplete or invalid extended colours are dropped, never reinterpreted', () => {
+  const run = (s) => paintToAnsiLines(Buffer.from(s), { cols: 10, rows: 2 }).lines[0];
+  assert.equal(run('\x1b[38;5mB'), 'B');
+  assert.equal(run('\x1b[48;5mB'), 'B');
+  assert.equal(run('\x1b[38;2;1;2mB'), 'B');
+  assert.equal(run('\x1b[38;7mB'), 'B');
+  assert.equal(run('\x1b[38;5;999mB'), 'B');
+  assert.equal(run('\x1b[38;5;200mB'), '\x1b[38;5;200mB\x1b[0m');
+  assert.equal(run('\x1b[38;2;1;2;3;1mB'), '\x1b[38;2;1;2;3;1mB\x1b[0m');
+});
