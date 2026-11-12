@@ -2,6 +2,7 @@
 // Nunca crea, mata, redimensiona ni arranca un core por su cuenta; solo execFile con argv fijo.
 import { execFile } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
+import { connect as netConnect } from "node:net";
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 
@@ -9,6 +10,7 @@ const HC_TIMEOUT_MS = 5000;
 const HC_READ_TIMEOUT_MS = 8000;
 const HC_MAX_BUFFER = 4 * 1024 * 1024;
 const RUNNING_CACHE_MS = 5000;
+const SOCKET_PROBE_TIMEOUT_MS = 300;
 const SEND_MAX_BYTES = 64 * 1024;
 const READ_LINES_MAX = 2000;
 const KEYS_MAX = 32;
@@ -63,6 +65,43 @@ export function findHc({
     }
   }
   return null;
+}
+
+/**
+ * Sockets unix donde puede escuchar el core en POSIX. Medido en esta Mac (hc 0.1.20):
+ * sin XDG_RUNTIME_DIR → ${XDG_STATE_HOME:-~/.local/state}/herdr-core/<s>/<s>.sock; con XDG_RUNTIME_DIR
+ * → $XDG_RUNTIME_DIR/herdr-core/<s>.sock. `core.json` solo trae id/name/machine_id (sin pid).
+ */
+export function coreSocketCandidates({ env = process.env, home = homedir() } = {}) {
+  const session = env.HC_SESSION || "default";
+  const state = env.XDG_STATE_HOME || posix.join(env.HOME || home, ".local", "state");
+  const out = [posix.join(state, "herdr-core", session, `${session}.sock`)];
+  if (env.XDG_RUNTIME_DIR) out.unshift(posix.join(env.XDG_RUNTIME_DIR, "herdr-core", `${session}.sock`));
+  return out;
+}
+
+/** ¿Alguien acepta conexiones en este socket unix? ENOENT/ECONNREFUSED/timeout → false. Nunca lanza. */
+export function probeUnixSocket(sockPath, timeoutMs = SOCKET_PROBE_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value, sock) => {
+      if (done) return;
+      done = true;
+      try { sock?.destroy(); } catch { /* ya cerrado */ }
+      resolve(value);
+    };
+    let sock;
+    try {
+      sock = netConnect({ path: sockPath });
+    } catch {
+      resolve(false);
+      return;
+    }
+    sock.setTimeout(timeoutMs);
+    sock.once("connect", () => finish(true, sock));
+    sock.once("timeout", () => finish(false, sock));
+    sock.once("error", () => finish(false, sock));
+  });
 }
 
 /** Nombre de app/agente de Herdr → id de agente que entiende el panel */
@@ -185,6 +224,8 @@ export function createHerdr({
   exec = execFile,
   env,
   now = Date.now,
+  platform = process.platform,
+  probe = probeUnixSocket,
 } = {}) {
   let runningCache = null;
 
@@ -198,6 +239,15 @@ export function createHerdr({
     if (!hcPath) {
       runningCache = { value: false, at: t };
       return false;
+    }
+    // POSIX: `hc server status` AUTOARRANCA un core vacío (medido); primero se mira el socket sin invocar hc.
+    if (platform !== "win32") {
+      const socks = coreSocketCandidates({ env: env ? { ...process.env, ...env } : process.env });
+      const alive = (await Promise.all(socks.map((sk) => probe(sk)))).some(Boolean);
+      if (!alive) {
+        runningCache = { value: false, at: t };
+        return false;
+      }
     }
     const r = await execHc(["server", "status", "--json"]);
     const value = r.ok ? coreRunningFromStatus(r.out) : false;
