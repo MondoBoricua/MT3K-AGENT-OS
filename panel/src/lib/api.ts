@@ -188,17 +188,17 @@ export interface FsQuick { name: string; path: string }
 export interface FsListing { ok: boolean; path: string; parent: string; home: string; quick: FsQuick[]; entries: FsEntry[]; err?: string }
 export interface FsFile { ok: boolean; path: string; kind: "text" | "binary"; mime: string; content?: string; size: number; mtime: number; tooBig?: boolean; err?: string }
 // fs endpoints answer 4xx WITH a JSON `err` worth showing ("esa carpeta no existe") — keep the body
-async function jgetLoose<T>(url: string): Promise<T | null> {
+async function jgetLoose<T>(url: string, signal?: AbortSignal): Promise<T | null> {
   try {
-    const r = await fetch(url, { headers: authHeaders() });
+    const r = await fetch(url, { headers: authHeaders(), signal });
     if (!r.ok) notifyUnauthorized(r);
     return (await r.json()) as T;
   } catch {
     return null;
   }
 }
-export const fsList = (path: string, host?: string) => jgetLoose<FsListing>(`/api/fs/list?path=${encodeURIComponent(path)}${hostAmp(host)}`);
-export const fsRead = (path: string, host?: string) => jgetLoose<FsFile>(`/api/fs/read?path=${encodeURIComponent(path)}${hostAmp(host)}`);
+export const fsList = (path: string, host?: string, signal?: AbortSignal) => jgetLoose<FsListing>(`/api/fs/list?path=${encodeURIComponent(path)}${hostAmp(host)}`, signal);
+export const fsRead = (path: string, host?: string, signal?: AbortSignal) => jgetLoose<FsFile>(`/api/fs/read?path=${encodeURIComponent(path)}${hostAmp(host)}`, signal);
 export const fsWrite = (path: string, content: string, expectMtime?: number, host?: string) =>
   jpost<{ ok: boolean; mtime?: number; conflict?: boolean; err?: string }>(`/api/fs/write${hostQ(host)}`, { path, content, expectMtime });
 // <img>/<iframe>/<audio> can't send headers → the token rides the query string (same as SSE)

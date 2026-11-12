@@ -27,12 +27,12 @@ export function PathPreviewCard({ preview, cardRef }: { preview: PathPreview | n
     </> : <>
       <p className="mb-2 truncate text-white/50">{humanSize(data.size)} · {humanAge(data.mtime)} · {data.mime}</p>
       {data.kind === "text" && <div className="overflow-hidden font-mono text-[11px] leading-[13px]">
-        {data.lines?.map((line) => <div key={line.number} className={`flex ${line.highlight ? "bg-accent/15 text-accent" : ""}`}>
+        {data.lines?.map((line) => <div key={line.number} className={`flex ${line.highlight ? "bg-white/10 text-accent" : ""}`}>
           <span className="mr-3 w-8 shrink-0 select-none text-right text-white/40">{line.number}</span>
           <span className="min-w-0 truncate whitespace-pre">{line.text || " "}</span>
         </div>)}
       </div>}
-      {data.kind === "image" && <img src={fsRawUrl(path, host)} alt={name} loading="lazy" onLoad={() => { if (cardRef.current) setHeight(Math.min(360, cardRef.current.scrollHeight + 2)); }} className="max-h-[260px] w-full object-contain" />}
+      {data.kind === "image" && <img src={fsRawUrl(path, host)} alt={name} loading="lazy" onLoad={() => { if (cardRef.current) setHeight(Math.min(360, cardRef.current.scrollHeight + 2)); }} className="min-h-[120px] max-h-[260px] w-full object-contain" />}
     </>}
   </div>, document.body);
 }

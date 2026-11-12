@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lineWindow, humanSize, humanAge, previewKind, previewPlacement, PreviewCache } from '../src/lib/path-preview.ts';
+import { lineWindow, humanSize, humanAge, previewKind, previewPlacement, PreviewCache, PreviewRequests } from '../src/lib/path-preview.ts';
 import { ansiToHtml } from '../src/lib/ansi.ts';
 
 test('20-line windows centre, clamp at either end, and preserve untrusted text literally', () => {
@@ -54,4 +54,48 @@ test('line and column suffix exposes escaped data attributes without changing pa
   assert.match(html, /data-fs-line="42"/);
   assert.match(html, /data-fs-path="\/tmp\/example.ts"/);
   assert.doesNotMatch(html, /href=|onclick=/);
+});
+
+test('preview lines are bounded, omit only the phantom trailing line, and cache the bounded window', () => {
+  const lines = lineWindow('x'.repeat(2_000_000) + '\n', 1);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].text, 'x'.repeat(300) + '…');
+  assert.equal(lineWindow('x'.repeat(300))[0].text.length, 300);
+  assert.equal(lineWindow('a\n\n').length, 2);
+  assert.equal(lineWindow('').length, 1);
+  const cache = new PreviewCache<ReturnType<typeof lineWindow>>();
+  cache.set('host|path', lines);
+  assert.equal(cache.get('host|path')?.[0].text.length, 301);
+});
+test('size rounding rolls into MB and non-finite sizes and ages are unknown', () => {
+  assert.equal(humanSize(1048575), '1.0 MB');
+  assert.equal(humanSize(1024), '1.0 KB');
+  for (const value of [NaN, Infinity, -Infinity]) {
+    assert.equal(humanSize(value), '—');
+    assert.equal(humanAge(value), '—');
+    assert.equal(humanAge(0, value), '—');
+  }
+});
+
+test('latest request aborts a hung predecessor without waiting for it', async () => {
+  const requests = new PreviewRequests();
+  let firstSignal: AbortSignal | undefined;
+  const first = requests.run((signal) => { firstSignal = signal; return new Promise<never>(() => {}); });
+  const second = requests.run(async (signal) => { assert.equal(signal.aborted, false); return 'new host'; });
+  assert.equal(firstSignal?.aborted, true);
+  assert.equal(await first, undefined);
+  assert.equal(await second, 'new host');
+});
+test('leave cancellation and timeout settle even if transport ignores abort; failures can retry', async () => {
+  const requests = new PreviewRequests();
+  let signal: AbortSignal | undefined;
+  const leaving = requests.run((s) => { signal = s; return new Promise<never>(() => {}); });
+  requests.cancel();
+  assert.equal(signal?.aborted, true);
+  assert.equal(await leaving, undefined);
+  const timedOut = requests.run((s) => { signal = s; return new Promise<never>(() => {}); }, 5);
+  assert.equal(await timedOut, undefined);
+  assert.equal(signal?.aborted, true);
+  assert.equal(await requests.run(async () => { throw new Error('transient'); }), undefined);
+  assert.equal(await requests.run(async () => 'retry'), 'retry');
 });

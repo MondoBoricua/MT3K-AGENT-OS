@@ -76,7 +76,7 @@ const URL_RE = /https?:\/\/[^\s<>"']+/g;
 // `https://h/Users/x` (consumed as a URL first) are never paths. A POSIX path needs two segments
 // (`/Users/x`), so slash commands like `/review` are left alone; `~/x` and `C:\x` need one.
 const PATH_RE = /(^|[\s"'`(\[<=,{])(~\/[^\s<>"'`|*?]+|\/[^\s\/<>"'`|*?][^\s<>"'`|*?]*|[A-Za-z]:\\[^\s<>"'`|*?]+)/g;
-const LINE_SUFFIX_RE = /:\d+(?::\d+)?$/;
+const LINE_SUFFIX_RE = /:(\d+)(?::\d+)*$/;
 const LINK_STYLE = 'style="color:inherit;text-decoration:underline dotted;cursor:pointer"';
 const URL_STYLE = 'style="color:inherit;text-decoration:underline"';
 
@@ -152,7 +152,7 @@ function linkify(raw: string): string {
       html += `<a href="${escAttr(h.text)}" target="_blank" rel="noopener noreferrer" ${URL_STYLE}>${esc(h.text)}</a>`;
     } else {
       const fsPath = h.text.replace(LINE_SUFFIX_RE, "");
-      const line = /:(\d+)(?::\d+)?$/.exec(h.text)?.[1];
+      const line = LINE_SUFFIX_RE.exec(h.text)?.[1];
       html += `<a${line ? ` data-fs-line="${escAttr(line)}"` : ""} data-fs-path="${escAttr(fsPath)}" title="abrir en Files" ${LINK_STYLE}>${esc(h.text)}</a>`;
     }
     i = h.end;

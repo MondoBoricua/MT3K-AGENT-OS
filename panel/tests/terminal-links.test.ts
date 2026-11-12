@@ -176,3 +176,14 @@ test("parentDir handles both separators and roots", () => {
   assert.equal(parentDir("\\\\host\\share\\d\\x.txt"), "\\\\host\\share\\d");
   assert.equal(parentDir("x"), "");
 });
+
+test('numeric suffixes use the first line for both preview and path clicks', () => {
+  for (const path of ['/tmp/a.ts', 'C:\\tmp\\a.ts', '~/tmp/a.ts']) {
+    const html = ansiToHtml(`${path}:1:2:3`);
+    assert.deepEqual(fsLinks(html), [[path, `${path}:1:2:3`]]);
+    assert.match(html, /data-fs-line="1"/);
+    assert.doesNotMatch(html, /href=|onclick=/);
+  }
+  assert.deepEqual(fsLinks(ansiToHtml('/tmp/a:word.ts:12:3:4')), [['/tmp/a:word.ts', '/tmp/a:word.ts:12:3:4']]);
+  assert.deepEqual(fsLinks(ansiToHtml('/tmp/a.ts:word')), [['/tmp/a.ts:word', '/tmp/a.ts:word']]);
+});

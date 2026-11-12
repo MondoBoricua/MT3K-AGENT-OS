@@ -1,16 +1,19 @@
 // Pure preview helpers: no DOM or file contents retained outside the selected window.
 export function lineWindow(content: string, target = 1) {
   const all = content.split(/\r?\n/);
+  if (all.length > 1 && all[all.length - 1] === "") all.pop();
   const line = Math.min(all.length, Math.max(1, Math.floor(target) || 1));
   const start = Math.max(0, Math.min(line - 11, all.length - 20));
-  return all.slice(start, start + 20).map((text, i) => ({ number: start + i + 1, text, highlight: target > 0 && start + i + 1 === target }));
+  return all.slice(start, start + 20).map((text, i) => ({ number: start + i + 1, text: text.length > 300 ? text.slice(0, 300) + "…" : text, highlight: target > 0 && start + i + 1 === target }));
 }
 export function humanSize(size: number) {
+  if (!Number.isFinite(size)) return "—";
   if (size < 1024) return `${size} B`;
-  if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
+  if (size / 1024 < 1023.95) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 ** 2).toFixed(1)} MB`;
 }
 export function humanAge(mtime: number, now = Date.now()) {
+  if (!Number.isFinite(mtime) || !Number.isFinite(now)) return "—";
   const s = Math.max(0, Math.floor((now - mtime) / 1000));
   if (s < 60) return `hace ${s} s`;
   if (s < 3600) return `hace ${Math.floor(s / 60)} min`;
@@ -47,5 +50,31 @@ export class PreviewCache<T> {
     this.items.delete(key);
     this.items.set(key, { at: now, value });
     if (this.items.size > 50) this.items.delete(this.items.keys().next().value!);
+  }
+}
+
+// A replacement starts immediately; even an uncooperative stale job cannot block it.
+export class PreviewRequests {
+  private active?: AbortController;
+  cancel() { this.active?.abort(); this.active = undefined; }
+  async run<T>(job: (signal: AbortSignal) => Promise<T>, timeout = 5000): Promise<T | undefined> {
+    this.cancel();
+    const controller = new AbortController();
+    this.active = controller;
+    const timer = setTimeout(() => controller.abort(), timeout);
+    let onAbort: () => void = () => {};
+    const aborted = new Promise<undefined>((resolve) => {
+      onAbort = () => resolve(undefined);
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([job(controller.signal), aborted]);
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+      controller.signal.removeEventListener("abort", onAbort);
+      if (this.active === controller) this.active = undefined;
+    }
   }
 }
