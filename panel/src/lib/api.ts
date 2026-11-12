@@ -9,6 +9,7 @@ export interface PaneRef {
   name?: string;
   waiting?: boolean;
   status?: "working" | "blocked" | "idle" | "done";
+  turn?: number; // contador de turnos (solo terminales de Herdr)
   statusRule?: string;
   statusSource?: "manifest" | "heuristic" | "herdr";
   backend?: "herdr"; // ausente = tmux

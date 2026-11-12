@@ -165,3 +165,77 @@ test("summarizeAlerts: none, one, many, mixed, kind disabled", () => {
   assert.deepEqual(off.cues, ["done"]);
   assert.equal(off.toasts.length, 1);
 });
+
+// ---- turnos (Herdr): turnos cortos que empiezan y terminan entre dos polls ----
+const snap = (status: "working" | "blocked" | "idle" | "done" | "unknown", turn?: number) =>
+  turn === undefined ? status : { status, turn };
+const step = (s: ReturnType<typeof first> | null, m: StatusMap, at: number, opts = {}) => diffAlerts(s, m, at, opts);
+
+test("turn: idle t5 -> idle t6 alerts done once", () => {
+  let r = step(null, { [A]: snap("idle", 5) }, T0);
+  r = step(r.state, { [A]: snap("idle", 6) }, T0 + 10_000);
+  assert.deepEqual(r.events, [{ key: A, kind: "done" }]);
+  r = step(r.state, { [A]: snap("idle", 6) }, T0 + 20_000);
+  assert.deepEqual(r.events, []);
+});
+
+test("turn: idle t5 -> working t6 -> idle t6 alerts once, not twice", () => {
+  let r = step(null, { [A]: snap("idle", 5) }, T0);
+  r = step(r.state, { [A]: snap("working", 6) }, T0 + 10_000);
+  assert.deepEqual(r.events, [], "turn grew while working: no event yet");
+  r = step(r.state, { [A]: snap("idle", 6) }, T0 + 20_000);
+  assert.deepEqual(r.events, [{ key: A, kind: "done" }]);
+  r = step(r.state, { [A]: snap("idle", 6) }, T0 + 30_000);
+  assert.deepEqual(r.events, []);
+});
+
+test("turn: working t5 -> idle t6 alerts once (both rules match, one event)", () => {
+  const r = step(step(null, { [A]: snap("working", 5) }, T0).state, { [A]: snap("idle", 6) }, T0 + 10_000);
+  assert.deepEqual(r.events, [{ key: A, kind: "done" }]);
+});
+
+test("turn: unchanged idle -> idle does not alert", () => {
+  const r = step(step(null, { [A]: snap("idle", 5) }, T0).state, { [A]: snap("idle", 5) }, T0 + 10_000);
+  assert.deepEqual(r.events, []);
+});
+
+test("turn: a pane without turn behaves as before (no turn rule)", () => {
+  const r = step(step(null, { [A]: "idle" }, T0).state, { [A]: "idle" }, T0 + 10_000);
+  assert.deepEqual(r.events, []);
+  const mixed = step(step(null, { [A]: snap("idle") }, T0).state, { [A]: snap("idle", 9) }, T0 + 10_000);
+  assert.deepEqual(mixed.events, [], "turn on only one side does not count");
+});
+
+test("turn: first snapshot and new panes are silent even with a turn", () => {
+  const r0 = step(null, { [A]: snap("idle", 9) }, T0);
+  assert.deepEqual(r0.events, []);
+  const r1 = step(r0.state, { [A]: snap("idle", 9), [B]: snap("idle", 4) }, T0 + 10_000);
+  assert.deepEqual(r1.events, []);
+});
+
+test("turn: going down (terminal replaced) does not alert and resets state", () => {
+  let r = step(null, { [A]: snap("idle", 9) }, T0);
+  r = step(r.state, { [A]: snap("idle", 9) }, T0 + 10_000);
+  r = step(r.state, { [A]: snap("idle", 10) }, T0 + 20_000);
+  assert.equal(r.events.length, 1);
+  assert.equal(r.state.alertedTurn[A], 10);
+  r = step(r.state, { [A]: snap("idle", 2) }, T0 + 30_000);
+  assert.deepEqual(r.events, []);
+  assert.equal(r.state.alertedTurn[A], undefined, "alerted turn forgotten on reset");
+  r = step(r.state, { [A]: snap("idle", 3) }, T0 + 30_000 + ALERT_COOLDOWN_MS);
+  assert.deepEqual(r.events, [{ key: A, kind: "done" }], "new terminal's turns alert again");
+});
+
+test("turn: focused pane is silent, other panes alert; cooldown still applies", () => {
+  const base = step(null, { [A]: snap("idle", 1), [B]: snap("idle", 1) }, T0).state;
+  const r = step(base, { [A]: snap("idle", 2), [B]: snap("idle", 2) }, T0 + 10_000, { focusedKey: A });
+  assert.deepEqual(r.events, [{ key: B, kind: "done" }]);
+  const again = step(r.state, { [B]: snap("idle", 3), [A]: snap("idle", 2) }, T0 + 12_000);
+  assert.deepEqual(again.events, [], "within cooldown");
+});
+
+test("turn: invalid turns are ignored", () => {
+  const bad = (turn: number) => ({ status: "idle" as const, turn });
+  const r = step(step(null, { [A]: bad(-1) }, T0).state, { [A]: bad(1.5) }, T0 + 10_000);
+  assert.deepEqual(r.events, []);
+});

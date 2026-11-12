@@ -26,7 +26,7 @@ const AGENTS = [
 
 test("toPane: forma del pane, label where||name||address y cwd tildificado", () => {
   assert.deepEqual(toPane(ROWS[1], tildify), {
-    paneId: "hc:t9", label: "PROJ / 1", window: "t9", cwd: "~/proj", backend: "herdr",
+    paneId: "hc:t9", label: "PROJ / 1", window: "t9", cwd: "~/proj", backend: "herdr", turn: 3,
     status: "working", waiting: false, statusRule: "herdr", statusSource: "herdr",
   });
   assert.equal(toPane(ROWS[2], tildify).label, "rev");
@@ -875,4 +875,15 @@ test("currentSize con generación vieja: un get de tamaño FALLIDO tras invalida
   clock.adv(2100);
   assert.equal((await panes.refresh())[0].agent, "junie");
   assert.equal(herdrOccupies(panes.cachedRows(), "junie", "/w", (p) => p), true);
+});
+
+test("toPane: turn solo si es entero no negativo; los panes tmux no lo llevan", () => {
+  assert.equal(toPane(ROWS[1], tildify).turn, 3);
+  assert.equal(toPane(ROWS[0], tildify).turn, 0);
+  for (const bad of [undefined, null, -1, 1.5, "3", NaN]) {
+    assert.equal(Object.hasOwn(toPane({ ...ROWS[1], turn: bad }, tildify), "turn"), false, String(bad));
+  }
+  const merged = mergeHerdrPanes(AGENTS, [ROWS[1]], tildify)[0].panes;
+  assert.equal(merged[0].turn, undefined, "el pane tmux no recibe turn");
+  assert.equal(merged[1].turn, 3);
 });

@@ -68,6 +68,7 @@ export function toPane(row, tildify = (p) => p) {
     window: row.address,
     cwd: tildify(row.cwd || ""),
     backend: "herdr",
+    ...(Number.isInteger(row.turn) && row.turn >= 0 ? { turn: row.turn } : {}), // contador de turnos de hc: el panel detecta turnos cortos entre dos polls
     ...(row.killable ? { killable: true } : {}), // solo los terminales que abrió el panel (etiqueta mt3k.panel=1)
     status,
     waiting: status === "blocked",

@@ -16,7 +16,7 @@ import Mosaic from "./components/Mosaic";
 import AgentLogo from "./components/AgentLogo";
 import { MOSAIC_QUERY, useMediaQuery } from "./lib/use-media-query";
 import { paneStatus } from "./lib/pane-status";
-import { diffAlerts, loadSoundSettings, paneAlertKey, summarizeAlerts, type AlertLabel, type AlertState, type StatusMap } from "./lib/alert-sounds";
+import { diffAlerts, loadSoundSettings, paneAlertKey, summarizeAlerts, type AlertLabel, type AlertState, type PaneSnapshot, type StatusMap } from "./lib/alert-sounds";
 import { installAudioUnlock, playAlertSequence } from "./lib/alert-audio";
 
 const BASE = import.meta.env.BASE_URL;
@@ -111,11 +111,11 @@ export default function App() {
   // activo lo reporta la hoja (onActivePaneChange); hasta el primer reporte se usa initialPaneId
   // o el único pane del agente.
   const raiseSoundAlerts = (rows: AgentRow[]) => {
-    const statuses: Record<string, ReturnType<typeof paneStatus>> = {};
+    const statuses: Record<string, PaneSnapshot> = {};
     const labels: Record<string, AlertLabel> = {};
     for (const a of rows) for (const p of a.panes ?? []) {
       const key = paneAlertKey(agentKey(a), p.paneId);
-      statuses[key] = paneStatus(p);
+      statuses[key] = { status: paneStatus(p), ...(p.turn !== undefined ? { turn: p.turn } : {}) };
       labels[key] = { who: a.name, where: p.name || p.cwd.split("/").filter(Boolean).pop() || p.label };
     }
     const { agentId, paneId } = sheetRef.current;

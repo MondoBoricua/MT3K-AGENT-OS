@@ -7,13 +7,23 @@ export const SOUND_SETTINGS_KEY = "mt3k.sounds";
 
 export type AlertKind = "blocked" | "done";
 export type AlertEvent = { key: string; kind: AlertKind };
-export type StatusMap = Readonly<Record<string, PaneStatus>>;
+/** Foto de un pane: estado y, si el backend lo da (Herdr), el contador de turnos. Un estado suelto = sin turno. */
+export type PaneSnapshot = PaneStatus | { readonly status: PaneStatus; readonly turn?: number };
+export type StatusMap = Readonly<Record<string, PaneSnapshot>>;
+type Snap = { readonly status: PaneStatus; readonly turn?: number };
 
-/** Estado que se arrastra entre polls: último estado por pane y última alerta por pane+tipo. */
+/** Estado que se arrastra entre polls: última foto por pane, última alerta por pane+tipo y último turno ya avisado. */
 export type AlertState = {
-  readonly statuses: StatusMap;
+  readonly statuses: Readonly<Record<string, Snap>>;
   readonly lastAlert: Readonly<Record<string, number>>;
+  readonly alertedTurn: Readonly<Record<string, number>>;
 };
+
+const validTurn = (t: unknown): t is number => typeof t === "number" && Number.isInteger(t) && t >= 0;
+function toSnap(v: PaneSnapshot): Snap {
+  if (typeof v === "string") return { status: v };
+  return validTurn(v.turn) ? { status: v.status, turn: v.turn } : { status: v.status };
+}
 
 export type DiffOptions = {
   /** Pane que la persona está mirando ahora (terminal abierto Y pestaña visible). */
@@ -23,9 +33,16 @@ export type DiffOptions = {
 /** Clave de un pane en el mapa: `${agentKey}|${paneId}`. */
 export const paneAlertKey = (agentKey: string, paneId: string) => `${agentKey}|${paneId}`;
 
-function eventKind(before: PaneStatus, after: PaneStatus): AlertKind | null {
-  if (after === "blocked" && before !== "blocked") return "blocked";
-  if (before === "working" && (after === "done" || after === "idle")) return "done";
+const finished = (s: PaneStatus) => s === "done" || s === "idle";
+
+// Se desconoce si hc incrementa `turn` al empezar o al terminar un turno, así que la regla sirve para ambos:
+// turno subido + ahora idle/done = terminó al menos un turno desde el poll anterior (aunque nunca se viera
+// "working"). Subido + working: aún no se avisa; lo hará working→idle/done o un poll posterior.
+function eventKind(before: Snap, after: Snap, alertedTurn: number | undefined): AlertKind | null {
+  if (after.status === "blocked" && before.status !== "blocked") return "blocked";
+  if (before.status === "working" && finished(after.status)) return "done";
+  const grew = before.turn !== undefined && after.turn !== undefined && after.turn > before.turn;
+  if (grew && finished(after.status) && (alertedTurn === undefined || after.turn! > alertedTurn)) return "done";
   return null;
 }
 
@@ -41,27 +58,36 @@ export function diffAlerts(
 ): { events: AlertEvent[]; state: AlertState } {
   const events: AlertEvent[] = [];
   const lastAlert: Record<string, number> = {};
+  const alertedTurn: Record<string, number> = {};
+  const statuses: Record<string, Snap> = {};
   const focusedKey = opts.focusedKey ?? null;
 
-  for (const [key, after] of Object.entries(next)) {
+  for (const [key, raw] of Object.entries(next)) {
+    const after = toSnap(raw);
+    statuses[key] = after;
     const before = prev?.statuses[key];
+    // un turno que baja (terminal reemplazado) reinicia lo ya avisado
+    const turnReset = before?.turn !== undefined && after.turn !== undefined && after.turn < before.turn;
+    const alerted = turnReset ? undefined : prev?.alertedTurn[key];
+    if (alerted !== undefined) alertedTurn[key] = alerted;
     // conservar solo el cooldown de panes que siguen vivos (memoria acotada)
     for (const kind of ["blocked", "done"] as const) {
       const stamp = prev?.lastAlert[`${key}|${kind}`];
       if (stamp !== undefined) lastAlert[`${key}|${kind}`] = stamp;
     }
     if (before === undefined) continue;
-    const kind = eventKind(before, after);
+    const kind = eventKind(before, after, alerted);
     if (!kind) continue;
     if (kind === "done" && key === focusedKey) continue;
     const stampKey = `${key}|${kind}`;
     const last = lastAlert[stampKey];
     if (last !== undefined && now - last < ALERT_COOLDOWN_MS) continue;
     lastAlert[stampKey] = now;
+    if (kind === "done" && after.turn !== undefined) alertedTurn[key] = after.turn;
     events.push({ key, kind });
   }
 
-  return { events, state: { statuses: { ...next }, lastAlert } };
+  return { events, state: { statuses, lastAlert, alertedTurn } };
 }
 
 // ---- ajustes (por dispositivo) ----
