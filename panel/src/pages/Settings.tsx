@@ -85,17 +85,21 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
   const [launchBackend, setLaunchBackendState] = useState<LaunchBackendState | null>(null);
   const [launchBackendMsg, setLaunchBackendMsg] = useState("");
   useEffect(() => { getLaunchBackend().then((r) => { if (r?.ok) setLaunchBackendState(r); }); }, []);
+  const [launchBackendSaving, setLaunchBackendSaving] = useState(false);
   const doSetLaunchBackend = async (next: LaunchBackend) => {
-    if (!launchBackend || next === launchBackend.backend) return;
-    const prev = launchBackend;
-    setLaunchBackendState({ ...launchBackend, backend: next });
+    if (!launchBackend || launchBackendSaving || next === launchBackend.backend) return;
+    setLaunchBackendSaving(true);
     setLaunchBackendMsg("");
     const r = await setLaunchBackend(next);
-    if (r?.ok) setLaunchBackendMsg(next === "herdr" ? "✓ las sesiones nuevas se abrirán en Herdr" : "✓ las sesiones nuevas se abrirán en tmux");
-    else {
-      setLaunchBackendState(prev);
+    if (r?.ok) {
+      // the shown value is what the server stored, not what was clicked
+      const stored = r.backend ?? next;
+      setLaunchBackendState((cur) => (cur ? { ...cur, backend: stored } : cur));
+      setLaunchBackendMsg(stored === "herdr" ? "✓ las sesiones nuevas se abrirán en Herdr" : "✓ las sesiones nuevas se abrirán en tmux");
+    } else {
       setLaunchBackendMsg(r?.err ?? "error al guardar");
     }
+    setLaunchBackendSaving(false);
   };
   const herdrOpt = herdrChoice(launchBackend?.herdr);
   const doToggleHost = async (h: FedHost) => {
@@ -284,7 +288,7 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
               {([["tmux", "tmux", false], ["herdr", "Herdr", herdrOpt.disabled]] as const).map(([value, label, disabled]) => {
                 const on = launchBackend?.backend === value;
                 return (
-                  <button key={value} type="button" role="radio" aria-checked={on} disabled={disabled || !launchBackend}
+                  <button key={value} type="button" role="radio" aria-checked={on} disabled={disabled || !launchBackend || launchBackendSaving}
                     onClick={() => void doSetLaunchBackend(value)}
                     className={`rounded-lg border px-3 py-1.5 font-mono text-xs transition disabled:cursor-not-allowed disabled:opacity-40 ${on ? "border-accent/60 bg-accent/12 text-accent" : "border-ink-line text-white/70 hover:border-accent/50 hover:text-accent"}`}>
                     {label}
