@@ -617,3 +617,33 @@ test("consulta anterior a un invalidate que vuelve vacía: no poda `details` ni 
   assert.equal(gets, 1); // la lista vacía obsoleta no borró details: no hizo falta otro get
   assert.equal(probes, 0); // ni sondeó/tiró el core por una lista obsoleta
 });
+
+test("invalidate justo cuando el ciclo termina: el refresh siguiente no se une al ciclo acabado y trae lista nueva", async () => {
+  for (let ticks = 0; ticks <= 12; ticks++) { // barre el punto exacto del invalidate entre microtareas
+    let lists = 0;
+    const herdr = { async list() { return [{ ...ROWS[1], where: String(++lists) }]; }, invalidate() {} };
+    const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => 5000 });
+    const first = p.refresh();
+    for (let i = 0; i < ticks; i++) await Promise.resolve();
+    const before = lists;
+    p.invalidate();
+    const rows = await p.refresh();
+    await first;
+    assert.ok(Number(rows[0].where) > before || before === 0, `ticks=${ticks}: lista ${rows[0].where} anterior al invalidate (${before})`);
+    assert.equal(p.cachedRows()[0]?.where, rows[0].where, `ticks=${ticks}: caché y resultado difieren`);
+    assert.equal(await p.has(ROWS[1].id), true, `ticks=${ticks}`);
+  }
+});
+
+test("tope de repeticiones agotado: lo devuelto coincide con `find`, la caché queda caducada y el siguiente refresh consulta", async () => {
+  let lists = 0;
+  let p;
+  const herdr = { async list() { lists++; p.invalidate(); return [{ ...ROWS[1], where: String(lists) }]; }, invalidate() {} };
+  p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => 5000 });
+  const rows = await p.refresh();
+  assert.equal(lists, 4); // 1 + MAX_REPOLLS
+  assert.equal(rows[0].where, "4");
+  assert.equal(p.cachedRows()[0].where, "4");
+  await p.refresh();
+  assert.equal(lists, 8); // caducada: volvió a consultar
+});

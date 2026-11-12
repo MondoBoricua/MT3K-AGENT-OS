@@ -211,16 +211,27 @@ export function createHerdrPanes({
   // Ciclo único: consulta y, si hubo invalidate() mientras corría, vuelve a consultar (hasta MAX_REPOLLS veces) para
   // entregar una lista posterior al invalidate. Nunca hay dos `hc ls` a la vez ni consultas encoladas.
   function startLoop(h) {
+    const token = {};
     const p = (async () => {
       let rows = [];
-      for (let i = 0; i <= MAX_REPOLLS; i++) {
-        const gen = generation;
-        rows = await pollOnce(h, gen);
-        if (gen === generation) break;
+      let settled = false;
+      try {
+        for (let i = 0; i <= MAX_REPOLLS && !settled; i++) {
+          const gen = generation;
+          rows = await pollOnce(h, gen);
+          settled = gen === generation;
+        }
+        // Tope agotado (invalidate() en cada intento): se dejan las últimas filas en la caché pero CADUCADAS, para
+        // que `find`/`has` coincidan con lo devuelto y el siguiente refresh() vuelva a consultar.
+        if (!settled && cache.at === -Infinity) cache = { at: -Infinity, rows };
+        return rows;
+      } finally {
+        // Se suelta el ciclo en el MISMO turno que la última comprobación de generación (sin `await` en medio): un
+        // invalidate() posterior nunca se une a un ciclo que ya no va a repetir la consulta.
+        if (loop?.token === token) loop = null;
       }
-      return rows;
-    })().finally(() => { if (loop === p) loop = null; });
-    loop = p;
+    })();
+    loop = { token, p };
     return p;
   }
 
@@ -229,7 +240,7 @@ export function createHerdrPanes({
     const h = client();
     if (!h) return [];
     if (now() - cache.at < (force ? HERDR_FORCE_MIN_MS : ttlMs)) return cache.rows;
-    return loop || startLoop(h);
+    return loop ? loop.p : startLoop(h);
   }
 
   /** Olvida la lista cacheada (y las cachés del adaptador): tras crear o cerrar un terminal se lee de nuevo. */
