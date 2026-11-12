@@ -74,21 +74,27 @@ function zcodeHasSession(dbPath, dirs, useNodeSqlite) {
 }
 
 const JUNIE_SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const READ_CAPPED_MIN_BYTES = 65_536;
 const JUNIE_INDEX_MAX_BYTES = 1_048_576; // ~4,000 sessions; a larger index reads as "no history" (the safe side)
 
 /** Reads at most `max` bytes of a file; null if it is missing, unreadable or larger than `max` (also if it grows meanwhile). */
 function readCapped(path, max) {
   let fd;
   try {
+    // Only regular files: opening a FIFO or a device would block. The buffer follows the file size (with room to
+    // notice growth) instead of allocating the whole cap for a few-KB index.
+    const st = statSync(path);
+    if (!st.isFile() || st.size > max) return null;
+    const limit = Math.min(max, Math.max(st.size * 2, READ_CAPPED_MIN_BYTES));
     fd = openSync(path, "r");
-    const buf = Buffer.allocUnsafe(max + 1);
+    const buf = Buffer.allocUnsafe(limit + 1);
     let total = 0;
-    while (total <= max) {
-      const n = readSync(fd, buf, total, max + 1 - total, null);
+    while (total <= limit) {
+      const n = readSync(fd, buf, total, limit + 1 - total, null);
       if (n === 0) break;
       total += n;
     }
-    return total > max ? null : buf.toString("utf8", 0, total);
+    return total > limit ? null : buf.toString("utf8", 0, total); // grew past the room given → unknown → null
   } catch {
     return null;
   } finally {

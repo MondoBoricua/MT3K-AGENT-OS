@@ -506,3 +506,14 @@ test("Junie: each distinct recorded folder is resolved once per call", (t) => {
   assert.equal(hasResumableHistory("junie", dir, { home, realDir }), true);
   assert.equal(calls, 3); // the query folder + two distinct recorded folders
 });
+
+test("Junie: an index that is not a regular file (FIFO, directory) reads as no history without blocking", { skip: process.platform === "win32" }, (t) => {
+  const { home, dir, indexPath } = junieFixture(t);
+  execFileSync("mkfifo", [indexPath]);
+  const t0 = Date.now();
+  assert.equal(hasResumableHistory("junie", dir, { home }), false);
+  assert.ok(Date.now() - t0 < 500, "must not block on a FIFO");
+  rmSync(indexPath);
+  mkdirSync(indexPath);
+  assert.equal(hasResumableHistory("junie", dir, { home }), false);
+});
