@@ -220,3 +220,105 @@ test("stream: lectura que falla dos veces → gone", async () => {
   await new Promise((r) => setTimeout(r, 60));
   assert.deepEqual(out, ["event: gone\ndata: {}\n\n"]);
 });
+
+function richHerdr({ rows = ROWS, getFn, readText = "plano" } = {}) {
+  const calls = { get: [], read: 0, list: 0 };
+  return {
+    calls,
+    herdr: {
+      async list() { calls.list++; return typeof rows === "function" ? rows() : rows; },
+      async get(id) { calls.get.push(id); return getFn ? getFn(id) : { ok: true, cwd: `/cur/${id.slice(3)}`, cols: 90, rows: 30, where: null }; },
+      async read() { calls.read++; return { ok: true, text: readText }; },
+    },
+  };
+}
+const mk = (opts) => { let t = 1000; const clock = { t: () => t, adv: (n) => { t += n; } }; return { clock, panes: createHerdrPanes({ findHc: () => "/x/hc", now: clock.t, ...opts }) }; };
+
+test("cwd actual: hc get en la primera lista, máx. 5 por ciclo, TTL 30 s y cambio de where/estado", async () => {
+  const many = Array.from({ length: 8 }, (_, i) => ({ ...ROWS[0], id: `hc:t${i}`, address: `t${i}` }));
+  const { herdr, calls } = richHerdr({ rows: many });
+  const { clock, panes } = mk({ createHerdr: () => herdr });
+  let out = await panes.refresh();
+  assert.equal(calls.get.length, 5);
+  assert.equal(out.filter((r) => r.cwd.startsWith("/cur/")).length, 5);
+  clock.adv(2100);
+  await panes.refresh();
+  assert.equal(calls.get.length, 8); // los 3 restantes
+  clock.adv(2100);
+  await panes.refresh();
+  assert.equal(calls.get.length, 8); // sin cambios ni TTL
+  clock.adv(31000);
+  await panes.refresh();
+  assert.equal(calls.get.length, 13); // 5 caducados
+});
+
+test("cwd actual: cambio de where dispara un get; fallo de get conserva la carpeta de lanzamiento", async () => {
+  let where = "A / 1";
+  const { herdr, calls } = richHerdr({ rows: () => [{ ...ROWS[1], where }], getFn: () => ({ ok: false }) });
+  const { clock, panes } = mk({ createHerdr: () => herdr });
+  let out = await panes.refresh();
+  assert.equal(out[0].cwd, "/Users/x/proj");
+  where = "B / 1";
+  clock.adv(2100);
+  await panes.refresh();
+  assert.equal(calls.get.length, 2);
+});
+
+test("color: snapshot con el tamaño ACTUAL, SGR unido con \\n; read plano no se usa", async () => {
+  const { herdr, calls } = richHerdr();
+  const snaps = [];
+  const conn = { snapshot: async (a, o) => { snaps.push([a, o]); return { ok: true, bytes: Buffer.from("b"), cols: 90, rows: 30 }; }, close() { this.closed = true; } };
+  const { panes } = mk({ createHerdr: () => herdr, createConn: () => conn, paint: () => ({ lines: ["\x1b[31mrojo\x1b[0m", "x"], complete: true }) });
+  await panes.refresh();
+  const v = await panes.view("hc:t9");
+  assert.deepEqual(v, { ok: true, text: "\x1b[31mrojo\x1b[0m\nx", colored: true });
+  assert.deepEqual(snaps[0], ["t9", { cols: 90, rows: 30, history: 1000 }]);
+  assert.equal(calls.read, 0);
+  panes.close();
+  assert.equal(conn.closed, true);
+});
+
+test("color: fallo, complete:false o cero líneas → texto plano; 3 fallos → 60 s sin snapshot", async () => {
+  const { herdr, calls } = richHerdr();
+  let n = 0;
+  const conn = { snapshot: async () => { n++; return { ok: false, err: "x" }; }, close() {} };
+  const { clock, panes } = mk({ createHerdr: () => herdr, createConn: () => conn });
+  await panes.refresh();
+  for (let i = 0; i < 3; i++) assert.deepEqual(await panes.view("hc:t9"), { ok: true, text: "plano" });
+  assert.equal(n, 3);
+  await panes.view("hc:t9");
+  assert.equal(n, 3); // en pausa
+  clock.adv(61000);
+  await panes.view("hc:t9");
+  assert.equal(n, 4);
+  assert.equal(calls.read, 5);
+  const incomplete = mk({ createHerdr: () => richHerdr().herdr, createConn: () => ({ snapshot: async () => ({ ok: true, bytes: Buffer.alloc(1), cols: 90, rows: 30 }), close() {} }), paint: () => ({ lines: ["a"], complete: false }) });
+  await incomplete.panes.refresh();
+  assert.equal((await incomplete.panes.view("hc:t9")).text, "plano");
+});
+
+test("color: sin tamaño conocido no se pide snapshot; color=false nunca crea la conexión", async () => {
+  let created = 0;
+  const noSize = mk({ createHerdr: () => richHerdr({ getFn: () => ({ ok: false }) }).herdr, createConn: () => { created++; return { snapshot: async () => ({ ok: false }), close() {} }; } });
+  await noSize.panes.refresh();
+  assert.equal((await noSize.panes.view("hc:t9")).text, "plano");
+  assert.equal(created, 0);
+  const off = mk({ color: false, createHerdr: () => richHerdr().herdr, createConn: () => { created++; return {}; } });
+  await off.panes.refresh();
+  assert.equal((await off.panes.view("hc:t9")).text, "plano");
+  assert.equal(created, 0);
+  assert.equal(off.panes.connStats(), null);
+});
+
+test("color: el tamaño se refresca con get si tiene más de 5 s", async () => {
+  const { herdr, calls } = richHerdr();
+  const conn = { snapshot: async () => ({ ok: true, bytes: Buffer.alloc(1), cols: 90, rows: 30 }), close() {} };
+  const { clock, panes } = mk({ createHerdr: () => herdr, createConn: () => conn, paint: () => ({ lines: ["a"], complete: true }) });
+  await panes.refresh();
+  const g0 = calls.get.length;
+  await panes.view("hc:t9");
+  assert.equal(calls.get.length, g0);
+  clock.adv(6000);
+  await panes.view("hc:t9");
+  assert.equal(calls.get.length, g0 + 1);
+});

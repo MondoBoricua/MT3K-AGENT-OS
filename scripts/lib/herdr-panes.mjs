@@ -1,6 +1,8 @@
 // Terminales de Herdr (hc) como panes del panel. Solo lectura de la lista, leer pantalla, texto y teclas.
 // Nunca toca el ledger, tombstones, notificaciones ni tmux: server.mjs solo llama a estas funciones.
-import { createHerdr as realCreateHerdr, findHc as realFindHc, isHerdrId } from "./herdr.mjs";
+import { addressOf, createHerdr as realCreateHerdr, findHc as realFindHc, isHerdrId } from "./herdr.mjs";
+import { createHerdrConn as realCreateConn } from "./herdr-conn.mjs";
+import { paintToAnsiLines } from "./herdr-paint.mjs";
 import { runWait } from "./wait-loop.mjs";
 
 export const HERDR_UNAVAILABLE = "no disponible para sesiones de Herdr";
@@ -12,6 +14,11 @@ const HC_LOOKUP_MS = 30000;
 const READ_HISTORY_LINES = 1000;
 const TAIL_LINES = 12;
 const STREAM_MISS_LIMIT = 2;
+const DETAILS_TTL_MS = 30000; // carpeta actual: refresco máximo cada 30 s por terminal
+const DETAILS_MAX_PER_POLL = 5; // `hc get` por ciclo de lista
+const SIZE_MAX_AGE_MS = 5000; // el tamaño del snapshot nunca es más viejo que esto
+const COLOR_FAIL_LIMIT = 3;
+const COLOR_BACKOFF_MS = 60000;
 
 /** Cuerpo 400 uniforme de los endpoints que Herdr no soporta. */
 export const herdrUnavailableBody = () => ({ ok: false, err: HERDR_UNAVAILABLE });
@@ -89,7 +96,13 @@ export function createHerdrPanes({
   createHerdr = realCreateHerdr,
   now = Date.now,
   ttlMs = HERDR_LIST_TTL_MS,
+  color = true,
+  createConn = (hcPath) => realCreateConn({ hcPath }),
+  paint = paintToAnsiLines,
 } = {}) {
+  let conn = null;
+  const details = new Map(); // address → { at, where, status, cwd, cols, rows }
+  const colorState = new Map(); // address → { fails, until }
   let herdr = null;
   let hcPath = null;
   let hcCheckedAt = -Infinity;
@@ -107,9 +120,31 @@ export function createHerdrPanes({
         hcPath = found;
         herdr = found ? createHerdr({ hcPath: found }) : null;
         cache = { at: -Infinity, rows: [] };
+        details.clear();
+        conn?.close();
+        conn = null;
       }
     }
     return herdr;
+  }
+
+  // `hc ls` solo trae la carpeta de LANZAMIENTO; la actual está en `hc get` (foreground.cwd). Se consulta
+  // solo si cambió `where`/estado o pasaron 30 s, máx. 5 por ciclo; sin dato se queda la de lanzamiento.
+  async function enrich(h, rows) {
+    if (typeof h.get !== "function") return rows;
+    const alive = new Set(rows.map((r) => r.address));
+    for (const k of details.keys()) if (!alive.has(k)) details.delete(k);
+    for (const k of colorState.keys()) if (!alive.has(k)) colorState.delete(k);
+    const t = now();
+    const changed = rows.filter((r) => { const d = details.get(r.address); return !d || d.where !== r.where || d.status !== r.status; });
+    const stale = rows.filter((r) => { const d = details.get(r.address); return d && !changed.includes(r) && t - d.at >= DETAILS_TTL_MS; });
+    await Promise.all([...changed, ...stale].slice(0, DETAILS_MAX_PER_POLL).map(async (r) => {
+      const g = await h.get(r.id).catch(() => ({ ok: false }));
+      const prev = details.get(r.address);
+      const base = { at: now(), where: r.where, status: r.status };
+      details.set(r.address, g.ok ? { ...base, cwd: g.cwd, cols: g.cols, rows: g.rows } : { ...(prev || { cwd: null, cols: null, rows: null }), ...base });
+    }));
+    return rows.map((r) => { const d = details.get(r.address); return d?.cwd ? { ...r, cwd: d.cwd } : r; });
   }
 
   /** Lista cacheada ≤ ttlMs (500 ms si se fuerza); una sola consulta en vuelo. */
@@ -120,7 +155,7 @@ export function createHerdrPanes({
     if (inflight) return inflight;
     inflight = (async () => {
       let rows = [];
-      try { rows = await h.list(); } catch { rows = []; }
+      try { rows = await enrich(h, await h.list()); } catch { rows = []; }
       cache = { at: now(), rows };
       return rows;
     })().finally(() => { inflight = null; });
@@ -137,6 +172,55 @@ export function createHerdrPanes({
     const h = client();
     if (!h) return { ok: false, err: "hc no disponible" };
     return h.read(id, { lines: READ_HISTORY_LINES });
+  }
+
+  // Tamaño ACTUAL del terminal (≤ 5 s de antigüedad); sin él no se pide snapshot (nunca se adivina un tamaño).
+  async function currentSize(h, id, address) {
+    let d = details.get(address);
+    if (!d || d.cols === null || now() - d.at > SIZE_MAX_AGE_MS) {
+      const g = typeof h.get === "function" ? await h.get(id).catch(() => ({ ok: false })) : { ok: false };
+      if (!g.ok) return null;
+      d = { ...(d || { where: null, status: null }), at: now(), cwd: g.cwd, cols: g.cols, rows: g.rows };
+      details.set(address, d);
+    }
+    return d.cols && d.rows ? { cols: d.cols, rows: d.rows } : null;
+  }
+
+  async function colored(h, id, address) {
+    const st = colorState.get(address) || { fails: 0, until: 0 };
+    if (now() < st.until) return null;
+    const size = await currentSize(h, id, address);
+    if (!size) return null;
+    conn ||= createConn(hcPath);
+    let text = null;
+    try {
+      // OJO: un attach observer SIN espectador humano mueve el terminal al tamaño headless (200x120)
+      // pase lo que pase (spike PROTOCOL.md §6). Por eso solo se pide el tamaño ACTUAL: con un espectador
+      // humano no hay resize; sin él, el cambio es inevitable y es el límite conocido de esta vista.
+      const snap = await conn.snapshot(address, { cols: size.cols, rows: size.rows, history: READ_HISTORY_LINES });
+      if (snap.ok) {
+        const p = paint(snap.bytes, { cols: snap.cols, rows: snap.rows });
+        if (p.complete && p.lines.length > 0) text = p.lines.join("\n");
+      }
+    } catch { text = null; }
+    if (text !== null) colorState.set(address, { fails: 0, until: 0 });
+    else {
+      const fails = st.fails + 1;
+      colorState.set(address, fails >= COLOR_FAIL_LIMIT ? { fails: 0, until: now() + COLOR_BACKOFF_MS } : { fails, until: 0 });
+    }
+    return text;
+  }
+
+  /** Vista del terminal para /api/pane y SSE: SGR vía snapshot; texto plano de `hc read` si falla o está apagado. */
+  async function view(id) {
+    const h = client();
+    if (!h) return { ok: false, err: "hc no disponible" };
+    const address = addressOf(id);
+    if (color && address) {
+      const text = await colored(h, id, address);
+      if (text !== null) return { ok: true, text, colored: true };
+    }
+    return read(id);
   }
 
   async function tailOf(id) {
@@ -156,6 +240,10 @@ export function createHerdrPanes({
     refresh,
     has,
     read,
+    view,
+    /** Cierra el único `hc connect` (rutas de apagado del servidor). */
+    close() { conn?.close(); conn = null; },
+    connStats() { return conn ? conn.stats() : null; },
     tailOf,
     failure,
     /** Terminales vivos de Herdr para añadir a /api/agents. */
@@ -238,7 +326,7 @@ export function createHerdrPanes({
             return;
           }
           misses = 0;
-          const r = await read(id);
+          const r = await view(id);
           if (closed) return;
           if (!r.ok) {
             if (++readFails >= STREAM_MISS_LIMIT) return gone();

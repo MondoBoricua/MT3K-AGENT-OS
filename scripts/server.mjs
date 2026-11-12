@@ -341,7 +341,10 @@ const denyUnlessCap = (res, def, op) => {
 };
 
 // Terminales de Herdr (hc) como panes: solo listar/leer/escribir. MT3K_HERDR=0 lo apaga por completo.
-const herdrPanes = createHerdrPanes({ enabled: process.env.MT3K_HERDR !== "0", tildify });
+const herdrPanes = createHerdrPanes({ enabled: process.env.MT3K_HERDR !== "0", color: process.env.MT3K_HERDR_COLOR !== "0", tildify });
+// el único `hc connect` (vistas en color) no sobrevive al servidor
+process.on("exit", () => herdrPanes.close());
+for (const sig of ["SIGTERM", "SIGINT"]) process.once(sig, () => process.exit(0));
 /** 400 uniforme para los endpoints que no soportan Herdr; true = ya respondió. */
 const denyHerdrId = (res, paneId) => {
   if (!isHerdrId(paneId)) return false;
@@ -1463,7 +1466,7 @@ async function api(req, res, path) {
     if (isHerdrId(paneId)) {
       if (denyUnlessCap(res, SHELL_DEF, "view")) return;
       if (!(await herdrPanes.has(paneId))) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
-      const hr = await herdrPanes.read(paneId);
+      const hr = await herdrPanes.view(paneId);
       return sendJSON(res, 200, { ok: hr.ok, content: hr.ok ? hr.text : "", alternate: false, mouse_sgr: false });
     }
     const paneCheck = validatePaneId(paneId);
