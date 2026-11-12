@@ -83,13 +83,16 @@ export function createHerdrLauncher({
   env,
   nameSuffix,
 } = {}) {
-  // mismo entorno que hc usa hacia el core vivo (Linux sin XDG_RUNTIME_DIR); {} si no hace falta
+  // Entorno de herdr-app = el de hc hacia el core vivo (Linux sin XDG_RUNTIME_DIR). Falla CERRADO: sin core vivo, error o
+  // adaptador sin `hcEnv` → null y NO se llama a herdr-app.
   const appEnv = async () => {
-    const extra = await Promise.resolve(getHerdr()?.hcEnv?.()).catch(() => ({}));
-    return extra && Object.keys(extra).length ? { ...env, ...extra } : env;
+    let extra = null;
+    try { extra = await getHerdr()?.hcEnv?.(); } catch { extra = null; }
+    if (extra === null || extra === undefined) return null;
+    return Object.keys(extra).length ? { ...env, ...extra } : env;
   };
-  const appUp = async (appPath) => {
-    const r = await runApp(exec, appPath, ["status"], APP_STATUS_TIMEOUT_MS, await appEnv());
+  const appUp = async (appPath, appEnvResolved) => {
+    const r = await runApp(exec, appPath, ["status"], APP_STATUS_TIMEOUT_MS, appEnvResolved);
     return r.ok;
   };
 
@@ -100,12 +103,12 @@ export function createHerdrLauncher({
     const running = await h.coreUp().catch(() => false);
     if (!running) return { installed: true, running: false, app: false }; // sin core NO se invoca herdr-app
     const appPath = findApp();
-    const app = appPath ? await appUp(appPath) : false;
+    const e = appPath ? await appEnv() : null;
+    const app = appPath && e !== null ? await appUp(appPath, e) : false;
     return { installed: true, running, app };
   }
 
-  async function viaApp(appPath, { argv, cwd, agentId }) {
-    const e = await appEnv();
+  async function viaApp(appPath, { argv, cwd, agentId }, e) {
     const ls = await runApp(exec, appPath, ["ls"], APP_LS_TIMEOUT_MS, e);
     if (!ls.ok) return { ok: false, retryable: true, err: "herdr-app ls falló" };
     const space = findSpaceByFolder(parseAppSpaces(ls.out), cwd);
@@ -143,9 +146,11 @@ export function createHerdrLauncher({
     if (!(await h.coreUp())) return { ok: false, reason: "no-core" };
     const input = { argv, cwd, agentId };
     let made = null;
+    const e = await appEnv(); // una vez por lanzamiento; sin core vivo no se llama a herdr-app ni a hc
+    if (e === null) return { ok: false, reason: "no-core" };
     const appPath = findApp();
-    if (appPath && (await appUp(appPath))) {
-      const a = await viaApp(appPath, input);
+    if (appPath && (await appUp(appPath, e))) {
+      const a = await viaApp(appPath, input, e);
       if (!a.ok && !a.retryable) return { ok: false, reason: "error", err: a.err };
       if (a.ok) {
         const mark = await h.markOwned(`hc:${a.address}`);

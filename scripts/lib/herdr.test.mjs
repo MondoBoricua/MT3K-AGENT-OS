@@ -9,6 +9,7 @@ import {
   coreRunningFromStatus,
   coreSocketCandidates,
   fallbackRuntimeDir,
+  isValidSession,
   locateHcCore,
   resolveHcEnv,
   probeUnixSocket,
@@ -237,7 +238,7 @@ test("running() POSIX: el probe recibe la ruta de HC_SESSION/XDG del env inyecta
   const exec = (_f, _a, _o, cb) => cb(null, '{"holder":{"current":true},"live":1}');
   const h = createHerdr({
     hcPath: "/bin/hc", exec, platform: "linux", uid: null,
-    env: { HC_SESSION: "zz", XDG_STATE_HOME: "/st" },
+    env: { HC_SESSION: "zz", XDG_STATE_HOME: "/st", XDG_RUNTIME_DIR: undefined }, // sin heredar el del runner
     probe: async (p) => { seen.push(p); return true; },
   });
   assert.equal(await h.running(), true);
@@ -298,7 +299,7 @@ test("B2: el sondeo previo al exec es SIN caché positiva; el negativo se reutil
   let execs = 0;
   let t = 1000;
   const exec = (_f, _a, _o, cb) => { execs++; cb(null, "pantalla"); };
-  const h = createHerdr({ hcPath: "/bin/hc", exec, now: () => t, platform: "linux", uid: null, probe: async () => { probes++; return alive; } });
+  const h = createHerdr({ hcPath: "/bin/hc", exec, now: () => t, platform: "linux", uid: null, env: { XDG_RUNTIME_DIR: undefined, HC_SESSION: undefined }, probe: async () => { probes++; return alive; } });
   assert.equal((await h.read("hc:t1")).ok, true);
   assert.equal((await h.read("hc:t1")).ok, true);
   assert.equal(probes, 2); // un sondeo por exec
@@ -349,11 +350,12 @@ test("N7: HC_SOCKET absoluto a un socket existente se respeta; si no, se ignora"
   const sock = join(dir, "c.sock");
   const srv = createServer();
   return new Promise((resolve) => srv.listen(sock, () => {
-    const withIt = coreSocketCandidates({ env: { HOME: "/h", HC_SOCKET: sock } });
+    const mac = { platform: "darwin", uid: 501 }; // independiente del host del runner
+    const withIt = coreSocketCandidates({ env: { HOME: "/h", HC_SOCKET: sock }, ...mac });
     assert.equal(withIt[0], sock);
     assert.equal(withIt.length, 2);
-    assert.equal(coreSocketCandidates({ env: { HOME: "/h", HC_SOCKET: join(dir, "no.sock") } }).length, 1);
-    assert.equal(coreSocketCandidates({ env: { HOME: "/h", HC_SOCKET: "relativo.sock" } }).length, 1);
+    assert.equal(coreSocketCandidates({ env: { HOME: "/h", HC_SOCKET: join(dir, "no.sock") }, ...mac }).length, 1);
+    assert.equal(coreSocketCandidates({ env: { HOME: "/h", HC_SOCKET: "relativo.sock" }, ...mac }).length, 1);
     srv.close(() => { rmSync(dir, { recursive: true, force: true }); resolve(); });
   }));
 });
@@ -502,7 +504,9 @@ test("findHerdrApp: ~/.local/bin primero, luego PATH absoluto; ignora relativos 
 
 // --- Linux sin XDG_RUNTIME_DIR: el core vive en /run/user/<uid> (servicio systemd) ---
 
-const LINUX_ENV = { HOME: "/root" }; // el servicio medido no trae XDG_RUNTIME_DIR ni XDG_STATE_HOME
+// El servicio medido no trae XDG_RUNTIME_DIR ni XDG_STATE_HOME. Las claves van en `undefined` (no ausentes) para que
+// la mezcla `{ ...process.env, ...env }` del adaptador tampoco herede las del runner: el test no depende del host.
+const LINUX_ENV = { HOME: "/root", XDG_RUNTIME_DIR: undefined, XDG_STATE_HOME: undefined, HC_SESSION: undefined, HC_SOCKET: undefined };
 const STATE_SOCK = "/root/.local/state/herdr-core/default/default.sock";
 const RUNTIME_SOCK = "/run/user/0/herdr-core/default.sock";
 
@@ -558,7 +562,7 @@ test("Linux: vive el socket de state → el entorno de hc NO cambia", async () =
   assert.equal((await h.read("hc:t1")).ok, true);
   assert.equal(calls.length, 1);
   // runExec mezcla con process.env: lo único que no puede aparecer es un XDG_RUNTIME_DIR puesto por el adaptador
-  assert.equal(calls[0].env.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR);
+  assert.equal(calls[0].env.XDG_RUNTIME_DIR, undefined);
   assert.equal(calls[0].env.HOME, "/root");
   assert.deepEqual(await h.hcEnv(), {});
 });
@@ -566,7 +570,7 @@ test("Linux: vive el socket de state → el entorno de hc NO cambia", async () =
 test("Linux: viven ambos → gana el de state (lo que hc usaría sin cambios)", async () => {
   const { h, calls } = linuxHerdr({ alive: [STATE_SOCK, RUNTIME_SOCK] });
   assert.equal((await h.read("hc:t1")).ok, true);
-  assert.equal(calls[0].env.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR);
+  assert.equal(calls[0].env.XDG_RUNTIME_DIR, undefined);
 });
 
 test("Linux: ninguno vivo → cero llamadas a hc, en todos los métodos", async () => {
@@ -575,7 +579,7 @@ test("Linux: ninguno vivo → cero llamadas a hc, en todos los métodos", async 
   assert.deepEqual(await h.list(), []);
   assert.equal((await h.read("hc:t1")).ok, false);
   assert.equal((await h.run({ argv: ["/bin/sh"], cwd: "/tmp", name: "mt3k-x" })).ok, false);
-  assert.deepEqual(await h.hcEnv(), {});
+  assert.equal(await h.hcEnv(), null);
   assert.equal(calls.length, 0);
   assert.deepEqual(probed.slice(0, 2), [STATE_SOCK, RUNTIME_SOCK]); // se probaron los dos candidatos
 });
@@ -591,7 +595,7 @@ test("macOS y win32: sin sondeo extra ni XDG_RUNTIME_DIR añadido", async () => 
   const mac = linuxHerdr({ alive: [RUNTIME_SOCK, STATE_SOCK], platform: "darwin", uid: 501 });
   assert.equal((await mac.h.read("hc:t1")).ok, true);
   assert.deepEqual(mac.probed, [STATE_SOCK]);
-  assert.equal(mac.calls[0].env.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR);
+  assert.equal(mac.calls[0].env.XDG_RUNTIME_DIR, undefined);
   const macOnlyRuntime = linuxHerdr({ alive: [RUNTIME_SOCK], platform: "darwin", uid: 501 });
   assert.equal((await macOnlyRuntime.h.read("hc:t1")).ok, false);
   assert.equal(macOnlyRuntime.calls.length, 0);
@@ -609,4 +613,37 @@ test("locateHcCore / resolveHcEnv: null sin core, {} con state vivo, overlay sol
   assert.deepEqual(await resolveHcEnv({ ...base, probe: async () => false }), {});
   assert.deepEqual(await resolveHcEnv({ env: LINUX_ENV, platform: "darwin", uid: 501, probe: async () => true }), {});
   assert.deepEqual(base.env, LINUX_ENV); // no muta
+});
+
+// --- HC_SESSION se une a rutas de socket: solo nombres seguros; si no, SIN candidatos (nunca "default") ---
+
+test("isValidSession / coreSocketCandidates: sesiones inválidas no producen candidatos", () => {
+  for (const ok of ["default", "s1", "a.b_c-d", "A", "0x", "x".repeat(64)]) assert.equal(isValidSession(ok), true, ok);
+  for (const bad of ["../../1001/herdr-core/default", "..", "a/b", "a\\b", ".hidden", "-x", "a..b", "x".repeat(65), "a b", "a\u0000b", 5, null]) {
+    assert.equal(isValidSession(bad), false, String(bad));
+  }
+  const linux = { platform: "linux", uid: 0 };
+  assert.deepEqual(coreSocketCandidates({ env: { ...LINUX_ENV, HC_SESSION: "../../1001/herdr-core/default" }, ...linux }), []);
+  assert.deepEqual(coreSocketCandidates({ env: { ...LINUX_ENV, HC_SESSION: "a/b", XDG_RUNTIME_DIR: "/rt" }, ...linux }), []);
+  assert.deepEqual(coreSocketCandidates({ env: { HOME: "/h", HC_SESSION: "..", HC_SOCKET: "/x.sock" }, platform: "darwin", uid: 501, isSocket: () => true }), []);
+  assert.equal(coreSocketCandidates({ env: { ...LINUX_ENV, HC_SESSION: "ok-1" }, ...linux }).length, 2);
+});
+
+test("sesión inválida: ni locateHcCore ni el adaptador sondean o ejecutan hc", async () => {
+  const env = { ...LINUX_ENV, HC_SESSION: "../../1001/herdr-core/default" };
+  let probes = 0;
+  const probe = async () => { probes++; return true; };
+  assert.equal(await locateHcCore({ env, platform: "linux", uid: 0, probe }), null);
+  assert.deepEqual(await resolveHcEnv({ env, platform: "linux", uid: 0, probe }), {});
+  const { h, calls } = linuxHerdr({ alive: [RUNTIME_SOCK, STATE_SOCK], env });
+  assert.equal((await h.read("hc:t1")).ok, false);
+  assert.equal(await h.hcEnv(), null);
+  assert.equal(calls.length, 0);
+  assert.equal(probes, 0);
+});
+
+test("locateHcCore win32: {} sin sondear sockets unix", async () => {
+  let probes = 0;
+  assert.deepEqual(await locateHcCore({ env: LINUX_ENV, platform: "win32", uid: 0, probe: async () => { probes++; return false; } }), {});
+  assert.equal(probes, 0);
 });

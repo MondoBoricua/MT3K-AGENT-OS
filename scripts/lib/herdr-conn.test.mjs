@@ -68,7 +68,7 @@ function harness(options = {}) {
   return { spawn, children, calls, writes, get peak() { return peak; }, get live() { return live; } };
 }
 function setup(t, options = {}, config = {}) {
-  const fake = harness(options), conn = createHerdrConn({ hcPath: '/fake/hc', spawn: fake.spawn, ...config });
+  const fake = harness(options), conn = createHerdrConn({ hcPath: '/fake/hc', spawn: fake.spawn, locateCore: async () => ({}), ...config });
   t.after(() => conn.close()); return { fake, conn };
 }
 
@@ -279,23 +279,42 @@ test('R4-1: a fresh connection still in hello is never returned by a canSpawn th
 
 test('spawn env: the resolved runtime dir reaches hc connect; nothing resolved keeps the same env object', async t => {
   const env = { EXAMPLE: 'yes' };
-  const withRuntime = setup(t, {}, { env, resolveEnv: async () => ({ XDG_RUNTIME_DIR: '/run/user/0' }) });
+  const withRuntime = setup(t, {}, { env, locateCore: async () => ({ XDG_RUNTIME_DIR: '/run/user/0' }) });
   assert.equal((await withRuntime.conn.snapshot('t9')).ok, true);
   assert.deepEqual(withRuntime.fake.children[0].options.env, { EXAMPLE: 'yes', XDG_RUNTIME_DIR: '/run/user/0' });
   assert.deepEqual(env, { EXAMPLE: 'yes' }, 'input env is not mutated');
-  const plain = setup(t, {}, { env, resolveEnv: async () => ({}) });
+  const plain = setup(t, {}, { env, locateCore: async () => ({}) });
   assert.equal((await plain.conn.snapshot('t9')).ok, true);
   assert.equal(plain.fake.children[0].options.env, env);
 });
 
-test('spawn env: a throwing resolver falls back to the plain env; canSpawn=false never resolves nor spawns', async t => {
+test('spawn fails CLOSED: no live core (null) or a throwing locator means zero spawns', async t => {
   const env = { EXAMPLE: 'yes' };
-  const throwing = setup(t, {}, { env, resolveEnv: async () => { throw new Error('boom'); } });
-  assert.equal((await throwing.conn.snapshot('t9')).ok, true);
-  assert.equal(throwing.fake.children[0].options.env, env);
-  let resolved = 0;
-  const denied = setup(t, {}, { env, canSpawn: async () => false, resolveEnv: async () => { resolved++; return {}; } });
-  assert.equal((await denied.conn.snapshot('t9')).ok, false);
-  assert.equal(denied.fake.children.length, 0);
-  assert.equal(resolved, 0);
+  for (const [name, locateCore] of [['null', async () => null], ['undefined', async () => undefined], ['throw', async () => { throw new Error('boom'); }]]) {
+    const { fake, conn } = setup(t, {}, { env, locateCore });
+    assert.equal((await conn.snapshot('t9')).ok, false, name);
+    assert.equal((await conn.snapshot('t9')).ok, false, name + ' (again)');
+    assert.equal(fake.children.length, 0, name);
+    assert.equal(conn.stats().spawns, 0, name);
+  }
+});
+
+test('spawn env: the core disappears between connections → the respawn does not happen', async t => {
+  let alive = true;
+  const { fake, conn } = setup(t, {}, { env: {}, locateCore: async () => (alive ? {} : null) });
+  assert.equal((await conn.snapshot('t9')).ok, true);
+  assert.equal(fake.children.length, 1);
+  alive = false;
+  fake.children[0].kill();
+  await delay(20);
+  assert.equal((await conn.snapshot('t10')).ok, false);
+  assert.equal(fake.children.length, 1, 'no second hc connect once the core is gone');
+});
+
+test('canSpawn=false never locates nor spawns', async t => {
+  let located = 0;
+  const { fake, conn } = setup(t, {}, { env: {}, canSpawn: async () => false, locateCore: async () => { located++; return {}; } });
+  assert.equal((await conn.snapshot('t9')).ok, false);
+  assert.equal(fake.children.length, 0);
+  assert.equal(located, 0);
 });

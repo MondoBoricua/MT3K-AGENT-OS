@@ -103,6 +103,10 @@ export function fallbackRuntimeDir({ env = process.env, platform = process.platf
   return posix.join("/run/user", String(uid));
 }
 
+/** Nombre de sesión de hc válido: se une a rutas de socket, así que no puede traer `/`, `..` ni escapar del directorio. */
+const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const isValidSession = (name) => typeof name === "string" && SESSION_RE.test(name) && !name.includes("..");
+
 /**
  * Sockets unix donde puede escuchar el core en POSIX. Medido en esta Mac (hc 0.1.20):
  * sin XDG_RUNTIME_DIR → ${XDG_STATE_HOME:-~/.local/state}/herdr-core/<s>/<s>.sock; con XDG_RUNTIME_DIR
@@ -111,6 +115,8 @@ export function fallbackRuntimeDir({ env = process.env, platform = process.platf
  */
 export function coreSocketCandidates({ env = process.env, home = homedir(), isSocket = isSocketFile, platform = process.platform, uid = process.getuid?.() } = {}) {
   const session = env.HC_SESSION || "default";
+  // sesión inválida → sin candidatos (el adaptador se comporta como "sin core"); NO se cae a "default": hablaría con otro core que hc
+  if (!isValidSession(session)) return [];
   const state = env.XDG_STATE_HOME || posix.join(env.HOME || home, ".local", "state");
   const out = [posix.join(state, "herdr-core", session, `${session}.sock`)];
   if (env.XDG_RUNTIME_DIR) out.unshift(posix.join(env.XDG_RUNTIME_DIR, "herdr-core", `${session}.sock`));
@@ -127,6 +133,7 @@ export function coreSocketCandidates({ env = process.env, home = homedir(), isSo
  * XDG_RUNTIME_DIR, es el último candidato), `{}` en cualquier otro caso. Nunca arranca nada.
  */
 export async function locateHcCore({ env = process.env, home = homedir(), isSocket = isSocketFile, platform = process.platform, uid = process.getuid?.(), probe = probeUnixSocket } = {}) {
+  if (platform === "win32") return {}; // sin sockets unix: hc server status no autoarranca (ver createHerdr)
   const socks = coreSocketCandidates({ env, home, isSocket, platform, uid });
   const alive = (await Promise.all(socks.map((sk) => probe(sk)))).map(Boolean);
   if (!alive.some(Boolean)) return null;
@@ -391,9 +398,9 @@ export function createHerdr({
     return extra;
   }
 
-  /** Entorno extra para procesos de Herdr (hc, herdr-app) hacia el core vivo; {} si no hace falta o no hay core. */
+  /** Entorno extra para procesos de Herdr (hc, herdr-app) hacia el core vivo: {} si no hace falta, null si no hay core. */
   async function hcEnv() {
-    return (await locateCore()) ?? {};
+    return locateCore();
   }
 
   /** Única vía de ejecución de hc. */

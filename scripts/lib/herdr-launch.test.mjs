@@ -25,6 +25,7 @@ function fakeHc({ up = true, runs = [], mark = { ok: true } } = {}) {
   return {
     calls,
     coreUp: async () => up,
+    hcEnv: async () => (up ? {} : null),
     invalidate: () => calls.push(["invalidate"]),
     run: async (input) => { calls.push(["run", input]); return runs.shift() ?? { ok: true, address: "t7", id: "hc:t7" }; },
     markOwned: async (id) => { calls.push(["mark", id]); return mark; },
@@ -231,14 +232,48 @@ test("herdr-app corre con el mismo entorno que hc hacia el core (Linux: XDG_RUNT
   assert.equal((await l.status()).app, true);
 });
 
-test("herdr-app: sin overlay (hcEnv {} o ausente) el entorno es el original", async () => {
+test("herdr-app: sin overlay (hcEnv {}) el entorno es el original", async () => {
   const envs = [];
   const exec = (_f, argv, opts, cb) => { envs.push(opts.env); cb(null, "ok"); };
-  const base = { A: "1" };
-  for (const hc of [{ ...fakeHc(), hcEnv: async () => ({}) }, fakeHc()]) {
-    const l = createHerdrLauncher({ getHerdr: () => hc, findApp: () => APP, exec, env: base });
-    await l.status();
+  const l = createHerdrLauncher({ getHerdr: () => fakeHc(), findApp: () => APP, exec, env: { A: "1" } });
+  assert.equal((await l.status()).app, true);
+  assert.equal(envs.length, 1);
+  assert.equal(envs[0].A, "1");
+  assert.equal(envs[0].XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR);
+});
+
+test("herdr-app falla CERRADO: hcEnv null, error o ausente → cero llamadas a herdr-app (status y launch)", async () => {
+  const variants = {
+    null: { ...fakeHc(), hcEnv: async () => null },
+    throw: { ...fakeHc(), hcEnv: async () => { throw new Error("boom"); } },
+    missing: (() => { const h = fakeHc(); delete h.hcEnv; return h; })(),
+  };
+  for (const [name, hc] of Object.entries(variants)) {
+    const app = fakeApp({ status: { out: "ok" }, ls: { out: LS }, do: { out: '{"terminal":"t9"}' } });
+    const l = createHerdrLauncher({ getHerdr: () => hc, findApp: () => APP, exec: app.exec, nameSuffix: "abc" });
+    assert.deepEqual(await l.status(), { installed: true, running: true, app: false }, name);
+    assert.deepEqual(await l.launch(INPUT), { ok: false, reason: "no-core" }, name);
+    assert.equal(app.calls.length, 0, name);
+    assert.equal(hc.calls.filter(([k]) => k === "run").length, 0, name);
   }
-  assert.equal(envs.length, 2);
-  for (const e of envs) assert.equal(e.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR);
+});
+
+test("herdr-app: el core muere tras coreUp → launch devuelve no-core sin herdr-app ni hc run", async () => {
+  let envCalls = 0;
+  const hc = { ...fakeHc(), hcEnv: async () => (envCalls++ === 0 ? null : {}) };
+  const app = fakeApp({ status: { out: "ok" } });
+  const l = createHerdrLauncher({ getHerdr: () => hc, findApp: () => APP, exec: app.exec, nameSuffix: "abc" });
+  assert.deepEqual(await l.launch(INPUT), { ok: false, reason: "no-core" });
+  assert.equal(app.calls.length, 0);
+  assert.equal(hc.calls.filter(([k]) => k === "run").length, 0);
+});
+
+test("herdr-app: el entorno se resuelve una vez por lanzamiento y se reutiliza en status, ls y do", async () => {
+  let envCalls = 0;
+  const hc = { ...fakeHc(), hcEnv: async () => { envCalls++; return { XDG_RUNTIME_DIR: "/run/user/0" }; } };
+  const app = fakeApp({ status: { out: "ok" }, ls: { out: LS }, do: { out: '{"terminal":"t9"}' } });
+  const l = createHerdrLauncher({ getHerdr: () => hc, findApp: () => APP, exec: app.exec, nameSuffix: "abc" });
+  assert.equal((await l.launch(INPUT)).ok, true);
+  assert.equal(envCalls, 1);
+  assert.deepEqual(app.calls.map((c) => c.argv[0]), ["status", "ls", "do"]);
 });

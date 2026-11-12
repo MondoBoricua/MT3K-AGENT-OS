@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import { resolveHcEnv } from './herdr.mjs';
+import { locateHcCore } from './herdr.mjs';
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const CONTROL_MAX = 64 * 1024;
@@ -28,7 +28,7 @@ export function encodeObserverWrite(message, framed) {
 }
 
 /** One lazy, read-only hc connect transport. No other hc command is invoked. */
-export function createHerdrConn({ hcPath = 'hc', spawn = nodeSpawn, env = process.env, now = Date.now, idleMs = 30000, canSpawn = null, resolveEnv = resolveHcEnv } = {}) {
+export function createHerdrConn({ hcPath = 'hc', spawn = nodeSpawn, env = process.env, now = Date.now, idleMs = 30000, canSpawn = null, locateCore = locateHcCore } = {}) {
   // canSpawn: async () => boolean, se consulta justo antes de CADA spawn (y respawn) de `hc connect`: en POSIX
   // `hc connect` autoarranca un core si no hay ninguno. Carrera ~1 ms entre sondeo y spawn, inevitable.
   let closed = false, conn = null, connecting = null, active = 0, nextId = 1;
@@ -158,10 +158,11 @@ export function createHerdrConn({ hcPath = 'hc', spawn = nodeSpawn, env = proces
         try { can = await canSpawn(); } catch { can = false; }
         if (!can || closed) return null;
       }
-      // Linux sin XDG_RUNTIME_DIR: hc debe ver el mismo directorio de runtime que el core vivo, o autoarrancaría otro
-      let extraEnv = {};
-      try { extraEnv = await resolveEnv({ env }); } catch { extraEnv = {}; }
-      if (closed) return null;
+      // Falla CERRADO: sin core vivo (null) o con error del localizador no se lanza `hc connect` (autoarrancaría un core).
+      // Linux sin XDG_RUNTIME_DIR: hc debe ver el mismo directorio de runtime que el core vivo.
+      let extraEnv = null;
+      try { extraEnv = await locateCore({ env }); } catch { extraEnv = null; }
+      if (extraEnv === null || extraEnv === undefined || closed) return null;
       const spawnEnv = Object.keys(extraEnv).length ? { ...env, ...extraEnv } : env;
       let child;
       try { child = spawn(hcPath, ['connect'], { env: spawnEnv, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }); }
