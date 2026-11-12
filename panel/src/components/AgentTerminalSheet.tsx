@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentRow, PaneRef, PaneEvent } from "../lib/api";
 import { sendToPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, setPaneLabel, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { applyPaneEvent } from "../lib/pane-stream";
-import { HERDR_UNAVAILABLE_TITLE, isHerdrPane, isHerdrPaneId } from "../lib/herdr-pane";
+import { HERDR_NOT_KILLABLE_TITLE, HERDR_UNAVAILABLE_TITLE, isHerdrPane, isHerdrPaneId, isPaneKillable } from "../lib/herdr-pane";
 import { HerdrBadge } from "./HerdrBadge";
 import { usePaneStream } from "../lib/use-pane-stream";
 import { attachKind } from "../lib/attach-kind";
@@ -499,10 +499,12 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
     const r = await launchAgent(agent.id, { ...opts, ...options });
     setLaunching(false);
     if (r?.ok && r.paneId) {
-      const pane: PaneRef = { paneId: r.paneId, label: r.label ?? r.session ?? "", window: r.session ?? "", cwd: r.cwd ?? "" };
+      const pane: PaneRef = { paneId: r.paneId, label: r.label ?? r.session ?? "", window: r.session ?? "", cwd: r.cwd ?? "", ...(r.backend ? { backend: r.backend } : {}), ...(r.killable ? { killable: true } : {}) };
       setLaunched(pane); setPaneId(r.paneId); setFullscreen(true); setMissingDir(false); setShowLaunch(false); setFirstPrompt("");
       try { localStorage.setItem(`mt3k.launch.${agentKey(agent)}`, JSON.stringify(proj ? { projectId: proj } : { cwd: launchCwd.trim() || "~" })); } catch { /* private mode */ }
       onToast?.(`${agent.name} abierto · ${pane.cwd}${r.resumed ? " · continuada" : ""}`, true);
+      if (r.fallback) onToast?.(r.fallback, false); // backend herdr elegido pero sin core: se abrió en tmux
+      if (r.warning) onToast?.(r.warning, false);
     } else if (r?.missingDir) {
       setMissingDir(true); // show the "create & open" affordance inline instead of a dead-end error
     } else {
@@ -525,7 +527,8 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
 
   // kill a tmux session from the panel (confirm first — it takes the agent down with it)
   const kill = async (pid: string) => {
-    if (!window.confirm("¿Matar esta sesión de tmux? El agente que corre ahí se cierra.")) return;
+    const herdrTarget = isHerdrPaneId(pid);
+    if (!window.confirm(herdrTarget ? "¿Cerrar esta terminal de Herdr? El agente que corre ahí se cierra." : "¿Matar esta sesión de tmux? El agente que corre ahí se cierra.")) return;
     const r = await killPane(pid, host);
     if (r?.ok) {
       setKilled((k) => [...k, pid]);
@@ -639,7 +642,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                 ＋ nueva
               </button>
             )}
-            <button onClick={() => kill(activePane.paneId)} disabled={isHerdrPane(activePane)} title={isHerdrPane(activePane) ? HERDR_UNAVAILABLE_TITLE : "matar esta sesión de tmux"}
+            <button onClick={() => kill(activePane.paneId)} disabled={!isPaneKillable(activePane)} title={!isPaneKillable(activePane) ? HERDR_NOT_KILLABLE_TITLE : isHerdrPane(activePane) ? "cerrar esta terminal de Herdr" : "matar esta sesión de tmux"}
               className="rounded-lg border border-red-400/25 px-2.5 py-1 font-mono text-[10px] text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-red-400/25 disabled:hover:bg-transparent disabled:hover:text-red-300/70">
               ⏻ matar
             </button>
@@ -943,7 +946,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                   className="shrink-0 rounded-xl border border-ink-line px-3 font-mono text-xs text-white/55 transition hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-ink-line disabled:hover:text-white/55">
                   ✎
                 </button>
-                <button onClick={() => kill(p.paneId)} disabled={isHerdrPane(p)} title={isHerdrPane(p) ? HERDR_UNAVAILABLE_TITLE : "matar esta sesión"}
+                <button onClick={() => kill(p.paneId)} disabled={!isPaneKillable(p)} title={!isPaneKillable(p) ? HERDR_NOT_KILLABLE_TITLE : "matar esta sesión"}
                   className="shrink-0 rounded-xl border border-red-400/25 px-3 font-mono text-xs text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-red-400/25 disabled:hover:bg-transparent disabled:hover:text-red-300/70">
                   ✕
                 </button>

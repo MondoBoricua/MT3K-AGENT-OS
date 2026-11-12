@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Manifest } from "../types";
-import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, moveHost, updateFleet, getMacros, saveMacros, getRestoreConfig, setRestoreConfig, type SystemStatus, type FedHost } from "../lib/api";
+import { herdrChoice } from "../lib/herdr-pane";
+import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, moveHost, updateFleet, getMacros, saveMacros, getRestoreConfig, setRestoreConfig, getLaunchBackend, setLaunchBackend, type LaunchBackend, type LaunchBackendState, type SystemStatus, type FedHost } from "../lib/api";
 import { fmt } from "../lib/ui";
 
 const REFRESH_KEY = "mt3k.refreshMs";
@@ -80,6 +81,23 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
       setRestoreCfgMsg(r?.err ?? "error al guardar");
     }
   };
+  // where NEW sessions are opened (data/launch-backend.json): tmux | herdr — this host's own setting
+  const [launchBackend, setLaunchBackendState] = useState<LaunchBackendState | null>(null);
+  const [launchBackendMsg, setLaunchBackendMsg] = useState("");
+  useEffect(() => { getLaunchBackend().then((r) => { if (r?.ok) setLaunchBackendState(r); }); }, []);
+  const doSetLaunchBackend = async (next: LaunchBackend) => {
+    if (!launchBackend || next === launchBackend.backend) return;
+    const prev = launchBackend;
+    setLaunchBackendState({ ...launchBackend, backend: next });
+    setLaunchBackendMsg("");
+    const r = await setLaunchBackend(next);
+    if (r?.ok) setLaunchBackendMsg(next === "herdr" ? "✓ las sesiones nuevas se abrirán en Herdr" : "✓ las sesiones nuevas se abrirán en tmux");
+    else {
+      setLaunchBackendState(prev);
+      setLaunchBackendMsg(r?.err ?? "error al guardar");
+    }
+  };
+  const herdrOpt = herdrChoice(launchBackend?.herdr);
   const doToggleHost = async (h: FedHost) => {
     const r = await toggleHost(h.id, !h.disabled);
     if (!r?.ok) setHMsg(r?.err ?? "no se pudo cambiar el estado");
@@ -259,6 +277,25 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
             <span>Restaurar sesiones automáticamente al arrancar</span>
           </label>
           {restoreCfgMsg && <p className="mt-2 font-mono text-[11px] text-white/55">{restoreCfgMsg}</p>}
+
+          <div className="mt-5 border-t border-ink-line pt-4">
+            <div className="mb-2 text-sm text-white/85">Abrir terminales con</div>
+            <div role="radiogroup" aria-label="Abrir terminales con" className="flex gap-2">
+              {([["tmux", "tmux", false], ["herdr", "Herdr", herdrOpt.disabled]] as const).map(([value, label, disabled]) => {
+                const on = launchBackend?.backend === value;
+                return (
+                  <button key={value} type="button" role="radio" aria-checked={on} disabled={disabled || !launchBackend}
+                    onClick={() => void doSetLaunchBackend(value)}
+                    className={`rounded-lg border px-3 py-1.5 font-mono text-xs transition disabled:cursor-not-allowed disabled:opacity-40 ${on ? "border-accent/60 bg-accent/12 text-accent" : "border-ink-line text-white/70 hover:border-accent/50 hover:text-accent"}`}>
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            {herdrOpt.hint && <p className="mt-2 font-mono text-[11px] text-white/55">{herdrOpt.hint}</p>}
+            <p className="mt-2 text-xs text-white/45">Vale para las sesiones nuevas de este host; los hosts federados siguen su propio ajuste.</p>
+            {launchBackendMsg && <p className="mt-2 font-mono text-[11px] text-white/55">{launchBackendMsg}</p>}
+          </div>
         </div>
 
         <div className="surface p-5 lg:col-span-2">

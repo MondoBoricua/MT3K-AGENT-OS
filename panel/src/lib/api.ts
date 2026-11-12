@@ -12,6 +12,7 @@ export interface PaneRef {
   statusRule?: string;
   statusSource?: "manifest" | "heuristic" | "herdr";
   backend?: "herdr"; // ausente = tmux
+  killable?: boolean; // solo terminales de Herdr que abrió el panel (etiqueta mt3k.panel=1)
 }
 export type PaneEvent = string | { from: number; lines: string[] };
 export type AdapterCapability = { supported: boolean; reason?: string };
@@ -65,7 +66,7 @@ export const sendKey = (paneId: string, key: string, host?: string) => jpost<{ o
 export const killPane = (paneId: string, host?: string) => jpost<{ ok: boolean; err?: string }>(`/api/kill${hostQ(host)}`, { paneId });
 export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: string; create?: boolean; firstPrompt?: string; host?: string; fresh?: boolean }) => {
   const { host, ...rest } = opts;
-  return jpost<{ ok: boolean; paneId?: string; label?: string; session?: string; cwd?: string; err?: string; missingDir?: boolean; resumed?: boolean; reason?: string }>(`/api/launch${hostQ(host)}`, { agentId, ...rest });
+  return jpost<{ ok: boolean; paneId?: string; label?: string; session?: string; cwd?: string; err?: string; missingDir?: boolean; resumed?: boolean; reason?: string; fallback?: string; backend?: "herdr"; killable?: boolean; warning?: string }>(`/api/launch${hostQ(host)}`, { agentId, ...rest });
 };
 export const resumableFor = (agentId: string, opts: { projectId?: string; cwd?: string; host?: string }) => {
   const { host, ...target } = opts;
@@ -138,6 +139,11 @@ export const restoreSessions = (opts: {
 export const getRestoreConfig = () => jget<{ ok: boolean; auto: boolean }>("/api/restore-config");
 export const setRestoreConfig = (auto: boolean) =>
   jpost<{ ok: boolean; auto: boolean; err?: string }>("/api/restore-config", { auto });
+export type LaunchBackend = "tmux" | "herdr";
+export type LaunchBackendState = { ok: boolean; backend: LaunchBackend; herdr: { installed: boolean; running: boolean; app: boolean }; err?: string };
+// dónde abre sesiones NUEVAS el host LOCAL (los hosts federados siguen su propio ajuste)
+export const getLaunchBackend = () => jget<LaunchBackendState>("/api/launch-backend");
+export const setLaunchBackend = (backend: LaunchBackend) => jpost<{ ok: boolean; backend?: LaunchBackend; err?: string }>("/api/launch-backend", { backend });
 export const getMacros = () => jget<{ macros: string[] }>("/api/macros");
 // start a web-UI agent's server on its host (federation-aware via ?host=)
 export const webStart = (agentId: string, host?: string) => jpost<{ ok: boolean; already?: boolean; err?: string }>(`/api/web-start${hostQ(host)}`, { agentId });
