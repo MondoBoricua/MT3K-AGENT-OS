@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -74,6 +74,27 @@ function zcodeHasSession(dbPath, dirs, useNodeSqlite) {
 }
 
 const JUNIE_SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const JUNIE_INDEX_MAX_BYTES = 1_048_576; // ~4,000 sessions; a larger index reads as "no history" (the safe side)
+
+/** Reads at most `max` bytes of a file; null if it is missing, unreadable or larger than `max` (also if it grows meanwhile). */
+function readCapped(path, max) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.allocUnsafe(max + 1);
+    let total = 0;
+    while (total <= max) {
+      const n = readSync(fd, buf, total, max + 1 - total, null);
+      if (n === 0) break;
+      total += n;
+    }
+    return total > max ? null : buf.toString("utf8", 0, total);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* already closed */ }
+  }
+}
 const historyChecks = {
   claude: (dir, home, realDir) => readdirSync(join(home, ".claude", "projects", realDir(dir).replace(/[^A-Za-z0-9]/g, "-"))).some((f) => f.endsWith(".jsonl")),
   grok: (dir, home, realDir) => hasSubdirectory(join(home, ".grok", "sessions", encodeURIComponent(realDir(dir)))),
@@ -106,16 +127,21 @@ const historyChecks = {
   // AND the session directory still exists on disk as a directory (deleted sessions must not count).
   junie: (dir, home, realDir) => {
     const indexPath = join(home, ".junie", "sessions", "index.jsonl");
-    let data;
-    try {
-      const st = statSync(indexPath);
-      // cap at 1 MiB — the index is a few KB in practice; anything larger is corrupt
-      if (st.size > 1_048_576) return false;
-      data = readFileSync(indexPath, "utf8");
-    } catch { return false; }
+    const data = readCapped(indexPath, JUNIE_INDEX_MAX_BYTES);
+    if (data === null) return false;
     const sessionsDir = join(home, ".junie", "sessions");
     let targetReal;
     try { targetReal = realDir(dir); } catch { return false; }
+    // Each distinct recorded folder is resolved once per call (sessions repeat folders a lot).
+    const resolved = new Map();
+    const resolve = (folder) => {
+      if (!resolved.has(folder)) {
+        let real = null;
+        try { real = realDir(folder); } catch { /* folder gone */ }
+        resolved.set(folder, real);
+      }
+      return resolved.get(folder);
+    };
     for (const raw of data.split("\n")) {
       const line = raw.trim();
       if (!line.length) continue;
@@ -129,14 +155,13 @@ const historyChecks = {
       // and never "..". That rules out "", ".", separators and traversal, so the join below stays inside sessionsDir.
       if (!JUNIE_SESSION_ID_RE.test(entry.sessionId) || entry.sessionId.includes("..")) continue;
       // resolve the recorded projectDir through realDir to handle symlink equivalence
-      let recordedReal;
-      try { recordedReal = realDir(entry.projectDir); } catch { /* folder gone → skip */ continue; }
-      // exact match only — parent/child/prefix must not match
-      if (recordedReal !== targetReal) continue;
+      // exact match only — parent/child/prefix must not match; a recorded folder that is gone never matches
+      if (resolve(entry.projectDir) !== targetReal) continue;
       // the session entry must be an existing directory inside the sessions folder
       const sessionDir = join(sessionsDir, entry.sessionId);
+      // lstat: a symlink in the sessions folder does not count (it could point outside it, or back at it)
       let st;
-      try { st = statSync(sessionDir); } catch { continue; }
+      try { st = lstatSync(sessionDir); } catch { continue; }
       if (!st.isDirectory()) continue;
       return true;
     }

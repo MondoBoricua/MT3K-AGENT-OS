@@ -350,10 +350,12 @@ test("Junie returns false when recorded projectDir no longer exists (realDir thr
 });
 
 test("Junie returns false when index.jsonl is not readable", (t) => {
-  const { home, dir, indexPath } = junieFixture(t);
-  writeFileSync(indexPath, "");
-  // make unreadable
-  try { chmodSync(indexPath, 0o000); } catch { /* best effort */ }
+  const { home, dir, indexPath, sessionsDir, real } = junieFixture(t);
+  makeSession(sessionsDir, "session-unreadable");
+  writeJunieIndex(indexPath, [{ sessionId: "session-unreadable", projectDir: real }]);
+  assert.equal(hasResumableHistory("junie", dir, { home }), true); // control: readable → the entry counts
+  chmodSync(indexPath, 0o000);
+  t.after(() => { try { chmodSync(indexPath, 0o600); } catch { /* gone */ } });
   assert.equal(hasResumableHistory("junie", dir, { home }), false);
 });
 
@@ -366,8 +368,11 @@ test("Junie returns false when .junie directory is not a directory", (t) => {
 });
 
 test("Junie handles realDir throwing for the query dir", (t) => {
-  const { home } = junieFixture(t);
-  assert.equal(hasResumableHistory("junie", join(home, "missing"), {
+  const { home, dir, indexPath, sessionsDir, real } = junieFixture(t);
+  makeSession(sessionsDir, "session-resolver");
+  writeJunieIndex(indexPath, [{ sessionId: "session-resolver", projectDir: real }]);
+  assert.equal(hasResumableHistory("junie", dir, { home }), true); // control: with a working resolver it matches
+  assert.equal(hasResumableHistory("junie", dir, {
     home, realDir() { throw new Error("unavailable"); },
   }), false);
 });
@@ -467,4 +472,37 @@ test("Junie rejects session ids that are not a plain folder name ('.', leading d
     writeJunieIndex(indexPath, [{ sessionId, projectDir: real, createdAt: 1, updatedAt: 2, taskName: "test" }]);
     assert.equal(hasResumableHistory("junie", dir, { home }), false, JSON.stringify(sessionId));
   }
+});
+
+test("Junie: a symlink in the sessions folder never counts as a session (outside target or the folder itself)", (t) => {
+  const { home, dir, indexPath, sessionsDir, real } = junieFixture(t);
+  symlinkSync(home, join(sessionsDir, "Escape"), "dir");
+  symlinkSync(sessionsDir, join(sessionsDir, "Self"), "dir");
+  writeJunieIndex(indexPath, [{ sessionId: "Escape", projectDir: real }, { sessionId: "Self", projectDir: real }]);
+  assert.equal(hasResumableHistory("junie", dir, { home }), false);
+});
+
+test("Junie: an index over the size cap reads as no history even with a valid first entry", (t) => {
+  const { home, dir, indexPath, sessionsDir, real } = junieFixture(t);
+  makeSession(sessionsDir, "session-big");
+  const valid = JSON.stringify({ sessionId: "session-big", projectDir: real });
+  writeFileSync(indexPath, valid + "\n" + "x".repeat(1_048_576) + "\n");
+  assert.equal(hasResumableHistory("junie", dir, { home }), false);
+  writeFileSync(indexPath, valid + "\n" + "x".repeat(1_048_576 - valid.length - 2) + "\n"); // exactly at the cap
+  assert.equal(hasResumableHistory("junie", dir, { home }), true);
+});
+
+test("Junie: each distinct recorded folder is resolved once per call", (t) => {
+  const { home, dir, indexPath, sessionsDir, real } = junieFixture(t);
+  const other = join(home, "other");
+  mkdirSync(other);
+  makeSession(sessionsDir, "session-last");
+  writeJunieIndex(indexPath, [
+    ...Array.from({ length: 200 }, (_, i) => ({ sessionId: `session-gone-${i}`, projectDir: other })),
+    { sessionId: "session-last", projectDir: real },
+  ]);
+  let calls = 0;
+  const realDir = (p) => { calls++; return realpathSync(p); };
+  assert.equal(hasResumableHistory("junie", dir, { home, realDir }), true);
+  assert.equal(calls, 3); // the query folder + two distinct recorded folders
 });
