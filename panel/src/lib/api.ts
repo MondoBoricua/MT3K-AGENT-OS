@@ -10,7 +10,8 @@ export interface PaneRef {
   waiting?: boolean;
   status?: "working" | "blocked" | "idle" | "done";
   statusRule?: string;
-  statusSource?: "manifest" | "heuristic";
+  statusSource?: "manifest" | "heuristic" | "herdr";
+  backend?: "herdr"; // ausente = tmux
 }
 export type PaneEvent = string | { from: number; lines: string[] };
 export type AdapterCapability = { supported: boolean; reason?: string };

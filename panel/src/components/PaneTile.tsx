@@ -6,6 +6,8 @@ import { paneStatus, statusLabel, statusTone } from "../lib/pane-status";
 import { applyPaneEvent } from "../lib/pane-stream";
 import { usePaneStream } from "../lib/use-pane-stream";
 import AgentLogo from "./AgentLogo";
+import { HerdrBadge } from "./HerdrBadge";
+import { HERDR_UNAVAILABLE_TITLE, isHerdrPane } from "../lib/herdr-pane";
 import { TerminalLine } from "./TerminalLines";
 import { useTerminalLinks } from "../lib/use-terminal-links";
 
@@ -99,7 +101,7 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
       resizeTimer.current = setTimeout(() => {
         resizeTimer.current = null;
         const pre = termRef.current;
-        if (!pre || pre.clientWidth <= 0 || pre.clientHeight <= 0) return;
+        if (isHerdrPane(pane) || !pre || pre.clientWidth <= 0 || pre.clientHeight <= 0) return; // Herdr: sin /api/pane-resize
         const lh = measuredLineHeightPx(pre, TILE_FONT_PX);
         const cols = Math.min(220, Math.max(60, Math.floor((pre.clientWidth - 24) / (0.62 * TILE_FONT_PX))));
         const rows = Math.min(80, Math.max(20, Math.floor(pre.clientHeight / lh)));
@@ -156,6 +158,7 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
               {host}
             </span>
           )}
+          {isHerdrPane(pane) && <HerdrBadge />}
           {displayName && (
             <span className="shrink-0 font-mono text-[11px] font-semibold text-accent" title={displayName}>
               {displayName}
@@ -175,9 +178,10 @@ export default function PaneTile({ session, focused, tickMs, onFocus, onExpand, 
               e.stopPropagation();
               void handleRename();
             }}
-            title="renombrar sesión"
+            disabled={isHerdrPane(pane)}
+            title={isHerdrPane(pane) ? HERDR_UNAVAILABLE_TITLE : "renombrar sesión"}
             aria-label="renombrar sesión"
-            className="rounded border border-ink-line px-1.5 py-0.5 font-mono text-[10px] text-white/60 transition hover:border-accent/50 hover:text-accent"
+            className="rounded border border-ink-line px-1.5 py-0.5 font-mono text-[10px] text-white/60 transition hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-ink-line disabled:hover:text-white/60"
           >
             ✎
           </button>

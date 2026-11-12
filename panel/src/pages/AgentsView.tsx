@@ -3,6 +3,8 @@ import type { AgentRow, RestoreMissingItem, RestoreState } from "../lib/api";
 import { getLogs, broadcast, agentKey, getRestore, restoreSessions } from "../lib/api";
 import { paneStatus, statusTone } from "../lib/pane-status";
 import AgentLogo from "../components/AgentLogo";
+import { HerdrBadge } from "../components/HerdrBadge";
+import { isHerdrPane } from "../lib/herdr-pane";
 
 const RESTORE_DISMISS_KEY = "mt3k.restore.dismissed";
 
@@ -197,6 +199,7 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
                   className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] transition ${chipCls}`}>
                   <AgentLogo id={a.id} logo={a.logo} online className="h-3 w-3" />
                   {a.host && <span className="text-sky-300">{a.host}·</span>}
+                  {isHerdrPane(p) && <HerdrBadge />}
                   {p.name && <span className="font-semibold text-accent">{p.name}</span>}
                   <span className="max-w-[160px] truncate">{p.cwd}</span>
                   {st === "blocked" && <span>⏳</span>}

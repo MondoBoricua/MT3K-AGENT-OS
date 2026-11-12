@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentRow, PaneRef, PaneEvent } from "../lib/api";
 import { sendToPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, setPaneLabel, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { applyPaneEvent } from "../lib/pane-stream";
+import { HERDR_UNAVAILABLE_TITLE, isHerdrPane, isHerdrPaneId } from "../lib/herdr-pane";
+import { HerdrBadge } from "./HerdrBadge";
 import { usePaneStream } from "../lib/use-pane-stream";
 import { attachKind } from "../lib/attach-kind";
 import { paneStatus, statusLabel, statusTone } from "../lib/pane-status";
@@ -268,7 +270,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
       paneResizeTimer.current = null;
       const pane = paneToWatch;
       const el = termRef.current;
-      if (!pane || !el || !fullscreen || el.clientWidth < 900) return;
+      if (!pane || isHerdrPaneId(pane) || !el || !fullscreen || el.clientWidth < 900) return; // Herdr: sin /api/pane-resize
       if (selectionInTerm() || touchDown.current) return;
       const font = termFontLive.current;
       const h = hostLive.current;
@@ -331,7 +333,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
   const send = async () => {
     if (!activePane || !text.trim() || sending) return;
     setSending(true);
-    const r = await sendToPane(activePane.paneId, text, enterOnSend, host);
+    const r = await sendToPane(activePane.paneId, text, enterOnSend || isHerdrPane(activePane), host); // hc send siempre pulsa Enter
     setSending(false);
     if (r?.ok) { onToast?.(`enviado a ${agent?.name} · ${activePane.label}`, true); setText(""); }
     else { onToast?.(r?.err ? `error: ${r.err}` : `no se pudo enviar a ${agent?.name}`, false); }
@@ -606,6 +608,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
               <div className="flex items-center gap-1.5 truncate font-mono text-xs font-semibold">
                 {agent.name} <span className="text-emerald-400">●</span>
                 {host && <span className="rounded border border-sky-400/30 bg-sky-400/10 px-1 text-[9px] font-normal text-sky-300">{host}</span>}
+                {isHerdrPane(activePane) && <HerdrBadge />}
               </div>
               <div className="flex items-center gap-1.5 truncate font-mono text-[10px] text-white/40">
                 {activePane.name && <span className="font-semibold text-accent">{activePane.name}</span>}
@@ -614,8 +617,8 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
-            <button type="button" onClick={() => void renamePane(activePane)} title="renombrar esta sesión"
-              className="rounded-lg border border-ink-line px-2 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent">
+            <button type="button" onClick={() => void renamePane(activePane)} disabled={isHerdrPane(activePane)} title={isHerdrPane(activePane) ? HERDR_UNAVAILABLE_TITLE : "renombrar esta sesión"}
+              className="rounded-lg border border-ink-line px-2 py-1 font-mono text-[10px] text-white/55 transition hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-ink-line disabled:hover:text-white/55">
               ✎
             </button>
             {termWide && (
@@ -633,8 +636,8 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                 ＋ nueva
               </button>
             )}
-            <button onClick={() => kill(activePane.paneId)} title="matar esta sesión de tmux"
-              className="rounded-lg border border-red-400/25 px-2.5 py-1 font-mono text-[10px] text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200">
+            <button onClick={() => kill(activePane.paneId)} disabled={isHerdrPane(activePane)} title={isHerdrPane(activePane) ? HERDR_UNAVAILABLE_TITLE : "matar esta sesión de tmux"}
+              className="rounded-lg border border-red-400/25 px-2.5 py-1 font-mono text-[10px] text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-red-400/25 disabled:hover:bg-transparent disabled:hover:text-red-300/70">
               ⏻ matar
             </button>
             <button onClick={exitFullscreen}
@@ -735,7 +738,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                 {uploading ? "…" : "📎"}
               </button>
               <label className="flex cursor-pointer items-center gap-2 font-mono text-[11px] text-white/55">
-                <input type="checkbox" checked={enterOnSend} onChange={(e) => setEnterOnSend(e.target.checked)} className="accent-[oklch(62%_0.23_25)]" />
+                <input type="checkbox" checked={enterOnSend || isHerdrPane(activePane)} disabled={isHerdrPane(activePane)} title={isHerdrPane(activePane) ? "Herdr siempre pulsa Enter" : undefined} onChange={(e) => setEnterOnSend(e.target.checked)} className="accent-[oklch(62%_0.23_25)]" />
                 ↵ enviar (Enter en la terminal)
               </label>
               <label className="flex cursor-pointer items-center gap-2 font-mono text-[11px] text-white/55">
@@ -923,6 +926,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                   <div className="flex items-center gap-2">
                     <div className="min-w-0 flex-1 truncate font-mono text-xs text-white">
                       {p.name && <span className="mr-1.5 font-semibold text-accent">{p.name}</span>}
+                      {isHerdrPane(p) && <span className="mr-1.5"><HerdrBadge /></span>}
                       <span>{p.cwd}</span>
                     </div>
                     {/* same state pill as the mosaic tiles: trabajando / esperando input / terminó / idle */}
@@ -931,12 +935,12 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                   <div className="font-mono text-[10px] text-white/40">{p.label} · {p.paneId}</div>
                 </button>
                 {/* rename from the picker too: on the phone this list is where sessions are chosen */}
-                <button onClick={() => renamePane(p)} title={p.name ? "cambiar el nombre de la sesión" : "ponerle nombre a la sesión"}
-                  className="shrink-0 rounded-xl border border-ink-line px-3 font-mono text-xs text-white/55 transition hover:border-accent/50 hover:text-accent">
+                <button onClick={() => renamePane(p)} disabled={isHerdrPane(p)} title={isHerdrPane(p) ? HERDR_UNAVAILABLE_TITLE : p.name ? "cambiar el nombre de la sesión" : "ponerle nombre a la sesión"}
+                  className="shrink-0 rounded-xl border border-ink-line px-3 font-mono text-xs text-white/55 transition hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-ink-line disabled:hover:text-white/55">
                   ✎
                 </button>
-                <button onClick={() => kill(p.paneId)} title="matar esta sesión"
-                  className="shrink-0 rounded-xl border border-red-400/25 px-3 font-mono text-xs text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200">
+                <button onClick={() => kill(p.paneId)} disabled={isHerdrPane(p)} title={isHerdrPane(p) ? HERDR_UNAVAILABLE_TITLE : "matar esta sesión"}
+                  className="shrink-0 rounded-xl border border-red-400/25 px-3 font-mono text-xs text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-red-400/25 disabled:hover:bg-transparent disabled:hover:text-red-300/70">
                   ✕
                 </button>
               </div>

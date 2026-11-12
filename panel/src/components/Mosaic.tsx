@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { agentKey, sendKey, sendToPane, type AgentRow } from "../lib/api";
+import { isHerdrPane } from "../lib/herdr-pane";
+import { HerdrBadge } from "./HerdrBadge";
 import {
   MOSAIC_SLOTS,
   removePreset,
@@ -365,6 +367,7 @@ function MosaicBody({ sessions, onClose, onExpand, onToast, onOpenPath }: Props)
                               {s.agent.host}
                             </span>
                           )}
+                          {isHerdrPane(s.pane) && <HerdrBadge />}
                           {s.pane.name && <span className="shrink-0 font-semibold text-accent">{s.pane.name}</span>}
                           <span className="truncate text-[11px] text-white/50">{s.pane.cwd}</span>
                         </div>

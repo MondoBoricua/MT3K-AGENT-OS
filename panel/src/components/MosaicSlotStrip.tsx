@@ -1,5 +1,6 @@
 import type { Session } from "../lib/mosaic-presets";
 import { paneStatus, statusLabel, statusTone } from "../lib/pane-status";
+import { isHerdrPane } from "../lib/herdr-pane";
 
 type Props = {
   slots: readonly (Session | null)[];
@@ -22,7 +23,7 @@ export default function MosaicSlotStrip({ slots, active, visible = [], onSelect 
         const label = slot ? slot.pane.name || slot.agent.name : null;
         const tone = slot ? statusTone(paneStatus(slot.pane)) : null;
         const status = slot ? statusLabel(paneStatus(slot.pane)).replace(/^[●⏳✓○] /, "") : null;
-        const title = slot ? `Slot ${idx + 1}: ${slot.agent.name} · ${label} · ${status} · ${slot.pane.cwd} (tecla ${idx + 1})` : `Slot ${idx + 1}: vacío, asignar sesión (tecla ${idx + 1})`;
+        const title = slot ? `Slot ${idx + 1}: ${slot.agent.name} · ${label} · ${status} · ${slot.pane.cwd}${isHerdrPane(slot.pane) ? " · herdr" : ""} (tecla ${idx + 1})` : `Slot ${idx + 1}: vacío, asignar sesión (tecla ${idx + 1})`;
         return (
           <button
             key={idx}
