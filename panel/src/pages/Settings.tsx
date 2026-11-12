@@ -3,6 +3,8 @@ import type { Manifest } from "../types";
 import { herdrChoice } from "../lib/herdr-pane";
 import { getStatus, removeProject, reingest, getHosts, saveHost, removeHost, toggleHost, moveHost, updateFleet, getMacros, saveMacros, getRestoreConfig, setRestoreConfig, getLaunchBackend, setLaunchBackend, type LaunchBackend, type LaunchBackendState, type SystemStatus, type FedHost } from "../lib/api";
 import { fmt } from "../lib/ui";
+import { loadSoundSettings, saveSoundSettings, type SoundSettings } from "../lib/alert-sounds";
+import { playAlertSound, unlockAudio } from "../lib/alert-audio";
 
 const REFRESH_KEY = "mt3k.refreshMs";
 const INTERVALS = [
@@ -20,6 +22,16 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
   const [st, setSt] = useState<SystemStatus | null>(null);
   const [busy, setBusy] = useState("");
   const [refreshMs, setRefreshMs] = useState<number>(() => Number(localStorage.getItem(REFRESH_KEY) ?? 10000));
+
+  // avisos sonoros (por dispositivo, se guardan al cambiar)
+  const [sound, setSound] = useState<SoundSettings>(() => loadSoundSettings());
+  const patchSound = (patch: Partial<SoundSettings>) => {
+    const next = { ...sound, ...patch };
+    setSound(next);
+    saveSoundSettings(next);
+    if (patch.enabled) unlockAudio();
+  };
+  const tryCue = (kind: "blocked" | "done") => { unlockAudio(); playAlertSound(kind, sound.volume); };
 
   const refresh = () => getStatus().then(setSt);
   useEffect(() => { refresh(); }, []);
@@ -300,6 +312,37 @@ export default function Settings({ manifest, onChanged }: { manifest: Manifest |
             <p className="mt-2 text-xs text-white/45">Vale para las sesiones nuevas de este host; los hosts federados siguen su propio ajuste.</p>
             {launchBackendMsg && <p className="mt-2 font-mono text-[11px] text-white/55">{launchBackendMsg}</p>}
           </div>
+        </div>
+
+        <div className="surface p-5">
+          <div className="mb-3 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-white/50"><span className="text-accent">✦</span> Alertas sonoras</div>
+          <label className="flex cursor-pointer items-center gap-2.5 text-sm text-white/85">
+            <input type="checkbox" checked={sound.enabled} onChange={(e) => patchSound({ enabled: e.target.checked })} className="accent-[oklch(62%_0.23_25)]" />
+            <span>Avisar con sonido</span>
+          </label>
+          <div className="mt-3 flex flex-col gap-2 pl-6">
+            <label className="flex cursor-pointer items-center gap-2.5 text-sm text-white/75">
+              <input type="checkbox" checked={sound.blocked} disabled={!sound.enabled} onChange={(e) => patchSound({ blocked: e.target.checked })} className="accent-[oklch(62%_0.23_25)]" />
+              <span>Cuando un agente necesita input</span>
+            </label>
+            <label className="flex cursor-pointer items-center gap-2.5 text-sm text-white/75">
+              <input type="checkbox" checked={sound.done} disabled={!sound.enabled} onChange={(e) => patchSound({ done: e.target.checked })} className="accent-[oklch(62%_0.23_25)]" />
+              <span>Cuando un agente termina</span>
+            </label>
+          </div>
+          <label className="mt-4 flex items-center gap-3 text-sm text-white/75">
+            <span>Volumen</span>
+            <input type="range" min={0} max={1} step={0.05} value={sound.volume} onChange={(e) => patchSound({ volume: Number(e.target.value) })}
+              aria-label="Volumen de las alertas" className="flex-1 accent-[oklch(62%_0.23_25)]" />
+            <span className="w-9 text-right font-mono text-[11px] text-white/55">{Math.round(sound.volume * 100)}%</span>
+          </label>
+          <div className="mt-3 flex gap-2">
+            <button type="button" onClick={() => tryCue("blocked")} aria-label="Probar sonido de input"
+              className="rounded-lg border border-ink-line px-3 py-1.5 font-mono text-xs text-white/70 transition hover:border-accent/50 hover:text-accent">Probar · input</button>
+            <button type="button" onClick={() => tryCue("done")} aria-label="Probar sonido de terminado"
+              className="rounded-lg border border-ink-line px-3 py-1.5 font-mono text-xs text-white/70 transition hover:border-accent/50 hover:text-accent">Probar · terminó</button>
+          </div>
+          <p className="mt-3 text-xs text-white/45">Se guarda en este dispositivo. El navegador solo deja sonar después de que toques la página.</p>
         </div>
 
         <div className="surface p-5 lg:col-span-2">

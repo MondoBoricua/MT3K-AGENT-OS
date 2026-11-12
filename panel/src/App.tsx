@@ -15,6 +15,9 @@ import AgentTerminalSheet from "./components/AgentTerminalSheet";
 import Mosaic from "./components/Mosaic";
 import AgentLogo from "./components/AgentLogo";
 import { MOSAIC_QUERY, useMediaQuery } from "./lib/use-media-query";
+import { paneStatus } from "./lib/pane-status";
+import { diffAlerts, loadSoundSettings, paneAlertKey, type AlertState, type StatusMap } from "./lib/alert-sounds";
+import { installAudioUnlock, playAlertSound } from "./lib/alert-audio";
 
 const BASE = import.meta.env.BASE_URL;
 const NAV = [
@@ -57,6 +60,8 @@ export default function App() {
   const [tokenDraft, setTokenDraft] = useState("");
   const prevAgents = useRef<Record<string, boolean>>({});
   const firstPoll = useRef(true);
+  const alertState = useRef<AlertState | null>(null); // avisos sonoros: estado entre polls (null = aún sin primer snapshot)
+  const sheetRef = useRef<{ agentId: string | null; paneId?: string }>({ agentId: null }); // el poll vive en un efecto [] y lee esto
   // Focus mode: scope the panel to ONE tracked project (per device, localStorage). null = todo.
   // On phones the first visit asks "¿en qué vas a trabajar?" — on desktop it never interrupts.
   const [projectList, setProjectList] = useState<FocusProject[]>([]);
@@ -100,6 +105,38 @@ export default function App() {
     setToasts((t) => t.filter((x) => x.id !== id));
   };
 
+  // Avisos sonoros: agente que necesita input o termina. La lógica vive en lib/alert-sounds.
+  // focusedKey = pane que la persona mira (hoja de terminal abierta y pestaña visible): la hoja
+  // guarda su pane activo internamente, así que aquí solo se conoce si vino de Mosaic
+  // (initialPaneId) o si el agente tiene un único pane; con varios panes y sin initialPaneId → null.
+  const raiseSoundAlerts = (rows: AgentRow[]) => {
+    const statuses: Record<string, ReturnType<typeof paneStatus>> = {};
+    const labels: Record<string, { who: string; where: string }> = {};
+    for (const a of rows) for (const p of a.panes ?? []) {
+      const key = paneAlertKey(agentKey(a), p.paneId);
+      statuses[key] = paneStatus(p);
+      labels[key] = { who: a.name, where: p.name || p.cwd.split("/").filter(Boolean).pop() || p.label };
+    }
+    const { agentId, paneId } = sheetRef.current;
+    const open = agentId ? rows.find((a) => agentKey(a) === agentId) : undefined;
+    const sheetPane = paneId ?? (open?.panes?.length === 1 ? open.panes[0].paneId : undefined);
+    const visible = typeof document === "undefined" || document.visibilityState === "visible";
+    const focusedKey = open && sheetPane && visible ? paneAlertKey(agentKey(open), sheetPane) : null;
+    const { events, state } = diffAlerts(alertState.current, statuses as StatusMap, Date.now(), { focusedKey });
+    alertState.current = state;
+    const cfg = loadSoundSettings();
+    if (!cfg.enabled) return;
+    for (const ev of events) {
+      if (!cfg[ev.kind]) continue;
+      const { who, where } = labels[ev.key] ?? { who: "Agente", where: "" };
+      playAlertSound(ev.kind, cfg.volume);
+      pushToast(`${who} ${ev.kind === "blocked" ? "necesita input" : "terminó"} · ${where}`, ev.kind === "blocked");
+    }
+  };
+  const raiseSoundAlertsRef = useRef(raiseSoundAlerts);
+  raiseSoundAlertsRef.current = raiseSoundAlerts;
+  useEffect(() => installAudioUnlock(), []);
+
   // daemon: poll system status on an interval (configurable in Settings) → live agent status
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | undefined;
@@ -118,6 +155,7 @@ export default function App() {
           else if (!a.running && prevAgents.current[agentKey(a)] === true) pushToast(`${tag} salió`, false);
         }
       }
+      raiseSoundAlertsRef.current(s.agents);
       prevAgents.current = Object.fromEntries(s.agents.map((a) => [agentKey(a), a.running]));
       firstPoll.current = false;
     });
@@ -201,6 +239,7 @@ export default function App() {
     setFilesRequest({ path, host, nonce: Date.now() });
     setPage("Files"); setSheetAgentId(null); setSheetInitialPaneId(undefined); setMosaicOpen(false);
   }, []);
+  sheetRef.current = { agentId: sheetAgentId, paneId: sheetInitialPaneId };
   const sheetAgent = sheetAgentId ? agents.find((a) => agentKey(a) === sheetAgentId) ?? null : null;
   const viewSessions = viewAgents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
 
