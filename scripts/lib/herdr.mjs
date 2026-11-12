@@ -11,6 +11,9 @@ const HC_READ_TIMEOUT_MS = 8000;
 const HC_MAX_BUFFER = 4 * 1024 * 1024;
 const RUNNING_CACHE_MS = 5000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
+const NEGATIVE_CACHE_MS = 2000;
+// C0 salvo \t \n \r: execFile lanza con NUL y el resto no tiene sentido pegado en un terminal
+const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/;
 const SEND_MAX_BYTES = 64 * 1024;
 const READ_LINES_MAX = 2000;
 const KEYS_MAX = 32;
@@ -22,6 +25,7 @@ const HERDR_ID_RE = /^hc:t[0-9]{1,6}[a-z]?$/;
 const pathFor = (platform) => (platform === "win32" ? win32 : posix);
 const WIN_QUALIFIED = /^[A-Za-z]:[\\/]/;
 
+const isSocketFile = (p) => { try { return statSync(p).isSocket(); } catch { return false; } };
 const isFile = (p) => { try { return statSync(p).isFile(); } catch { return false; } };
 const isExecutableFile = (p) => {
   try {
@@ -73,11 +77,13 @@ export function findHc({
  * sin XDG_RUNTIME_DIR → ${XDG_STATE_HOME:-~/.local/state}/herdr-core/<s>/<s>.sock; con XDG_RUNTIME_DIR
  * → $XDG_RUNTIME_DIR/herdr-core/<s>.sock. `core.json` solo trae id/name/machine_id (sin pid).
  */
-export function coreSocketCandidates({ env = process.env, home = homedir() } = {}) {
+export function coreSocketCandidates({ env = process.env, home = homedir(), isSocket = isSocketFile } = {}) {
   const session = env.HC_SESSION || "default";
   const state = env.XDG_STATE_HOME || posix.join(env.HOME || home, ".local", "state");
   const out = [posix.join(state, "herdr-core", session, `${session}.sock`)];
   if (env.XDG_RUNTIME_DIR) out.unshift(posix.join(env.XDG_RUNTIME_DIR, "herdr-core", `${session}.sock`));
+  // HC_SOCKET: se respeta solo si es una ruta absoluta a un socket que existe; si no, se ignora.
+  if (env.HC_SOCKET && posix.isAbsolute(env.HC_SOCKET) && isSocket(env.HC_SOCKET)) out.unshift(env.HC_SOCKET);
   return out;
 }
 
@@ -218,15 +224,19 @@ function runExec(exec, hcPath, argv, { timeout, env }) {
   if (!hcPath) return Promise.resolve({ ok: false, code: "ENOENT" });
   const mergedEnv = env ? { ...process.env, ...env } : process.env;
   return new Promise((resolve) => {
-    exec(hcPath, argv, {
-      timeout,
-      maxBuffer: HC_MAX_BUFFER,
-      windowsHide: true,
-      env: mergedEnv,
-    }, (err, stdout) => {
-      if (err) resolve({ ok: false, code: err.code ?? "ERROR", out: stdout });
-      else resolve({ ok: true, out: stdout });
-    });
+    try {
+      exec(hcPath, argv, {
+        timeout,
+        maxBuffer: HC_MAX_BUFFER,
+        windowsHide: true,
+        env: mergedEnv,
+      }, (err, stdout) => {
+        if (err) resolve({ ok: false, code: err.code ?? "ERROR", out: stdout });
+        else resolve({ ok: true, out: stdout });
+      });
+    } catch (e) {
+      resolve({ ok: false, code: e?.code ?? "ERROR" }); // p. ej. NUL en argv: execFile lanza síncrono
+    }
   });
 }
 
@@ -248,10 +258,33 @@ export function createHerdr({
   probe = probeUnixSocket,
 } = {}) {
   let runningCache = null;
+  let negative = null; // { at } último sondeo NEGATIVO (se reutiliza ≤ NEGATIVE_CACHE_MS)
 
+  /**
+   * POSIX: ¿acepta conexiones el socket del core? SIN caché positiva (≈1 ms): `hc get|read|ls|connect|server status`
+   * AUTOARRANCAN un core vacío si no hay ninguno (medido), así que TODA invocación de hc pasa antes por aquí.
+   * Carrera inevitable: el core puede morir entre este sondeo y el exec (~1 ms); no se puede cerrar sin cooperación de hc.
+   * win32: `hc server status` nunca arranca un core (manual), no se sondea.
+   */
+  async function coreAlive() {
+    if (platform === "win32") return true;
+    if (!hcPath) return false;
+    const t = now();
+    if (negative && t - negative.at < NEGATIVE_CACHE_MS) return false;
+    const socks = coreSocketCandidates({ env: env ? { ...process.env, ...env } : process.env });
+    const alive = (await Promise.all(socks.map((sk) => probe(sk)))).some(Boolean);
+    if (alive) { negative = null; return true; }
+    negative = { at: t };
+    runningCache = { value: false, at: t };
+    return false;
+  }
+
+  /** Única vía de ejecución de hc. */
   async function execHc(argv, timeout = HC_TIMEOUT_MS) {
+    if (!(await coreAlive())) return { ok: false, code: "NOCORE" };
     return runExec(exec, hcPath, argv, { timeout, env });
   }
+  const unavailable = (r) => r.code === "ENOENT" || r.code === "NOCORE";
 
   async function running() {
     const t = now();
@@ -259,15 +292,6 @@ export function createHerdr({
     if (!hcPath) {
       runningCache = { value: false, at: t };
       return false;
-    }
-    // POSIX: `hc server status` AUTOARRANCA un core vacío (medido); primero se mira el socket sin invocar hc.
-    if (platform !== "win32") {
-      const socks = coreSocketCandidates({ env: env ? { ...process.env, ...env } : process.env });
-      const alive = (await Promise.all(socks.map((sk) => probe(sk)))).some(Boolean);
-      if (!alive) {
-        runningCache = { value: false, at: t };
-        return false;
-      }
     }
     const r = await execHc(["server", "status", "--json"]);
     const value = r.ok ? coreRunningFromStatus(r.out) : false;
@@ -279,7 +303,7 @@ export function createHerdr({
     if (!hcPath) return [];
     if (!(await running())) return [];
     const r = await execHc(["ls", "--json"]);
-    if (!r.ok) return [];
+    if (!r.ok) { if (r.code === "NOCORE") runningCache = { value: false, at: now() }; return []; }
     return parseHcLs(r.out);
   }
 
@@ -287,7 +311,7 @@ export function createHerdr({
     const v = validateAddressFromId(id);
     if (!v.ok) return v;
     const r = await execHc(["get", v.address, "--json"]);
-    if (!r.ok) return { ok: false, err: "get falló" };
+    if (!r.ok) return { ok: false, err: unavailable(r) ? "hc no disponible" : "get falló" };
     const info = parseHcGet(r.out);
     return info ? { ok: true, ...info } : { ok: false, err: "get falló" };
   }
@@ -301,7 +325,7 @@ export function createHerdr({
     const argv = ["read", v.address, "--lines", String(Math.trunc(n))];
     const r = await execHc(argv, HC_READ_TIMEOUT_MS);
     if (!r.ok) {
-      if (r.code === "ENOENT") return { ok: false, err: "hc no disponible" };
+      if (unavailable(r)) return { ok: false, err: "hc no disponible" };
       return { ok: false, err: "lectura falló" };
     }
     return { ok: true, text: String(r.out ?? "") };
@@ -313,10 +337,11 @@ export function createHerdr({
     if (typeof text !== "string" || text.length === 0) return { ok: false, err: "texto vacío" };
     const bytes = Buffer.byteLength(text, "utf8");
     if (bytes > SEND_MAX_BYTES) return { ok: false, err: "texto demasiado largo" };
+    if (CONTROL_RE.test(text)) return { ok: false, err: "texto inválido" };
     const r = await execHc(sendArgv(v.address, text));
     if (r.ok) return { ok: true };
     if (r.code === 9) return { ok: false, err: "bloqueado: requiere a la persona" };
-    if (r.code === "ENOENT") return { ok: false, err: "hc no disponible" };
+    if (unavailable(r)) return { ok: false, err: "hc no disponible" };
     return { ok: false, err: "envío falló" };
   }
 
@@ -330,7 +355,7 @@ export function createHerdr({
     }
     const r = await execHc(["keys", v.address, "--", ...list]);
     if (r.ok) return { ok: true };
-    if (r.code === "ENOENT") return { ok: false, err: "hc no disponible" };
+    if (unavailable(r)) return { ok: false, err: "hc no disponible" };
     return { ok: false, err: "teclas fallaron" };
   }
 
@@ -339,9 +364,9 @@ export function createHerdr({
     if (!v.ok) return v;
     const r = await execHc(["interrupt", v.address]);
     if (r.ok) return { ok: true };
-    if (r.code === "ENOENT") return { ok: false, err: "hc no disponible" };
+    if (unavailable(r)) return { ok: false, err: "hc no disponible" };
     return { ok: false, err: "interrupción falló" };
   }
 
-  return { running, list, get, read, send, keys, interrupt };
+  return { running, coreAlive, list, get, read, send, keys, interrupt };
 }

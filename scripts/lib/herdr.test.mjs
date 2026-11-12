@@ -125,7 +125,7 @@ test("createHerdr: read, send con --, límites y bloqueado código 9", async () 
     else if (argv[0] === "send") cb(Object.assign(new Error("x"), { code: 9 }), "");
     else cb(null, "pantalla\n");
   };
-  const h = createHerdr({ hcPath: "/bin/hc", exec });
+  const h = createHerdr({ probe: async () => true, hcPath: "/bin/hc", exec });
   assert.deepEqual(await h.read("hc:t9", { lines: 9999 }), { ok: true, text: "pantalla\n" });
   assert.ok(calls.some((a) => a[0] === "read" && a.includes("2000")));
   assert.deepEqual(await h.send("hc:t9", "-opt"), { ok: true });
@@ -140,7 +140,7 @@ test("createHerdr: keys válidas e inválidas", async () => {
   const exec = mockExec({
     "keys\0t9\0--\0enter\0esc": () => ({ ok: true }),
   });
-  const h = createHerdr({ hcPath: "/bin/hc", exec });
+  const h = createHerdr({ probe: async () => true, hcPath: "/bin/hc", exec });
   assert.deepEqual(await h.keys("hc:t9", ["enter", "esc"]), { ok: true });
   assert.deepEqual(await h.keys("hc:t9", ["bad key"]), { ok: false, err: "teclas inválidas" });
   assert.deepEqual(await h.keys("hc:t9", ["-h"]), { ok: false, err: "teclas inválidas" });
@@ -263,8 +263,88 @@ test("parseHcGet: foreground.cwd manda sobre cwd de lanzamiento; cols/rows y whe
 test("createHerdr: get usa argv fijo y valida el id", async () => {
   const calls = [];
   const exec = (_f, argv, _o, cb) => { calls.push(argv); cb(null, '{"cwd":"/a","cols":80,"rows":24}'); };
-  const h = createHerdr({ hcPath: "/bin/hc", exec });
+  const h = createHerdr({ probe: async () => true, hcPath: "/bin/hc", exec });
   assert.deepEqual(await h.get("hc:t9"), { ok: true, cwd: "/a", cols: 80, rows: 24, where: null });
   assert.deepEqual(calls, [["get", "t9", "--json"]]);
   assert.deepEqual(await h.get("hc:-x"), { ok: false, err: "terminal inválido" });
+});
+
+test("B2: con el core muerto NINGÚN método ejecuta hc (running, list, get, read, send, keys, interrupt)", async () => {
+  let execs = 0;
+  const exec = (_f, _a, _o, cb) => { execs++; cb(null, "{}"); };
+  const h = createHerdr({ hcPath: "/bin/hc", exec, platform: "darwin", probe: async () => false });
+  assert.equal(await h.running(), false);
+  assert.deepEqual(await h.list(), []);
+  assert.equal((await h.get("hc:t1")).ok, false);
+  assert.deepEqual(await h.read("hc:t1"), { ok: false, err: "hc no disponible" });
+  assert.deepEqual(await h.send("hc:t1", "x"), { ok: false, err: "hc no disponible" });
+  assert.deepEqual(await h.keys("hc:t1", ["enter"]), { ok: false, err: "hc no disponible" });
+  assert.deepEqual(await h.interrupt("hc:t1"), { ok: false, err: "hc no disponible" });
+  assert.equal(execs, 0);
+});
+
+test("B2: el sondeo previo al exec es SIN caché positiva; el negativo se reutiliza ≤ 2 s", async () => {
+  let alive = true;
+  let probes = 0;
+  let execs = 0;
+  let t = 1000;
+  const exec = (_f, _a, _o, cb) => { execs++; cb(null, "pantalla"); };
+  const h = createHerdr({ hcPath: "/bin/hc", exec, now: () => t, platform: "linux", probe: async () => { probes++; return alive; } });
+  assert.equal((await h.read("hc:t1")).ok, true);
+  assert.equal((await h.read("hc:t1")).ok, true);
+  assert.equal(probes, 2); // un sondeo por exec
+  alive = false; // el core muere con la lista aún "caliente"
+  assert.equal((await h.read("hc:t1")).ok, false);
+  assert.equal(execs, 2);
+  const p0 = probes;
+  alive = true;
+  assert.equal((await h.read("hc:t1")).ok, false); // negativo cacheado
+  assert.equal(probes, p0);
+  t += 2100;
+  assert.equal((await h.read("hc:t1")).ok, true);
+});
+
+test("B2: running() cacheado en true no hace que list() ejecute hc tras morir el core", async () => {
+  let alive = true;
+  let lsCalls = 0;
+  const exec = (_f, argv, _o, cb) => { if (argv[0] === "ls") lsCalls++; cb(null, argv[0] === "ls" ? LS_SAMPLE : '{"live":2}'); };
+  const h = createHerdr({ hcPath: "/bin/hc", exec, platform: "darwin", probe: async () => alive });
+  assert.equal((await h.list()).length, 5);
+  alive = false;
+  assert.deepEqual(await h.list(), []);
+  assert.equal(lsCalls, 1);
+});
+
+test("B2: win32 no sondea socket en ninguna invocación", async () => {
+  let probed = 0;
+  const exec = (_f, _a, _o, cb) => cb(null, "x");
+  const h = createHerdr({ hcPath: "C:\\hc.exe", exec, platform: "win32", probe: async () => { probed++; return false; } });
+  assert.equal((await h.read("hc:t1")).ok, true);
+  assert.equal(probed, 0);
+});
+
+test("N5: NUL y controles C0 se rechazan en send; ningún método lanza", async () => {
+  const exec = (_f, argv, _o, cb) => { if (argv.some((a) => a.includes("\u0000"))) throw new TypeError("ERR_INVALID_ARG_VALUE"); cb(null, ""); };
+  const h = createHerdr({ hcPath: "/bin/hc", exec, probe: async () => true });
+  assert.deepEqual(await h.send("hc:t1", "a\u0000b"), { ok: false, err: "texto inválido" });
+  assert.deepEqual(await h.send("hc:t1", "a\u001bb"), { ok: false, err: "texto inválido" });
+  assert.deepEqual(await h.send("hc:t1", "línea\ncon\ttab\r"), { ok: true });
+  // si execFile lanzara de todos modos, el adaptador no propaga la excepción
+  const throwing = createHerdr({ hcPath: "/bin/hc", exec: () => { throw new TypeError("boom"); }, probe: async () => true });
+  assert.deepEqual(await throwing.read("hc:t1"), { ok: false, err: "lectura falló" });
+  assert.deepEqual(await throwing.send("hc:t1", "x"), { ok: false, err: "envío falló" });
+});
+
+test("N7: HC_SOCKET absoluto a un socket existente se respeta; si no, se ignora", () => {
+  const dir = mkdtempSync(join(tmpdir(), "herdr-hcsock-"));
+  const sock = join(dir, "c.sock");
+  const srv = createServer();
+  return new Promise((resolve) => srv.listen(sock, () => {
+    const withIt = coreSocketCandidates({ env: { HOME: "/h", HC_SOCKET: sock } });
+    assert.equal(withIt[0], sock);
+    assert.equal(withIt.length, 2);
+    assert.equal(coreSocketCandidates({ env: { HOME: "/h", HC_SOCKET: join(dir, "no.sock") } }).length, 1);
+    assert.equal(coreSocketCandidates({ env: { HOME: "/h", HC_SOCKET: "relativo.sock" } }).length, 1);
+    srv.close(() => { rmSync(dir, { recursive: true, force: true }); resolve(); });
+  }));
 });
