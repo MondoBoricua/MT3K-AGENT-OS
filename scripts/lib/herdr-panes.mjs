@@ -125,7 +125,8 @@ export function createHerdrPanes({
   let hcPath = null;
   let hcCheckedAt = -Infinity;
   let cache = { at: -Infinity, rows: [] };
-  let inflight = null;
+  let running = null; // { gen, p }: la consulta en curso
+  let next = null; // { gen, p }: como mucho UNA consulta nueva esperando a que acabe una anterior a un invalidate()
   let generation = 0; // sube con cada invalidate(): un resultado de una generación anterior no toca la caché
 
   // Con MT3K_HERDR=0 ni se busca hc. Con hc ausente tampoco hay trabajo (se reintenta cada 30 s).
@@ -148,7 +149,8 @@ export function createHerdrPanes({
 
   // `hc ls` solo trae la carpeta de LANZAMIENTO; la actual está en `hc get` (foreground.cwd). Se consulta
   // solo si cambió `where`/estado o pasaron 30 s, máx. 5 por ciclo; sin dato se queda la de lanzamiento.
-  async function enrich(h, rows) {
+  // `gen`: una consulta de una generación anterior (hubo invalidate()) no escribe NADA compartido en `details`.
+  async function enrich(h, rows, gen = generation) {
     if (typeof h.get !== "function") return rows;
     const alive = new Set(rows.map((r) => r.address));
     for (const k of details.keys()) if (!alive.has(k)) details.delete(k);
@@ -163,14 +165,16 @@ export function createHerdrPanes({
     const t = now();
     const changed = rows.filter((r) => { const d = details.get(r.address); return !d || d.where !== r.where || d.status !== r.status; });
     const stale = rows.filter((r) => { const d = details.get(r.address); return d && !changed.includes(r) && t - d.at >= DETAILS_TTL_MS; });
+    const local = new Map(); // lo leído por esta consulta; solo pasa a `details` si la generación sigue vigente
     await Promise.all([...changed, ...stale].slice(0, DETAILS_MAX_PER_POLL).map(async (r) => {
       const g = await h.get(r.id).catch(() => ({ ok: false }));
       const prev = details.get(r.address);
       const base = { at: now(), where: r.where, status: r.status };
-      details.set(r.address, g.ok ? { ...base, cwd: g.cwd, cols: g.cols, rows: g.rows, labels: g.labels || {} } : { ...(prev || { cwd: null, cols: null, rows: null }), ...base });
+      local.set(r.address, g.ok ? { ...base, cwd: g.cwd, cols: g.cols, rows: g.rows, labels: g.labels || {} } : { ...(prev || { cwd: null, cols: null, rows: null }), ...base });
     }));
+    if (gen === generation) for (const [k, v] of local) details.set(k, v);
     return rows.map((r) => {
-      const d = details.get(r.address);
+      const d = local.get(r.address) ?? details.get(r.address);
       const killable = d?.labels?.[PANEL_LABEL_KEY] === "1";
       if (!d?.cwd && !killable) return r;
       return { ...r, ...(d.cwd ? { cwd: d.cwd } : {}), ...(killable ? { killable: true } : {}) };
@@ -185,32 +189,44 @@ export function createHerdrPanes({
     // resizeGuard se conserva: una sonda fallida suelta no debe reiniciar la pausa de 10 min
   }
 
-  /** Lista cacheada ≤ ttlMs (500 ms si se fuerza); una sola consulta en vuelo. */
-  async function refresh(force = false) {
-    const h = client();
-    if (!h) return [];
-    if (now() - cache.at < (force ? HERDR_FORCE_MIN_MS : ttlMs)) return cache.rows;
-    if (inflight) return inflight;
+  // Una consulta: lee la lista y la enriquece. Si hubo invalidate() mientras corría, su resultado no toca ni la caché
+  // ni `details` (solo lo recibe quien la esperaba).
+  function poll(h) {
     const myGen = generation;
-    const mine = (async () => {
+    const p = (async () => {
       let rows = [];
-      try { rows = await enrich(h, await h.list()); } catch { rows = []; }
-      if (rows.length === 0 && (conn || details.size) && typeof h.coreAlive === "function" && !(await h.coreAlive())) {
+      try { rows = await enrich(h, await h.list(), myGen); } catch { rows = []; }
+      if (myGen === generation && rows.length === 0 && (conn || details.size) && typeof h.coreAlive === "function" && !(await h.coreAlive())) {
         dropState();
         details.clear();
       }
       if (myGen === generation) cache = { at: now(), rows };
       return rows;
-    })().finally(() => { if (inflight === mine) inflight = null; });
-    inflight = mine;
-    return mine;
+    })().finally(() => { if (running?.p === p) running = null; });
+    running = { gen: myGen, p };
+    return p;
+  }
+
+  /** Lista cacheada ≤ ttlMs (500 ms si se fuerza). Máximo una consulta en curso; tras un invalidate() solo una más en espera. */
+  async function refresh(force = false) {
+    const h = client();
+    if (!h) return [];
+    if (now() - cache.at < (force ? HERDR_FORCE_MIN_MS : ttlMs)) return cache.rows;
+    if (!running) return poll(h);
+    if (running.gen === generation) return running.p;
+    if (next?.gen === generation) return next.p;
+    const gen = generation;
+    const p = running.p.then(() => {}, () => {}).then(() => (now() - cache.at < HERDR_FORCE_MIN_MS ? cache.rows : poll(h)));
+    next = { gen, p };
+    p.finally(() => { if (next?.p === p) next = null; }).catch(() => {});
+    return p;
   }
 
   /** Olvida la lista cacheada (y las cachés del adaptador): tras crear o cerrar un terminal se lee de nuevo. */
   function invalidate() {
     generation++;
     cache = { at: -Infinity, rows: [] };
-    inflight = null; // el siguiente refresh() hace una consulta nueva en vez de reutilizar la anterior
+    next = null;
     herdr?.invalidate?.();
   }
 

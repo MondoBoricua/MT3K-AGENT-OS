@@ -510,9 +510,10 @@ test("invalidate durante un refresh en vuelo: el resultado viejo no repuebla la 
   const stale = p.refresh();
   await new Promise((r) => setImmediate(r));
   p.invalidate(); // p. ej. justo después de crear un terminal
-  const fresh = await p.refresh(); // consulta nueva, no reutiliza la vieja
-  assert.deepEqual(fresh.map((r) => r.id), ["hc:t4", "hc:t9"]);
+  const freshP = p.refresh(); // consulta nueva (espera a que acabe la vieja), no reutiliza su resultado
   release();
+  const fresh = await freshP;
+  assert.deepEqual(fresh.map((r) => r.id), ["hc:t4", "hc:t9"]);
   assert.equal((await stale).length, 1); // quien esperaba la vieja la recibe
   assert.deepEqual(p.cachedRows().map((r) => r.id), ["hc:t4", "hc:t9"]); // pero la caché sigue siendo la nueva
 });
@@ -524,4 +525,42 @@ test("herdrOccupies: mismo agente + misma carpeta normalizada; otra carpeta/agen
   assert.equal(herdrOccupies(rows, "claude", "/w/q", norm), false);
   assert.equal(herdrOccupies(rows, "codex", "/w/q", norm), true);
   assert.equal(herdrOccupies([], "claude", "/w/p", norm), false);
+});
+
+test("invalidate con un refresh viejo en vuelo (con get): lo viejo no escribe details ni cache, y nunca hay 2 consultas a la vez", async () => {
+  const defer = () => { let resolve; const p = new Promise((r) => { resolve = r; }); return { p, resolve }; };
+  const listGate = defer();
+  const getGate = defer();
+  let lists = 0, gets = 0, active = 0, maxActive = 0;
+  const row = { ...ROWS[1] };
+  const herdr = {
+    async list() {
+      lists++; active++; maxActive = Math.max(maxActive, active);
+      try { if (lists === 1) await listGate.p; return [row]; } finally { active--; }
+    },
+    async get() {
+      gets++;
+      if (gets === 1) { await getGate.p; return { ok: true, cwd: "/old", cols: 80, rows: 24, where: null, labels: {} }; }
+      return { ok: true, cwd: "/new", cols: 80, rows: 24, where: null, labels: {} };
+    },
+    invalidate() {},
+  };
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => 5000 });
+  const stale = p.refresh();
+  await new Promise((r) => setImmediate(r));
+  p.invalidate();
+  const fresh1 = p.refresh();
+  const fresh2 = p.refresh(true); // varias peticiones tras el invalidate comparten UNA consulta en espera
+  listGate.resolve();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(lists, 1); // la nueva espera a que acabe la vieja: sin consultas simultáneas
+  getGate.resolve();
+  const [s, f1, f2] = await Promise.all([stale, fresh1, fresh2]);
+  assert.equal(s[0].cwd, "/old"); // quien esperaba la vieja recibe lo viejo
+  assert.equal(f1[0].cwd, "/new");
+  assert.equal(f1, f2);
+  assert.equal(p.cachedRows()[0].cwd, "/new");
+  assert.equal(lists, 2);
+  assert.equal(gets, 2); // el get viejo NO quedó en details: la consulta nueva tuvo que repetirlo
+  assert.equal(maxActive, 1);
 });
