@@ -14,8 +14,10 @@ const baseOf = (item) => item.split("/").pop();
 const isString = (x) => typeof x === "string";
 const isAssignment = (x) => ENV_ASSIGNMENT_RE.test(x);
 // Guion de envoltura de lanzamiento puro (`"$@"; exec "$0" -li` de la app, o `command $argv[2..]` en fish): solo reenvía los argumentos.
-const PASS_THROUGH_SCRIPT_RE = /^(?:exec\s+)?"\$@"|^command\s+\$argv\[2\.\.\]/;
+// El guion entero tiene que ser la envoltura: cualquier texto extra (`"$@"sufijo`, otro comando) → no se interpreta.
+const PASS_THROUGH_SCRIPT_RE = /^(?:(?:exec\s+)?"\$@"(?:\s*;\s*exec\s+"\$0"(?:\s+-[A-Za-z]+)*)?|command\s+\$argv\[2\.\.\](?:\s*;\s*exec\s+\$argv\[1\](?:\s+-[A-Za-z]+)*)?)$/;
 const ENV_OPERAND_FLAGS = new Set(["-u", "--unset", "-C", "--chdir"]); // consumen un operando (las formas --x=v son un solo item)
+const ENV_OPERAND_CLUSTER_RE = /^-[A-Za-z0-9]*[uC]$/; // opciones agrupadas que acaban en -u/-C (`-iu NOMBRE`): el operando es el item siguiente
 const isEnvSplitFlag = (item) => item === "--split-string" || item.startsWith("--split-string=") || /^-[^-]*S/.test(item);
 
 /** ¿Puede ser un comando? Sin espacios (un script en línea nunca), sin recortar, no vacío. */
@@ -31,7 +33,7 @@ function peelEnv(args) {
     const item = args[i];
     if (item === "--") { i++; break; }
     if (isEnvSplitFlag(item)) return null;
-    if (ENV_OPERAND_FLAGS.has(item)) i += 2;
+    if (ENV_OPERAND_FLAGS.has(item) || ENV_OPERAND_CLUSTER_RE.test(item)) i += 2;
     else if (item.startsWith("-") || isAssignment(item)) i++;
     else break;
   }

@@ -121,3 +121,19 @@ test("arranque: solo con primer plano vacío o un intérprete sin nombre de agen
   assert.equal(refineAgent("shell", JUNIE_START, ["node", "/Users/x/app/server.js"], M), "shell"); // el comando es el script, no el intérprete
   assert.equal(refineAgent("shell", JUNIE_START, ["node", "-e", "setInterval(()=>{},1)"], M), "junie"); // intérprete sin nombre (script en línea)
 });
+
+test("env con opciones agrupadas que acaban en -u/-C: el operando no es el comando", () => {
+  assert.equal(refineAgent("shell", [], ["env", "-iu", "junie", "vim"], M), "shell");
+  assert.equal(refineAgent("shell", [], ["env", "-iu", "NODE_OPTIONS", "junie"], M), "junie");
+  assert.equal(refineAgent("shell", [], ["env", "-iC", "/tmp/junie", "vim"], M), "shell");
+  assert.equal(refineAgent("shell", [], ["env", "-i", "junie"], M), "junie");
+});
+
+test("shell -c: solo se pela si el guion ENTERO es la envoltura; texto extra tras \"$@\" no se interpreta", () => {
+  for (const script of ['"$@"suffix', '"$@" && rm -rf x', 'exec "$@" extra', '"$@"; exec "$0" -li; echo', "command $argv[2..] x"]) {
+    assert.equal(refineAgent("shell", [], ["bash", "-c", script, "bash", "junie"], M), "shell", script);
+  }
+  for (const script of ['"$@"', 'exec "$@"', '"$@"; exec "$0" -li', ' "$@" ;  exec "$0" -l -i ', "command $argv[2..]", "command $argv[2..]; exec $argv[1] -li"]) {
+    assert.equal(refineAgent("shell", [], ["bash", "-c", script, "bash", "junie"], M), "junie", script);
+  }
+});
