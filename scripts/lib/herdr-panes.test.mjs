@@ -1,0 +1,222 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  HERDR_UNAVAILABLE,
+  containsHerdrId,
+  createHerdrPanes,
+  herdrKeyArgs,
+  mergeHerdrPanes,
+  streamFrame,
+  toPane,
+} from "./herdr-panes.mjs";
+
+const ROWS = [
+  { id: "hc:t4", address: "t4", agent: "shell", app: "zsh", status: null, cwd: "/Users/x", where: null, name: null, turn: 0, parent: null, state: "live" },
+  { id: "hc:t9", address: "t9", agent: "claude", app: "claude-code", status: "working", cwd: "/Users/x/proj", where: "PROJ / 1", name: null, turn: 3, parent: null, state: "live" },
+  { id: "hc:t12", address: "t12", agent: "claude", app: "claude-code", status: "blocked", cwd: "/w", where: null, name: "rev", turn: 1, parent: null, state: "live" },
+  { id: "hc:t13", address: "t13", agent: "deepseek", app: "dsh", status: "idle", cwd: "/w", where: null, name: null, turn: 0, parent: null, state: "live" },
+];
+const tildify = (p) => (p.startsWith("/Users/x") ? "~" + p.slice(8) : p);
+const AGENTS = [
+  { id: "claude", name: "Claude", online: true, running: false, panes: [{ paneId: "%1", label: "s:0.0", window: "w", cwd: "~" }] },
+  { id: "codex", name: "Codex", online: true, running: false, panes: [] },
+  { id: "shell", name: "Terminal", online: true, running: false, panes: [] },
+];
+
+test("toPane: forma del pane, label where||name||address y cwd tildificado", () => {
+  assert.deepEqual(toPane(ROWS[1], tildify), {
+    paneId: "hc:t9", label: "PROJ / 1", window: "t9", cwd: "~/proj", backend: "herdr",
+    status: "working", waiting: false, statusRule: "herdr", statusSource: "herdr",
+  });
+  assert.equal(toPane(ROWS[2], tildify).label, "rev");
+  assert.equal(toPane(ROWS[2], tildify).waiting, true);
+  const shell = toPane(ROWS[0], tildify);
+  assert.equal(shell.label, "t4");
+  assert.equal(shell.status, "idle");
+});
+
+test("mergeHerdrPanes: añade al agente correcto, running, sin mutar la entrada", () => {
+  const before = JSON.stringify(AGENTS);
+  const out = mergeHerdrPanes(AGENTS, ROWS, tildify);
+  assert.equal(JSON.stringify(AGENTS), before);
+  const claude = out.find((r) => r.id === "claude");
+  assert.deepEqual(claude.panes.map((p) => p.paneId), ["%1", "hc:t9", "hc:t12"]);
+  assert.equal(claude.panes[0].backend, undefined); // tmux: sin campo nuevo
+  assert.equal(claude.running, true);
+  assert.equal(claude.waiting, true);
+  const shell = out.find((r) => r.id === "shell");
+  assert.deepEqual(shell.panes.map((p) => p.paneId), ["hc:t4", "hc:t13"]); // deepseek sin fila → shell
+  assert.equal(shell.running, true);
+  const codex = out.find((r) => r.id === "codex");
+  assert.equal(codex, AGENTS[1]); // intacto
+  assert.equal(codex.running, false);
+});
+
+test("mergeHerdrPanes: sin terminales devuelve la misma lista; sin fila shell se omite", () => {
+  assert.equal(mergeHerdrPanes(AGENTS, [], tildify), AGENTS);
+  const noShell = mergeHerdrPanes([AGENTS[1]], [ROWS[0]], tildify);
+  assert.deepEqual(noShell[0].panes, []);
+});
+
+test("herdrKeyArgs: tabla del panel, SendNow y teclas no soportadas", () => {
+  assert.deepEqual(herdrKeyArgs("Enter"), ["enter"]);
+  assert.deepEqual(herdrKeyArgs("Escape"), ["esc"]);
+  assert.deepEqual(herdrKeyArgs("ShiftTab"), ["shift+tab"]);
+  assert.deepEqual(herdrKeyArgs("SendNow"), ["ctrl+x", "ctrl+s"]);
+  assert.equal(herdrKeyArgs("WheelUp"), null);
+  assert.equal(herdrKeyArgs("constructor"), null);
+  assert.equal(herdrKeyArgs("enter; rm"), null);
+  assert.equal(herdrKeyArgs(undefined), null);
+});
+
+test("containsHerdrId: body de restore anidado", () => {
+  assert.equal(containsHerdrId({ items: [{ sessionName: "hc:t9" }] }), true);
+  assert.equal(containsHerdrId({ dismiss: ["hc:t1b"] }), true);
+  assert.equal(containsHerdrId({ items: [{ sessionName: "mt3k-claude-x" }], all: true }), false);
+  assert.equal(containsHerdrId(null), false);
+});
+
+test("streamFrame: completa, igual y diffs por línea", () => {
+  const a = streamFrame(null, "uno\ndos", true);
+  assert.equal(a.payload, JSON.stringify("uno\ndos"));
+  assert.equal(streamFrame(a.lines, "uno\ndos", true).same, true);
+  const b = streamFrame(a.lines, "uno\ntres\ncuatro", true);
+  assert.deepEqual(JSON.parse(b.payload), { from: 1, lines: ["tres", "cuatro"], alt: false, mouse_sgr: false });
+  assert.equal(streamFrame(a.lines, "uno\ntres", false).payload, JSON.stringify("uno\ntres"));
+});
+
+function fakeHerdr({ list = ROWS, readText = "pantalla", sendResult = { ok: true } } = {}) {
+  const calls = { list: 0, read: [], send: [], keys: [] };
+  return {
+    calls,
+    herdr: {
+      async list() { calls.list++; return typeof list === "function" ? list() : list; },
+      async read(id, o) { calls.read.push([id, o]); return typeof readText === "function" ? readText() : { ok: true, text: readText }; },
+      async send(id, t) { calls.send.push([id, t]); return sendResult; },
+      async keys(id, k) { calls.keys.push([id, k]); return { ok: true }; },
+    },
+  };
+}
+
+test("MT3K_HERDR=0: no busca hc, no consulta nada", async () => {
+  let finds = 0;
+  const p = createHerdrPanes({ enabled: false, findHc: () => { finds++; return "/x/hc"; } });
+  assert.equal(await p.applyTo(AGENTS), AGENTS);
+  assert.equal(await p.has("hc:t9"), false);
+  assert.equal(finds, 0);
+});
+
+test("sin hc en el sistema: lista vacía y reintento de búsqueda solo cada 30 s", async () => {
+  let n = 0;
+  let t = 1000;
+  const p = createHerdrPanes({ findHc: () => { n++; return null; }, now: () => t });
+  assert.equal(await p.applyTo(AGENTS), AGENTS);
+  await p.refresh();
+  assert.equal(n, 1);
+  t += 31000;
+  await p.refresh();
+  assert.equal(n, 2);
+});
+
+test("lista cacheada 2 s: peticiones seguidas hacen una sola consulta", async () => {
+  const { herdr, calls } = fakeHerdr();
+  let t = 5000;
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => t });
+  await Promise.all([p.refresh(), p.refresh(), p.applyTo(AGENTS)]);
+  await p.refresh();
+  assert.equal(calls.list, 1);
+  t += 2100;
+  await p.refresh();
+  assert.equal(calls.list, 2);
+  t += 600;
+  await p.refresh(true); // forzada, pero ≥ 500 ms
+  assert.equal(calls.list, 3);
+});
+
+test("send/keys pasan por el adaptador; tecla no soportada no lo toca", async () => {
+  const { herdr, calls } = fakeHerdr();
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr });
+  assert.deepEqual(await p.send("hc:t9", "hola"), { ok: true });
+  assert.deepEqual(calls.send, [["hc:t9", "hola"]]);
+  assert.deepEqual(await p.keys("hc:t9", "Escape"), { ok: true });
+  assert.deepEqual(calls.keys, [["hc:t9", ["esc"]]]);
+  const bad = await p.keys("hc:t9", "WheelUp");
+  assert.equal(bad.ok, false);
+  assert.equal(bad.status, 400);
+  assert.equal(calls.keys.length, 1);
+});
+
+test("failure: bloqueado → 409, otro error → 500", () => {
+  const p = createHerdrPanes({ enabled: false });
+  assert.deepEqual(p.failure({ ok: false, err: "bloqueado: requiere a la persona" }), { status: 409, body: { ok: false, err: "bloqueado: requiere a la persona" } });
+  assert.equal(p.failure({ ok: false, err: "envío falló" }).status, 500);
+  assert.equal(p.failure({ ok: false, err: "texto demasiado largo" }).status, 400);
+  assert.match(HERDR_UNAVAILABLE, /Herdr/);
+});
+
+test("explain: estado de Herdr y tail de la pantalla", async () => {
+  const { herdr } = fakeHerdr({ readText: "a\n\nb\n" });
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr });
+  assert.equal(await p.explain("hc:t9"), null); // aún sin lista
+  await p.refresh();
+  const ex = await p.explain("hc:t9");
+  assert.equal(ex.source, "herdr");
+  assert.equal(ex.state, "working");
+  assert.deepEqual(ex.tail, ["a", "b"]);
+});
+
+test("wait: llega a idle cuando el estado cambia y reporta gone si desaparece", async () => {
+  let status = "working";
+  let present = true;
+  const { herdr } = fakeHerdr({
+    list: () => (present ? [{ ...ROWS[1], status }] : []),
+  });
+  let t = 10000;
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => t });
+  await p.refresh();
+  // runWait duerme de verdad (setTimeout): cambiamos el estado a mitad de la espera
+  setTimeout(() => { t += 2000; status = "done"; }, 50);
+  const r = await p.wait({ id: "hc:t9", until: "done", timeoutSec: 4, onAbort: () => () => {} });
+  assert.equal(r.reason, "reached");
+  assert.equal(r.status, "done");
+  present = false;
+  t += 5000;
+  const g = await p.wait({ id: "hc:t9", until: "done", timeoutSec: 4, onAbort: () => () => {} });
+  assert.equal(g.reason, "gone");
+});
+
+test("stream: alt una vez, cadena completa, diff, gone tras 2 ausencias", async () => {
+  let text = "uno";
+  let present = true;
+  const { herdr } = fakeHerdr({
+    list: () => (present ? ROWS : []),
+    readText: () => ({ ok: true, text }),
+  });
+  let t = 1000;
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => (t += 3000) });
+  const out = [];
+  let ended = false;
+  const s = p.startStream({ id: "hc:t9", tickMs: 1, minTickMs: 5, lineDiffs: true, write: (c) => out.push(c), end: () => { ended = true; } });
+  await new Promise((r) => setTimeout(r, 40));
+  text = "uno\ndos";
+  await new Promise((r) => setTimeout(r, 40));
+  present = false;
+  await new Promise((r) => setTimeout(r, 60));
+  s.stop();
+  assert.equal(out[0], `event: alt\ndata: {"alt":false,"mouse_sgr":false}\n\n`);
+  assert.equal(out[1], `data: ${JSON.stringify("uno")}\n\n`);
+  assert.deepEqual(JSON.parse(out[2].replace(/^data: /, "")), { from: 1, lines: ["uno", "dos"].slice(1), alt: false, mouse_sgr: false });
+  assert.equal(out.filter((c) => c.startsWith("event: alt")).length, 1);
+  assert.equal(out.at(-1), "event: gone\ndata: {}\n\n");
+  assert.equal(ended, true);
+});
+
+test("stream: lectura que falla dos veces → gone", async () => {
+  const { herdr } = fakeHerdr({ readText: () => ({ ok: false, err: "lectura falló" }) });
+  let t = 1000;
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => (t += 3000) });
+  const out = [];
+  p.startStream({ id: "hc:t9", tickMs: 1, minTickMs: 5, lineDiffs: false, write: (c) => out.push(c), end: () => {} });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(out, ["event: gone\ndata: {}\n\n"]);
+});

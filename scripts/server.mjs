@@ -88,6 +88,8 @@ import { tmuxServerAbsent } from "./lib/tmux-absent.mjs";
 import { gitRefs } from "./lib/git-refs.mjs";
 import { createKillTombstones } from "./lib/kill-tombstones.mjs";
 import { createLedgerStore } from "./lib/ledger-store.mjs";
+import { isHerdrId } from "./lib/herdr.mjs";
+import { containsHerdrId, createHerdrPanes, herdrKeyArgs, herdrUnavailableBody } from "./lib/herdr-panes.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "panel", "dist");
@@ -336,6 +338,15 @@ const denyUnlessCap = (res, def, op) => {
     return true;
   }
   return false;
+};
+
+// Terminales de Herdr (hc) como panes: solo listar/leer/escribir. MT3K_HERDR=0 lo apaga por completo.
+const herdrPanes = createHerdrPanes({ enabled: process.env.MT3K_HERDR !== "0", tildify });
+/** 400 uniforme para los endpoints que no soportan Herdr; true = ya respondió. */
+const denyHerdrId = (res, paneId) => {
+  if (!isHerdrId(paneId)) return false;
+  sendJSON(res, 400, herdrUnavailableBody());
+  return true;
 };
 
 let tmuxHooksVerified = false;
@@ -660,7 +671,7 @@ function readHosts() {
   return readHostsAll().filter((h) => !h.disabled);
 }
 async function federatedAgents() {
-  const local = await detectAgents();
+  const local = await herdrPanes.applyTo(await detectAgents());
   const remote = await Promise.all(readHosts().map(async (h) => {
     try {
       const r = await fetch(`${h.url.replace(/\/$/, "")}/api/agents?flat=1`, {
@@ -1153,6 +1164,28 @@ async function waitOnPane({ res, paneId, until, timeoutSec, baseline = null, saw
   }
 }
 
+// /api/wait y /api/prompt-wait sobre un terminal de Herdr: misma respuesta que waitOnPane, estado de la lista cacheada
+async function waitOnHerdr({ res, paneId, until, timeoutSec, baseline = null, sawWorkingBefore = false, isPromptWait = false, sentAt = null }) {
+  if (res.writableEnded || res.destroyed) return;
+  const result = await herdrPanes.wait({
+    id: paneId, until, timeoutSec, baseline, sawWorkingBefore, isPromptWait, sentAt,
+    onAbort: (abort) => {
+      const onClose = () => abort();
+      res.on("close", onClose);
+      if (res.writableEnded || res.destroyed) abort();
+      return () => res.removeListener("close", onClose);
+    },
+  });
+  if (result.reason === "aborted" || res.writableEnded || res.destroyed) return;
+  const tail = result.reason === "gone" ? [] : await herdrPanes.tailOf(paneId);
+  if (res.writableEnded || res.destroyed) return;
+  return sendJSON(res, 200, {
+    ok: true, paneId, status: result.status, statusRule: result.statusRule, reason: result.reason,
+    waitedMs: result.waitedMs, sawWorking: Boolean(result.sawWorking), tail,
+    ...(result.baseline ? { baseline: result.baseline } : {}),
+  });
+}
+
 async function launchLocalSession(
   { agentId, projectId, cwd: cwdIn, create, firstPrompt, fresh } = {},
   { internalLabelName = "", replacesSessionName = "" } = {}
@@ -1340,7 +1373,7 @@ async function api(req, res, path) {
   if (path === "/api/agents") {
     // flat=1 → this host only (what federating peers request; also stops any federation loop)
     const flat = new URL(req.url, "http://x").searchParams.get("flat");
-    return sendJSON(res, 200, { agents: flat ? await detectAgents() : await federatedAgents() });
+    return sendJSON(res, 200, { agents: flat ? await herdrPanes.applyTo(await detectAgents()) : await federatedAgents() });
   }
   if (path === "/api/discover") return sendJSON(res, 200, { repos: discover() });
 
@@ -1427,6 +1460,12 @@ async function api(req, res, path) {
   // live read of an agent's tmux pane — capture the rendered screen (with ANSI colors) for the terminal viewer
   if (path === "/api/pane") {
     const paneId = new URL(req.url, "http://x").searchParams.get("id") || "";
+    if (isHerdrId(paneId)) {
+      if (denyUnlessCap(res, SHELL_DEF, "view")) return;
+      if (!(await herdrPanes.has(paneId))) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+      const hr = await herdrPanes.read(paneId);
+      return sendJSON(res, 200, { ok: hr.ok, content: hr.ok ? hr.text : "", alternate: false, mouse_sgr: false });
+    }
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "view")) return;
@@ -1446,6 +1485,11 @@ async function api(req, res, path) {
   // explain why a pane has its current state (manifest rule/region/matched vs stillness heuristic)
   if (path === "/api/pane-explain" && req.method === "GET") {
     const paneId = new URL(req.url, "http://x").searchParams.get("id") || "";
+    if (isHerdrId(paneId)) {
+      if (denyUnlessCap(res, SHELL_DEF, "view")) return;
+      if (!(await herdrPanes.has(paneId))) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+      return sendJSON(res, 200, await herdrPanes.explain(paneId));
+    }
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "view")) return;
@@ -1513,6 +1557,7 @@ async function api(req, res, path) {
   // with a real client attached (kitty/ssh): that client owns the size.
   if (path === "/api/pane-resize" && req.method === "POST") {
     const { paneId, cols, rows } = await body(req);
+    if (denyHerdrId(res, paneId)) return;
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     const c = Math.round(Number(cols)), r = Math.round(Number(rows));
@@ -1541,6 +1586,16 @@ async function api(req, res, path) {
   // send text to an agent's tmux pane (tmux-only, LAN-only). text is untrusted input → no shell, literal paste.
   if (path === "/api/send" && req.method === "POST") {
     const { paneId, text, enter = true } = await body(req);
+    if (isHerdrId(paneId)) {
+      if (typeof text !== "string" || !text.trim()) return sendJSON(res, 400, { ok: false, err: "texto vacío" });
+      if (enter === false) return sendJSON(res, 400, { ok: false, err: "enviar sin Enter: " + herdrUnavailableBody().err }); // hc send siempre pulsa Enter
+      if (denyUnlessCap(res, SHELL_DEF, "send")) return;
+      if (!(await herdrPanes.has(paneId))) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+      const hs = await herdrPanes.send(paneId, text);
+      if (!hs.ok) { const f = herdrPanes.failure(hs); return sendJSON(res, f.status, f.body); }
+      logEvent(`send · ${paneId} · "${text.slice(0, 80).replace(/\s+/g, " ").trim()}"`);
+      return sendJSON(res, 200, { ok: true, paneId });
+    }
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (typeof text !== "string" || !text.trim()) return sendJSON(res, 400, { ok: false, err: "texto vacío" });
@@ -1565,11 +1620,11 @@ async function api(req, res, path) {
   if (path === "/api/wait" && req.method === "GET") {
     const params = new URL(req.url, "http://x").searchParams;
     let paneId = params.get("id") || "";
-    if (!validatePaneId(paneId).ok) {
+    if (!isHerdrId(paneId) && !validatePaneId(paneId).ok) {
       const rawId = req.url.match(/[?&]id=(%[0-9]+)(?:&|$)/)?.[1];
       if (rawId) paneId = rawId;
     }
-    const paneCheck = validatePaneId(paneId);
+    const paneCheck = isHerdrId(paneId) ? { ok: true } : validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     const condCheck = parseWaitCondition(params.get("until"));
     if (!condCheck.ok) return sendJSON(res, 400, { ok: false, err: condCheck.err });
@@ -1578,6 +1633,9 @@ async function api(req, res, path) {
     const baselineCheck = parseWaitBaseline(params.get("baseline"));
     if (!baselineCheck.ok) return sendJSON(res, 400, { ok: false, err: baselineCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "view")) return;
+    if (isHerdrId(paneId)) {
+      return await waitOnHerdr({ res, paneId, until: condCheck.until, timeoutSec: timeoutCheck.timeout, baseline: baselineCheck.baseline, sawWorkingBefore: /^(1|true)$/i.test(params.get("sawWorking") || "") });
+    }
     return await waitOnPane({
       res,
       paneId,
@@ -1592,7 +1650,8 @@ async function api(req, res, path) {
   // send a prompt like /api/send then wait like /api/wait (only after manifest working is seen or 10 s elapsed)
   if (path === "/api/prompt-wait" && req.method === "POST") {
     const { paneId, text, enter = true, until: rawUntil, timeout: rawTimeout, baseline: rawBaseline } = await body(req);
-    const paneCheck = validatePaneId(paneId);
+    const herdrTarget = isHerdrId(paneId);
+    const paneCheck = herdrTarget ? { ok: true } : validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (typeof text !== "string" || !text.trim()) return sendJSON(res, 400, { ok: false, err: "texto vacío" });
     if (text.length > 64000) return sendJSON(res, 400, { ok: false, err: "texto demasiado largo (máx 64000)" });
@@ -1604,6 +1663,16 @@ async function api(req, res, path) {
     if (!baselineCheck.ok) return sendJSON(res, 400, { ok: false, err: baselineCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "send")) return;
     if (denyUnlessCap(res, SHELL_DEF, "view")) return;
+    if (herdrTarget) {
+      if (enter === false) return sendJSON(res, 400, { ok: false, err: "enviar sin Enter: " + herdrUnavailableBody().err });
+      if (!(await herdrPanes.has(paneId))) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+      const hs = await herdrPanes.send(paneId, text);
+      if (!hs.ok) { const f = herdrPanes.failure(hs); return sendJSON(res, f.status, f.body); }
+      const herdrSentAt = Date.now();
+      logEvent(`prompt-wait · ${paneId} · "${text.slice(0, 80).replace(/\s+/g, " ").trim()}"`);
+      await new Promise((ok) => setTimeout(ok, 150));
+      return await waitOnHerdr({ res, paneId, until: condCheck.until, timeoutSec: timeoutCheck.timeout, baseline: baselineCheck.baseline, isPromptWait: true, sentAt: herdrSentAt });
+    }
     const live = (await run(TMUX_BIN, ["list-panes", "-a", "-F", PANE_KEY_FMT], ROOT, 5000)).out.split("\n");
     if (!live.includes(paneId)) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
     const r = await pasteToPane(paneId, text, enter);
@@ -1631,6 +1700,7 @@ async function api(req, res, path) {
   // set or clear a session's free-text label (persisted in data/pane-labels.json)
   if (path === "/api/pane-label" && req.method === "POST") {
     const { paneId, name } = await body(req);
+    if (denyHerdrId(res, paneId)) return;
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     const nameCheck = sanitizePaneLabel(name);
@@ -1721,6 +1791,7 @@ async function api(req, res, path) {
   // relaunch or dismiss missing sessions from data/session-snapshot.json
   if (path === "/api/restore" && req.method === "POST") {
     const { all, items, dismiss, dismissAll } = await body(req);
+    if (containsHerdrId({ items, dismiss })) return sendJSON(res, 400, herdrUnavailableBody());
     if (dismissAll === true || (Array.isArray(dismiss) && dismiss.length > 0)) {
       // discovery FIRST, then one mutation against the latest ledger (a kill or launch that lands
       // while discovery runs is never overwritten by a stale copy)
@@ -2073,6 +2144,15 @@ async function api(req, res, path) {
   // allowlisted to tmux key names only → never raw shell, never arbitrary keystrokes
   if (path === "/api/key" && req.method === "POST") {
     const { paneId, key } = await body(req);
+    if (isHerdrId(paneId)) {
+      if (!herdrKeyArgs(key)) return sendJSON(res, 400, { ok: false, err: "tecla no permitida" });
+      if (denyUnlessCap(res, SHELL_DEF, "keys")) return;
+      if (!(await herdrPanes.has(paneId))) return sendJSON(res, 404, { ok: false, err: "ese pane ya no existe" });
+      const hk = await herdrPanes.keys(paneId, key);
+      if (!hk.ok) { const f = herdrPanes.failure(hk); return sendJSON(res, f.status, f.body); }
+      logEvent(`key · ${paneId} · ${key}`);
+      return sendJSON(res, 200, { ok: true, paneId, key });
+    }
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     const args = keyArgs(key);
@@ -2115,6 +2195,7 @@ async function api(req, res, path) {
   // kill an agent's tmux pane (its dedicated session dies with its last pane)
   if (path === "/api/kill" && req.method === "POST") {
     const { paneId } = await body(req);
+    if (denyHerdrId(res, paneId)) return;
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "kill")) return;
@@ -2189,6 +2270,13 @@ async function api(req, res, path) {
     const tickMs = clampTick(params.get("tick"));
     // Opt-in diffs preserve full strings for old bundles and mixed-version federation.
     const lineDiffs = params.get("fmt") === "lines";
+    if (isHerdrId(paneId)) {
+      if (denyUnlessCap(res, SHELL_DEF, "view")) return;
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
+      const hStream = herdrPanes.startStream({ id: paneId, tickMs: tickMs, lineDiffs, write: (c) => { if (!res.writableEnded) res.write(c); }, end: () => { try { res.end(); } catch { /* gone */ } } });
+      req.on("close", hStream.stop);
+      return;
+    }
     const paneCheck = validatePaneId(paneId);
     if (!paneCheck.ok) return sendJSON(res, 400, { ok: false, err: paneCheck.err });
     if (denyUnlessCap(res, SHELL_DEF, "view")) return;
