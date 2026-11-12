@@ -787,3 +787,37 @@ test("atribución: una consulta de una generación anterior no escribe el agente
   assert.equal(f[0].agent, "shell");
   assert.equal(p.cachedRows()[0].agent, "shell");
 });
+
+test("frescura: has→view cada 6 s con el primer plano pasando de junie a un zsh inactivo → sale de junie en un get correcto", async () => {
+  let fgArgv = ["bash", "/Users/x/.local/bin/junie"];
+  const herdr = {
+    async list() { return [ZSH_ROW]; },
+    async get() { return { ok: true, cwd: "/Users/x/proj", cols: 90, rows: 30, labels: {}, argv: JUNIE_ARGV, fgArgv }; },
+    async read() { return { ok: true, text: "plano" }; },
+  };
+  const conn = { async snapshot() { return { ok: true, cols: 90, rows: 30, bytes: "x" }; }, close() {}, stats() { return {}; } };
+  const { clock, panes } = mk({ createHerdr: () => herdr, agentMatchers: () => MATCHERS, createConn: () => conn, paint: () => ({ complete: true, lines: ["a"] }) });
+  assert.equal((await panes.refresh())[0].agent, "junie");
+  fgArgv = ["zsh", "-li"];
+  clock.adv(6000); // el tamaño (5 s) caduca: la vista hace un get correcto en currentSize, no en enrich
+  await panes.has("hc:t20");
+  await panes.view("hc:t20");
+  clock.adv(2100); // la lista caduca (2 s) y se relee; los details ya traen la atribución nueva
+  assert.equal((await panes.refresh())[0].agent, "shell");
+});
+
+test("frescura: un get fallido no conserva la atribución anterior (vuelve a shell hasta el siguiente get correcto)", async () => {
+  let ok = true;
+  const herdr = {
+    async list() { return [ZSH_ROW]; },
+    async get() { return ok ? { ok: true, cwd: "/w", cols: 9, rows: 9, labels: {}, argv: JUNIE_ARGV, fgArgv: [] } : { ok: false }; },
+  };
+  const { clock, panes } = mk({ createHerdr: () => herdr, agentMatchers: MATCHERS });
+  assert.equal((await panes.refresh())[0].agent, "junie");
+  ok = false;
+  clock.adv(31000); // TTL vencido → get que falla
+  assert.equal((await panes.refresh())[0].agent, "shell");
+  ok = true;
+  clock.adv(31000);
+  assert.equal((await panes.refresh())[0].agent, "junie");
+});

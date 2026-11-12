@@ -357,7 +357,7 @@ const denyUnlessCap = (res, def, op) => {
 
 // Terminales de Herdr (hc) como panes: solo listar/leer/escribir. MT3K_HERDR=0 lo apaga por completo.
 const herdrPanes = createHerdrPanes({ enabled: process.env.MT3K_HERDR !== "0", color: process.env.MT3K_HERDR_COLOR !== "0", tildify,
-  agentMatchers: AGENT_DEFS.filter((a) => a.proc?.length).map(({ id, proc }) => ({ id, proc })) });
+  agentMatchers: () => effectiveAgentDefs.filter((a) => a.proc?.length).map(({ id, proc }) => ({ id, proc })) });
 // el único `hc connect` (vistas en color) no sobrevive al servidor
 process.on("exit", () => herdrPanes.close());
 const herdrLauncher = createHerdrLauncher({ getHerdr: () => herdrPanes.hc() });

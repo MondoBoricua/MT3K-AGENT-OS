@@ -118,9 +118,12 @@ export function createHerdrPanes({
   paint = paintToAnsiLines,
   perfNow = () => performance.now(),
   log = (m) => console.warn(m),
-  agentMatchers = [], // [{ id, proc }]: nombres de proceso por agente, los inyecta server.mjs
+  agentMatchers = [], // [{ id, proc }] o función que lo devuelve (se lee en cada get): los inyecta server.mjs
 } = {}) {
   let conn = null;
+  const matchersNow = () => (typeof agentMatchers === "function" ? agentMatchers() : agentMatchers);
+  // argv del `hc get` → agente (solo se aplica si `hc ls` dice shell); se recalcula en CADA get correcto
+  const argvAgentOf = (g) => refineAgent("shell", g.argv, g.fgArgv, matchersNow());
   const details = new Map(); // address → { at, where, status, cwd, cols, rows, labels, argvAgent }
   const colorState = new Map(); // address → { fails, until }
   const resizeGuard = new Map(); // address → { verified, pausedUntil }
@@ -175,7 +178,7 @@ export function createHerdrPanes({
       const g = await h.get(r.id).catch(() => ({ ok: false }));
       const prev = details.get(r.address);
       const base = { at: now(), where: r.where, status: r.status };
-      local.set(r.address, g.ok ? { ...base, cwd: g.cwd, cols: g.cols, rows: g.rows, labels: g.labels || {}, argvAgent: refineAgent("shell", g.argv, g.fgArgv, agentMatchers) } : { ...(prev || { cwd: null, cols: null, rows: null }), ...base });
+      local.set(r.address, g.ok ? { ...base, cwd: g.cwd, cols: g.cols, rows: g.rows, labels: g.labels || {}, argvAgent: argvAgentOf(g) } : { ...(prev || { cwd: null, cols: null, rows: null }), ...base, argvAgent: "shell" }); // get fallido: no conserva una atribución vieja
     }));
     if (gen === generation) for (const [k, v] of local) details.set(k, v);
     return rows.map((r) => {
@@ -270,8 +273,11 @@ export function createHerdrPanes({
     let d = details.get(address);
     if (fresh || !d || d.cols === null || now() - d.at > SIZE_MAX_AGE_MS) {
       const g = typeof h.get === "function" ? await h.get(id).catch(() => ({ ok: false })) : { ok: false };
-      if (!g.ok) return null;
-      d = { ...(d || { where: null, status: null }), at: now(), cwd: g.cwd, cols: g.cols, rows: g.rows };
+      if (!g.ok) {
+        if (d?.argvAgent && d.argvAgent !== "shell") details.set(address, { ...d, argvAgent: "shell" });
+        return null;
+      }
+      d = { ...(d || { where: null, status: null }), at: now(), cwd: g.cwd, cols: g.cols, rows: g.rows, argvAgent: argvAgentOf(g) };
       details.set(address, d);
     }
     return d.cols && d.rows ? { cols: d.cols, rows: d.rows } : null;
