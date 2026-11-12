@@ -14,6 +14,7 @@ import {
   isHerdrId,
   mapAgent,
   mapStatus,
+  parseHcGet,
   parseHcLs,
 } from "./herdr.mjs";
 
@@ -137,11 +138,13 @@ test("createHerdr: read, send con --, límites y bloqueado código 9", async () 
 
 test("createHerdr: keys válidas e inválidas", async () => {
   const exec = mockExec({
-    "keys\0t9\0enter\0esc": () => ({ ok: true }),
+    "keys\0t9\0--\0enter\0esc": () => ({ ok: true }),
   });
   const h = createHerdr({ hcPath: "/bin/hc", exec });
   assert.deepEqual(await h.keys("hc:t9", ["enter", "esc"]), { ok: true });
   assert.deepEqual(await h.keys("hc:t9", ["bad key"]), { ok: false, err: "teclas inválidas" });
+  assert.deepEqual(await h.keys("hc:t9", ["-h"]), { ok: false, err: "teclas inválidas" });
+  assert.deepEqual(await h.keys("hc:t9", ["enter", "--help"]), { ok: false, err: "teclas inválidas" });
   assert.deepEqual(await h.keys("hc:t9", new Array(33).fill("a")), { ok: false, err: "teclas inválidas" });
 });
 
@@ -248,4 +251,20 @@ test("running() POSIX: socket vivo pero status sin sesiones → false", async ()
   const exec = (_f, _a, _o, cb) => cb(null, '{"holder":null,"live":0}');
   const h = createHerdr({ hcPath: "/bin/hc", exec, platform: "darwin", probe: async () => true });
   assert.equal(await h.running(), false);
+});
+
+test("parseHcGet: foreground.cwd manda sobre cwd de lanzamiento; cols/rows y where", () => {
+  const t9 = '{"address":"t9","cols":96,"rows":43,"cwd":"/Users/x","foreground":{"cwd":"/Users/x/proj","name":"2.1"},"labels":{"where":"P / 1"}}';
+  assert.deepEqual(parseHcGet(t9), { cwd: "/Users/x/proj", cols: 96, rows: 43, where: "P / 1" });
+  assert.deepEqual(parseHcGet('{"cwd":"/a","cols":0,"rows":"x"}'), { cwd: "/a", cols: null, rows: null, where: null });
+  assert.equal(parseHcGet("nope"), null);
+});
+
+test("createHerdr: get usa argv fijo y valida el id", async () => {
+  const calls = [];
+  const exec = (_f, argv, _o, cb) => { calls.push(argv); cb(null, '{"cwd":"/a","cols":80,"rows":24}'); };
+  const h = createHerdr({ hcPath: "/bin/hc", exec });
+  assert.deepEqual(await h.get("hc:t9"), { ok: true, cwd: "/a", cols: 80, rows: 24, where: null });
+  assert.deepEqual(calls, [["get", "t9", "--json"]]);
+  assert.deepEqual(await h.get("hc:-x"), { ok: false, err: "terminal inválido" });
 });

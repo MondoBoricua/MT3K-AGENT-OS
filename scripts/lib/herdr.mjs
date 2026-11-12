@@ -14,7 +14,8 @@ const SOCKET_PROBE_TIMEOUT_MS = 300;
 const SEND_MAX_BYTES = 64 * 1024;
 const READ_LINES_MAX = 2000;
 const KEYS_MAX = 32;
-const KEY_RE = /^[A-Za-z0-9+_-]{1,24}$/;
+// sin "-" inicial: `hc keys t1 -h` lo toma como opción; además se pasa tras `--`
+const KEY_RE = /^[A-Za-z0-9+_][A-Za-z0-9+_-]{0,23}$/;
 const ADDRESS_RE = /^t[0-9]{1,6}[a-z]?$/;
 const HERDR_ID_RE = /^hc:t[0-9]{1,6}[a-z]?$/;
 
@@ -174,6 +175,25 @@ export function parseHcLs(jsonText) {
   return out;
 }
 
+/**
+ * `hc get <t> --json` → carpeta ACTUAL y tamaño. Medido (t9, hc 0.1.20): `foreground.cwd` es la carpeta del
+ * proceso en primer plano (la de `cwd` es la de lanzamiento); `cols`/`rows` de primer nivel son el tamaño actual.
+ */
+export function parseHcGet(jsonText) {
+  let d;
+  try { d = JSON.parse(String(jsonText)); } catch { return null; }
+  if (!d || typeof d !== "object") return null;
+  const fg = typeof d.foreground?.cwd === "string" && d.foreground.cwd ? d.foreground.cwd : null;
+  const launch = typeof d.cwd === "string" && d.cwd ? d.cwd : null;
+  const size = (n) => (Number.isInteger(n) && n > 0 && n < 10000 ? n : null);
+  return {
+    cwd: fg || launch,
+    cols: size(d.cols),
+    rows: size(d.rows),
+    where: typeof d.labels?.where === "string" ? d.labels.where : null,
+  };
+}
+
 /** Respuesta de `hc server status --json` → ¿hay un core con sesiones reales? (sin contar autostart vacío) */
 export function coreRunningFromStatus(jsonText) {
   try {
@@ -263,6 +283,15 @@ export function createHerdr({
     return parseHcLs(r.out);
   }
 
+  async function get(id) {
+    const v = validateAddressFromId(id);
+    if (!v.ok) return v;
+    const r = await execHc(["get", v.address, "--json"]);
+    if (!r.ok) return { ok: false, err: "get falló" };
+    const info = parseHcGet(r.out);
+    return info ? { ok: true, ...info } : { ok: false, err: "get falló" };
+  }
+
   async function read(id, { lines = 0 } = {}) {
     const v = validateAddressFromId(id);
     if (!v.ok) return v;
@@ -299,7 +328,7 @@ export function createHerdr({
     for (const k of list) {
       if (typeof k !== "string" || !KEY_RE.test(k)) return { ok: false, err: "teclas inválidas" };
     }
-    const r = await execHc(["keys", v.address, ...list]);
+    const r = await execHc(["keys", v.address, "--", ...list]);
     if (r.ok) return { ok: true };
     if (r.code === "ENOENT") return { ok: false, err: "hc no disponible" };
     return { ok: false, err: "teclas fallaron" };
@@ -314,5 +343,5 @@ export function createHerdr({
     return { ok: false, err: "interrupción falló" };
   }
 
-  return { running, list, read, send, keys, interrupt };
+  return { running, list, get, read, send, keys, interrupt };
 }
