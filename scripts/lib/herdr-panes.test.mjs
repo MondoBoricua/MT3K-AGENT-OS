@@ -457,3 +457,45 @@ test("R4-4: la pausa de 10 min sobrevive a un dropState por sonda fallida", asyn
   assert.equal((await panes.view("hc:t9")).text, "plano");
   assert.equal(snaps, 1);
 });
+
+// --- launch-backend: killable, invalidate, hc() ---
+
+test("toPane: killable solo si la fila lo trae", () => {
+  assert.equal(toPane(ROWS[1], tildify).killable, undefined);
+  assert.equal(toPane({ ...ROWS[1], killable: true }, tildify).killable, true);
+});
+
+test("killable sale de la etiqueta mt3k.panel=1 de `hc get`; el resto de terminales no", async () => {
+  const gets = [];
+  const herdr = {
+    async list() { return ROWS.slice(0, 2); },
+    async get(id) { gets.push(id); return { ok: true, cwd: null, cols: 80, rows: 24, where: null, labels: id === "hc:t9" ? { "mt3k.panel": "1" } : { "mt3k.panel": "0" } }; },
+  };
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr });
+  const rows = await p.refresh();
+  assert.deepEqual(rows.map((r) => [r.id, r.killable === true]), [["hc:t4", false], ["hc:t9", true]]);
+  const merged = await p.applyTo(AGENTS);
+  assert.equal(merged.find((r) => r.id === "claude").panes.find((x) => x.paneId === "hc:t9").killable, true);
+  assert.equal(merged.find((r) => r.id === "shell").panes.find((x) => x.paneId === "hc:t4").killable, undefined);
+});
+
+test("invalidate: la siguiente refresh() relee la lista (sin esperar el TTL) y avisa al adaptador", async () => {
+  const { herdr, calls } = fakeHerdr();
+  let inv = 0;
+  herdr.invalidate = () => { inv++; };
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => 5000 });
+  await p.refresh();
+  await p.refresh();
+  assert.equal(calls.list, 1);
+  p.invalidate();
+  await p.refresh();
+  assert.equal(calls.list, 2);
+  assert.equal(inv, 1);
+});
+
+test("hc(): el adaptador, o null con MT3K_HERDR=0 / sin hc", () => {
+  const { herdr } = fakeHerdr();
+  assert.equal(createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr }).hc(), herdr);
+  assert.equal(createHerdrPanes({ enabled: false }).hc(), null);
+  assert.equal(createHerdrPanes({ findHc: () => null }).hc(), null);
+});

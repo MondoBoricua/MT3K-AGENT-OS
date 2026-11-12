@@ -1,6 +1,6 @@
 // Terminales de Herdr (hc) como panes del panel. Solo lectura de la lista, leer pantalla, texto y teclas.
 // Nunca toca el ledger, tombstones, notificaciones ni tmux: server.mjs solo llama a estas funciones.
-import { addressOf, createHerdr as realCreateHerdr, findHc as realFindHc, isHerdrId } from "./herdr.mjs";
+import { PANEL_LABEL_KEY, addressOf, createHerdr as realCreateHerdr, findHc as realFindHc, isHerdrId } from "./herdr.mjs";
 import { createHerdrConn as realCreateConn } from "./herdr-conn.mjs";
 import { paintToAnsiLines } from "./herdr-paint.mjs";
 import { runWait } from "./wait-loop.mjs";
@@ -55,6 +55,7 @@ export function toPane(row, tildify = (p) => p) {
     window: row.address,
     cwd: tildify(row.cwd || ""),
     backend: "herdr",
+    ...(row.killable ? { killable: true } : {}), // solo los terminales que abrió el panel (etiqueta mt3k.panel=1)
     status,
     waiting: status === "blocked",
     statusRule: "herdr",
@@ -154,9 +155,14 @@ export function createHerdrPanes({
       const g = await h.get(r.id).catch(() => ({ ok: false }));
       const prev = details.get(r.address);
       const base = { at: now(), where: r.where, status: r.status };
-      details.set(r.address, g.ok ? { ...base, cwd: g.cwd, cols: g.cols, rows: g.rows } : { ...(prev || { cwd: null, cols: null, rows: null }), ...base });
+      details.set(r.address, g.ok ? { ...base, cwd: g.cwd, cols: g.cols, rows: g.rows, labels: g.labels || {} } : { ...(prev || { cwd: null, cols: null, rows: null }), ...base });
     }));
-    return rows.map((r) => { const d = details.get(r.address); return d?.cwd ? { ...r, cwd: d.cwd } : r; });
+    return rows.map((r) => {
+      const d = details.get(r.address);
+      const killable = d?.labels?.[PANEL_LABEL_KEY] === "1";
+      if (!d?.cwd && !killable) return r;
+      return { ...r, ...(d.cwd ? { cwd: d.cwd } : {}), ...(killable ? { killable: true } : {}) };
+    });
   }
 
   // Core muerto o cambiado: se cierra el único `hc connect` y se olvida todo el estado derivado del core.
@@ -184,6 +190,12 @@ export function createHerdrPanes({
       return rows;
     })().finally(() => { inflight = null; });
     return inflight;
+  }
+
+  /** Olvida la lista cacheada (y las cachés del adaptador): tras crear o cerrar un terminal se lee de nuevo. */
+  function invalidate() {
+    cache = { at: -Infinity, rows: [] };
+    herdr?.invalidate?.();
   }
 
   const find = (id) => cache.rows.find((r) => r.id === id) || null;
@@ -285,6 +297,9 @@ export function createHerdrPanes({
   return {
     enabled,
     refresh,
+    invalidate,
+    /** Adaptador hc (o null con MT3K_HERDR=0 / sin hc): lo usa el lanzador de lib/herdr-launch.mjs. */
+    hc: client,
     has,
     read,
     view,

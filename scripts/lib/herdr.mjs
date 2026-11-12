@@ -1,5 +1,6 @@
 // Adaptador finito sobre `hc`: listar, leer y escribir en terminales Herdr que ya existen.
-// Nunca crea, mata, redimensiona ni arranca un core por su cuenta; solo execFile con argv fijo.
+// Crear (`run`) y cerrar (`killOwned`) solo con core vivo y solo terminales marcados `mt3k.panel=1`.
+// Nunca redimensiona ni arranca un core por su cuenta; solo execFile con argv fijo.
 import { execFile } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import { connect as netConnect } from "node:net";
@@ -21,6 +22,14 @@ const KEYS_MAX = 32;
 const KEY_RE = /^[A-Za-z0-9+_][A-Za-z0-9+_-]{0,23}$/;
 const ADDRESS_RE = /^t[0-9]{1,6}[a-z]?$/;
 const HERDR_ID_RE = /^hc:t[0-9]{1,6}[a-z]?$/;
+const HC_RUN_TIMEOUT_MS = 8000;
+const RUN_MAX_BUFFER = 256 * 1024;
+const RUN_ARGV_MAX = 64;
+const RUN_ARG_MAX_BYTES = 8192;
+const RUN_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/; // `hc run --name`: 1-32 de a-z 0-9 - _
+/** Etiqueta con la que el panel marca los terminales que él mismo creó (única condición para poder cerrarlos). */
+export const PANEL_LABEL_KEY = "mt3k.panel";
+export const PANEL_LABEL = `${PANEL_LABEL_KEY}=1`;
 
 const pathFor = (platform) => (platform === "win32" ? win32 : posix);
 const WIN_QUALIFIED = /^[A-Za-z]:[\\/]/;
@@ -38,38 +47,49 @@ const isExecutableFile = (p) => {
 };
 
 /**
- * Ruta absoluta de `hc`: primero ubicaciones conocidas, luego PATH con las mismas reglas de confianza que findGit.
+ * Ruta absoluta de un binario de Herdr: primero la ubicación conocida, luego PATH con las mismas reglas de confianza
+ * que findGit (solo entradas absolutas, nunca "." ni el directorio actual).
  */
-export function findHc({
-  pathEnv = process.env.PATH || "",
-  platform = process.platform,
-  home = homedir(),
-  localAppData = process.env.LOCALAPPDATA || "",
-  exists,
-  sep,
-} = {}) {
+function findBinary({ name, winBundled, pathEnv, platform, home, localAppData, exists, sep }) {
   const P = pathFor(platform);
   const ok = exists ?? (platform === "win32" ? isFile : isExecutableFile);
   if (platform === "win32") {
     if (localAppData) {
-      const bundled = P.join(localAppData, "Programs", "herdr-core", "hc.exe");
+      const bundled = P.join(localAppData, ...winBundled);
       if (ok(bundled)) return bundled;
     }
   } else {
-    const bundled = posix.join(home, ".local", "bin", "hc");
+    const bundled = posix.join(home, ".local", "bin", name);
     if (ok(bundled)) return bundled;
   }
-  const names = platform === "win32" ? ["hc.exe"] : ["hc"];
+  const names = platform === "win32" ? [`${name}.exe`] : [name];
   for (const entry of pathEnv.split(sep ?? P.delimiter)) {
     const dir = entry.trim().replace(/^"(.*)"$/, "$1");
     if (!dir || dir === ".") continue;
     if (platform === "win32" ? !WIN_QUALIFIED.test(dir) : !P.isAbsolute(dir)) continue;
-    for (const name of names) {
-      const full = P.join(dir, name);
+    for (const n of names) {
+      const full = P.join(dir, n);
       if (ok(full)) return full;
     }
   }
   return null;
+}
+
+const finderDefaults = () => ({
+  pathEnv: process.env.PATH || "",
+  platform: process.platform,
+  home: homedir(),
+  localAppData: process.env.LOCALAPPDATA || "",
+});
+
+/** Ruta absoluta de `hc`: ubicaciones conocidas y luego PATH. */
+export function findHc(opts = {}) {
+  return findBinary({ name: "hc", winBundled: ["Programs", "herdr-core", "hc.exe"], ...finderDefaults(), ...opts });
+}
+
+/** Ruta absoluta de `herdr-app` (la ventana de escritorio de Herdr), con las mismas reglas de confianza que `findHc`. */
+export function findHerdrApp(opts = {}) {
+  return findBinary({ name: "herdr-app", winBundled: ["Programs", "herdr-app", "herdr-app.exe"], ...finderDefaults(), ...opts });
 }
 
 /**
@@ -192,11 +212,16 @@ export function parseHcGet(jsonText) {
   const fg = typeof d.foreground?.cwd === "string" && d.foreground.cwd ? d.foreground.cwd : null;
   const launch = typeof d.cwd === "string" && d.cwd ? d.cwd : null;
   const size = (n) => (Number.isInteger(n) && n > 0 && n < 10000 ? n : null);
+  const labels = {};
+  if (d.labels && typeof d.labels === "object" && !Array.isArray(d.labels)) {
+    for (const [k, v] of Object.entries(d.labels)) if (typeof v === "string") labels[k] = v;
+  }
   return {
     cwd: fg || launch,
     cols: size(d.cols),
     rows: size(d.rows),
     where: typeof d.labels?.where === "string" ? d.labels.where : null,
+    labels,
   };
 }
 
@@ -220,14 +245,14 @@ function validateAddressFromId(id) {
   return { ok: true, address };
 }
 
-function runExec(exec, hcPath, argv, { timeout, env }) {
+function runExec(exec, hcPath, argv, { timeout, env, maxBuffer = HC_MAX_BUFFER }) {
   if (!hcPath) return Promise.resolve({ ok: false, code: "ENOENT" });
   const mergedEnv = env ? { ...process.env, ...env } : process.env;
   return new Promise((resolve) => {
     try {
       exec(hcPath, argv, {
         timeout,
-        maxBuffer: HC_MAX_BUFFER,
+        maxBuffer,
         windowsHide: true,
         env: mergedEnv,
       }, (err, stdout) => {
@@ -238,6 +263,32 @@ function runExec(exec, hcPath, argv, { timeout, env }) {
       resolve({ ok: false, code: e?.code ?? "ERROR" }); // p. ej. NUL en argv: execFile lanza síncrono
     }
   });
+}
+
+/** Valida lo que `run` recibe; null = válido, si no el mensaje. Todo va tras `--`, pero NUL/tamaños se cortan aquí. */
+function runInputError({ argv, cwd, name }) {
+  if (typeof name !== "string" || !RUN_NAME_RE.test(name)) return "nombre inválido";
+  if (typeof cwd !== "string" || cwd.length === 0 || cwd.length > 4096 || cwd.includes("\0") || !(cwd.startsWith("/") || WIN_QUALIFIED.test(cwd))) return "carpeta inválida";
+  if (!Array.isArray(argv) || argv.length > RUN_ARGV_MAX) return "comando inválido";
+  for (const a of argv) {
+    if (typeof a !== "string" || a.length === 0 || a.includes("\0") || Buffer.byteLength(a, "utf8") > RUN_ARG_MAX_BYTES) return "comando inválido";
+  }
+  return null;
+}
+
+/** Dirección `tN` del JSON de `hc run`/`hc label`; null si no hay una válida. */
+export function parseHcAddress(jsonText) {
+  try {
+    const a = JSON.parse(String(jsonText))?.address;
+    return typeof a === "string" && ADDRESS_RE.test(a) ? a : null;
+  } catch {
+    return null;
+  }
+}
+
+/** ¿El stdout de un `hc` fallido dice `name_taken`? (se reintenta con otro nombre) */
+export function isNameTaken(jsonText) {
+  try { return JSON.parse(String(jsonText))?.error?.kind === "name_taken"; } catch { return false; }
 }
 
 function sendArgv(address, text) {
@@ -280,9 +331,9 @@ export function createHerdr({
   }
 
   /** Única vía de ejecución de hc. */
-  async function execHc(argv, timeout = HC_TIMEOUT_MS) {
+  async function execHc(argv, timeout = HC_TIMEOUT_MS, maxBuffer = HC_MAX_BUFFER) {
     if (!(await coreAlive())) return { ok: false, code: "NOCORE" };
-    return runExec(exec, hcPath, argv, { timeout, env });
+    return runExec(exec, hcPath, argv, { timeout, env, maxBuffer });
   }
   const unavailable = (r) => r.code === "ENOENT" || r.code === "NOCORE";
 
@@ -368,5 +419,68 @@ export function createHerdr({
     return { ok: false, err: "interrupción falló" };
   }
 
-  return { running, coreAlive, list, get, read, send, keys, interrupt };
+  /** Olvida cachés (running/negativo): tras crear o cerrar un terminal la lista debe leerse de nuevo. */
+  function invalidate() {
+    runningCache = null;
+    negative = null;
+  }
+
+  /**
+   * ¿Hay un core al que crear un terminal? POSIX: sondeo del socket (nunca arranca nada). win32: `hc server status`
+   * (medido en POSIX que no arranca; en Windows es manual por diseño de hc y NO está verificado aquí).
+   */
+  async function coreUp() {
+    if (!hcPath) return false;
+    if (platform !== "win32") return coreAlive();
+    const r = await execHc(["server", "status", "--json"]);
+    if (!r.ok) return false;
+    try { return Boolean(JSON.parse(String(r.out))?.core); } catch { return false; }
+  }
+
+  /**
+   * Crea un terminal en segundo plano, sin padre, ya marcado `mt3k.panel=1`. `argv` vacío = shell de hc.
+   * Devuelve { ok, address, id } | { ok:false, err, code?, nameTaken? }. Nunca arranca un core (execHc sondea antes).
+   */
+  async function run({ argv = [], cwd, name } = {}) {
+    const bad = runInputError({ argv, cwd, name });
+    if (bad) return { ok: false, err: bad };
+    const args = ["run", "--bg", "--no-parent", "--json", "--name", name, "--cwd", cwd, "--label", PANEL_LABEL];
+    if (argv.length) args.push("--", ...argv);
+    const r = await execHc(args, HC_RUN_TIMEOUT_MS, RUN_MAX_BUFFER);
+    if (!r.ok) {
+      if (unavailable(r)) return { ok: false, err: "hc no disponible", code: r.code };
+      return { ok: false, err: "no se pudo crear el terminal", nameTaken: isNameTaken(r.out) };
+    }
+    const address = parseHcAddress(r.out);
+    if (!address) return { ok: false, err: "hc no devolvió el terminal" };
+    invalidate();
+    return { ok: true, address, id: `hc:${address}` };
+  }
+
+  /** `hc label <t> mt3k.panel=1` (clave/valor fijos del panel; para terminales creados por `herdr-app do`). */
+  async function markOwned(id) {
+    const v = validateAddressFromId(id);
+    if (!v.ok) return v;
+    const r = await execHc(["label", v.address, "--json", PANEL_LABEL]);
+    if (r.ok) return { ok: true };
+    return { ok: false, err: unavailable(r) ? "hc no disponible" : "etiquetar falló" };
+  }
+
+  /**
+   * Cierra SOLO un terminal creado por el panel: relee las etiquetas (`hc get`) justo antes y exige `mt3k.panel=1`.
+   * `hc kill` y luego `hc rm`; si rm falla (terminal aún no terminado) no es error: queda terminado y hc lo oculta.
+   */
+  async function killOwned(id) {
+    const info = await get(id);
+    if (!info.ok) return info.err === "terminal inválido" ? { ok: false, status: 400, err: info.err } : { ok: false, status: 404, err: "ese pane ya no existe" };
+    if (info.labels?.[PANEL_LABEL_KEY] !== "1") return { ok: false, status: 400, err: "solo se pueden cerrar los terminales que abrió el panel" };
+    const address = addressOf(id);
+    const k = await execHc(["kill", address, "--json"]);
+    if (!k.ok) return { ok: false, status: 500, err: unavailable(k) ? "hc no disponible" : "kill falló" };
+    const rm = await execHc(["rm", address, "--json"]);
+    invalidate();
+    return { ok: true, removed: rm.ok };
+  }
+
+  return { running, coreAlive, coreUp, invalidate, list, get, read, send, keys, interrupt, run, markOwned, killOwned };
 }

@@ -11,7 +11,10 @@ import {
   probeUnixSocket,
   createHerdr,
   findHc,
+  findHerdrApp,
   isHerdrId,
+  isNameTaken,
+  parseHcAddress,
   mapAgent,
   mapStatus,
   parseHcGet,
@@ -255,8 +258,9 @@ test("running() POSIX: socket vivo pero status sin sesiones → false", async ()
 
 test("parseHcGet: foreground.cwd manda sobre cwd de lanzamiento; cols/rows y where", () => {
   const t9 = '{"address":"t9","cols":96,"rows":43,"cwd":"/Users/x","foreground":{"cwd":"/Users/x/proj","name":"2.1"},"labels":{"where":"P / 1"}}';
-  assert.deepEqual(parseHcGet(t9), { cwd: "/Users/x/proj", cols: 96, rows: 43, where: "P / 1" });
-  assert.deepEqual(parseHcGet('{"cwd":"/a","cols":0,"rows":"x"}'), { cwd: "/a", cols: null, rows: null, where: null });
+  assert.deepEqual(parseHcGet(t9), { cwd: "/Users/x/proj", cols: 96, rows: 43, where: "P / 1", labels: { where: "P / 1" } });
+  assert.deepEqual(parseHcGet('{"cwd":"/a","cols":0,"rows":"x"}'), { cwd: "/a", cols: null, rows: null, where: null, labels: {} });
+  assert.deepEqual(parseHcGet('{"cwd":"/a","labels":{"mt3k.panel":"1","n":5,"x":null}}').labels, { "mt3k.panel": "1" });
   assert.equal(parseHcGet("nope"), null);
 });
 
@@ -264,7 +268,7 @@ test("createHerdr: get usa argv fijo y valida el id", async () => {
   const calls = [];
   const exec = (_f, argv, _o, cb) => { calls.push(argv); cb(null, '{"cwd":"/a","cols":80,"rows":24}'); };
   const h = createHerdr({ probe: async () => true, hcPath: "/bin/hc", exec });
-  assert.deepEqual(await h.get("hc:t9"), { ok: true, cwd: "/a", cols: 80, rows: 24, where: null });
+  assert.deepEqual(await h.get("hc:t9"), { ok: true, cwd: "/a", cols: 80, rows: 24, where: null, labels: {} });
   assert.deepEqual(calls, [["get", "t9", "--json"]]);
   assert.deepEqual(await h.get("hc:-x"), { ok: false, err: "terminal inválido" });
 });
@@ -347,4 +351,114 @@ test("N7: HC_SOCKET absoluto a un socket existente se respeta; si no, se ignora"
     assert.equal(coreSocketCandidates({ env: { HOME: "/h", HC_SOCKET: "relativo.sock" } }).length, 1);
     srv.close(() => { rmSync(dir, { recursive: true, force: true }); resolve(); });
   }));
+});
+
+// --- crear / cerrar terminales del panel (launch-backend) ---
+
+const mkHerdr = (replies, { alive = true, platform = "darwin" } = {}) => {
+  const calls = [];
+  const exec = (_f, argv, opts, cb) => {
+    calls.push({ argv, opts });
+    const r = replies.shift() ?? { out: "{}" };
+    if (r.err) { const e = new Error("x"); e.code = r.err; cb(e, r.out ?? ""); } else cb(null, r.out);
+  };
+  return { h: createHerdr({ hcPath: "/bin/hc", exec, platform, probe: async () => alive }), calls };
+};
+
+test("run: argv fijo con --label y -- ; la dirección sale del JSON de hc", async () => {
+  const { h, calls } = mkHerdr([{ out: '{"address":"t7","agent":"env","name":"mt3k-x"}' }]);
+  const r = await h.run({ argv: ["/usr/bin/env", "PATH=/a", "/b/claude", "--settings", "{\"a\":1}", "-x"], cwd: "/tmp/p", name: "mt3k-claude-abc123-x1y" });
+  assert.deepEqual(r, { ok: true, address: "t7", id: "hc:t7" });
+  assert.deepEqual(calls[0].argv, ["run", "--bg", "--no-parent", "--json", "--name", "mt3k-claude-abc123-x1y", "--cwd", "/tmp/p", "--label", "mt3k.panel=1", "--", "/usr/bin/env", "PATH=/a", "/b/claude", "--settings", '{"a":1}', "-x"]);
+  assert.ok(calls[0].opts.timeout <= 8000 && calls[0].opts.maxBuffer <= 256 * 1024);
+});
+
+test("run: shell = sin `--`; entradas inválidas no ejecutan nada", async () => {
+  const { h, calls } = mkHerdr([{ out: '{"address":"t2"}' }]);
+  assert.equal((await h.run({ argv: [], cwd: "/tmp/p", name: "mt3k-shell-abc123-001" })).ok, true);
+  assert.equal(calls[0].argv.includes("--"), false);
+  for (const bad of [
+    { argv: [], cwd: "rel/dir", name: "ok-name" },
+    { argv: [], cwd: "/tmp/p", name: "-flag" },
+    { argv: [], cwd: "/tmp/p", name: "UPPER" },
+    { argv: [], cwd: "/tmp/p", name: "a".repeat(33) },
+    { argv: ["x\0y"], cwd: "/tmp/p", name: "ok-name" },
+    { argv: [""], cwd: "/tmp/p", name: "ok-name" },
+    { argv: [1], cwd: "/tmp/p", name: "ok-name" },
+    { argv: new Array(65).fill("a"), cwd: "/tmp/p", name: "ok-name" },
+    { argv: "ls", cwd: "/tmp/p", name: "ok-name" },
+  ]) assert.equal((await h.run(bad)).ok, false, JSON.stringify(bad).slice(0, 60));
+  assert.equal(calls.length, 1);
+});
+
+test("run: fallo de hc, name_taken, JSON sin dirección y core caído", async () => {
+  let m = mkHerdr([{ err: 1, out: '{"error":{"kind":"name_taken"}}' }]);
+  const taken = await m.h.run({ argv: [], cwd: "/tmp/p", name: "ok" });
+  assert.deepEqual([taken.ok, taken.nameTaken], [false, true]);
+  m = mkHerdr([{ err: 1, out: '{"error":{"kind":"spawn_failed"}}' }]);
+  assert.deepEqual([(await m.h.run({ argv: [], cwd: "/tmp/p", name: "ok" })).nameTaken], [false]);
+  m = mkHerdr([{ out: '{"address":"../etc"}' }]);
+  assert.equal((await m.h.run({ argv: [], cwd: "/tmp/p", name: "ok" })).ok, false);
+  m = mkHerdr([{ out: "nope" }]);
+  assert.equal((await m.h.run({ argv: [], cwd: "/tmp/p", name: "ok" })).ok, false);
+  m = mkHerdr([], { alive: false });
+  assert.deepEqual(await m.h.run({ argv: [], cwd: "/tmp/p", name: "ok" }), { ok: false, err: "hc no disponible", code: "NOCORE" });
+  assert.equal(m.calls.length, 0); // sin core NO se ejecuta hc (no arranca uno)
+  assert.equal(parseHcAddress('{"address":"t12b"}'), "t12b");
+  assert.equal(isNameTaken('{"error":{"kind":"name_taken"}}'), true);
+  assert.equal(isNameTaken("x"), false);
+});
+
+test("coreUp: POSIX = sondeo; win32 = `hc server status`; sin hc = false", async () => {
+  assert.equal(await mkHerdr([], { alive: true }).h.coreUp(), true);
+  assert.equal(await mkHerdr([], { alive: false }).h.coreUp(), false);
+  const w = mkHerdr([{ out: '{"core":{"id":"x"},"live":0}' }], { platform: "win32" });
+  assert.equal(await w.h.coreUp(), true);
+  assert.deepEqual(w.calls[0].argv, ["server", "status", "--json"]);
+  assert.equal(await mkHerdr([{ err: 1, out: "" }], { platform: "win32" }).h.coreUp(), false);
+  assert.equal(await createHerdr({ hcPath: null }).coreUp(), false);
+});
+
+test("markOwned: hc label <t> mt3k.panel=1", async () => {
+  const { h, calls } = mkHerdr([{ out: "{}" }]);
+  assert.deepEqual(await h.markOwned("hc:t4"), { ok: true });
+  assert.deepEqual(calls[0].argv, ["label", "t4", "--json", "mt3k.panel=1"]);
+  assert.equal((await h.markOwned("hc:-x")).ok, false);
+});
+
+test("killOwned: solo con etiqueta mt3k.panel=1 releída; kill y luego rm", async () => {
+  const owned = '{"address":"t4","cwd":"/a","labels":{"mt3k.panel":"1"}}';
+  let m = mkHerdr([{ out: owned }, { out: "{}" }, { out: '{"removed":"t4"}' }]);
+  assert.deepEqual(await m.h.killOwned("hc:t4"), { ok: true, removed: true });
+  assert.deepEqual(m.calls.map((c) => c.argv), [["get", "t4", "--json"], ["kill", "t4", "--json"], ["rm", "t4", "--json"]]);
+  // rm falla (aún no terminado): sigue siendo éxito
+  m = mkHerdr([{ out: owned }, { out: "{}" }, { err: 1, out: "" }]);
+  assert.deepEqual(await m.h.killOwned("hc:t4"), { ok: true, removed: false });
+  // terminal ajeno (sin etiqueta o con otro valor): ni kill ni rm
+  for (const labels of ["{}", '{"mt3k.panel":"0"}', '{"where":"x"}']) {
+    m = mkHerdr([{ out: `{"address":"t5","cwd":"/a","labels":${labels}}` }]);
+    const r = await m.h.killOwned("hc:t5");
+    assert.deepEqual([r.ok, r.status], [false, 400]);
+    assert.equal(m.calls.length, 1);
+  }
+  // desaparecido / id inválido / core caído
+  m = mkHerdr([{ err: 3, out: "" }]);
+  assert.deepEqual([(await m.h.killOwned("hc:t9")).status], [404]);
+  assert.deepEqual([(await m.h.killOwned("nope")).status], [400]);
+  m = mkHerdr([], { alive: false });
+  assert.deepEqual([(await m.h.killOwned("hc:t9")).status], [404]);
+  assert.equal(m.calls.length, 0);
+  // kill falla → 500 y no se intenta rm
+  m = mkHerdr([{ out: owned }, { err: 1, out: "" }]);
+  assert.deepEqual([(await m.h.killOwned("hc:t4")).status], [500]);
+  assert.equal(m.calls.length, 2);
+});
+
+test("findHerdrApp: ~/.local/bin primero, luego PATH absoluto; ignora relativos y '.'", () => {
+  const ok = (p) => p === "/h/.local/bin/herdr-app" || p === "/opt/bin/herdr-app" || p === "rel/herdr-app";
+  assert.equal(findHerdrApp({ home: "/h", pathEnv: "/opt/bin", platform: "darwin", exists: ok }), "/h/.local/bin/herdr-app");
+  assert.equal(findHerdrApp({ home: "/zz", pathEnv: "rel:.:/opt/bin", platform: "darwin", exists: ok }), "/opt/bin/herdr-app");
+  assert.equal(findHerdrApp({ home: "/zz", pathEnv: "rel:.", platform: "darwin", exists: ok }), null);
+  const win = (p) => p === "C:\\L\\Programs\\herdr-app\\herdr-app.exe";
+  assert.equal(findHerdrApp({ platform: "win32", localAppData: "C:\\L", pathEnv: "", exists: win }), "C:\\L\\Programs\\herdr-app\\herdr-app.exe");
 });
