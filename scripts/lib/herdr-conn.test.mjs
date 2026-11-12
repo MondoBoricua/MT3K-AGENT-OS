@@ -4,6 +4,9 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createHerdrConn, encodeObserverWrite } from './herdr-conn.mjs';
+// Las pruebas no dependen del entorno de quien las corre (sesión de Herdr o directorios XDG heredados).
+for (const k of ["HC_SESSION", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"]) delete process.env[k];
+
 
 function frame(channel, kind, payload = Buffer.alloc(0)) {
   if (!Buffer.isBuffer(payload)) payload = Buffer.from(JSON.stringify(payload));
@@ -207,7 +210,7 @@ test('no DATA and no hello have bounded deadlines and clean shutdown', async t =
 });
 test('spawn exceptions return failures; exponential backoff is capped at 30s', async t => {
   let time = 0, attempts = 0;
-  const conn = createHerdrConn({ spawn() { attempts++; throw new Error('missing hc'); }, now: () => time });
+  const conn = createHerdrConn({ spawn() { attempts++; throw new Error('missing hc'); }, now: () => time, locateCore: async () => ({}) });
   t.after(() => conn.close());
   for (const wait of [1000, 2000, 4000, 8000, 16000, 30000, 30000]) {
     assert.equal((await conn.snapshot('t9')).ok, false);

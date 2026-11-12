@@ -25,6 +25,9 @@ import {
   parseHcGet,
   parseHcLs,
 } from "./herdr.mjs";
+// Las pruebas no dependen del entorno de quien las corre (sesión de Herdr o directorios XDG heredados).
+for (const k of ["HC_SESSION", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"]) delete process.env[k];
+
 
 // Muestra real de `hc ls --json` en esta Mac (2026-11-11, hc 0.1.20); solo paths locales.
 const LS_SAMPLE = `{"hidden_finished":0,"terminals":[{"address":"t4","agent":"zsh","cwd":"/Users/mondo","state":"live","turn":0},{"address":"t5","agent":"zsh","cwd":"/Users/mondo","state":"live","turn":0},{"address":"t9","agent":"claude-code","cwd":"/Users/mondo","state":"live","status":"done","turn":7,"where":"MT3K-AGENT-OS / 1"},{"address":"t11","agent":"claude-code","cwd":"/Users/mondo/Developer/YOUTUBE","state":"live","status":"idle","turn":0,"where":"YOUTUBE / 1"},{"address":"t12","agent":"claude-code","cwd":"/Users/mondo/.proxmox","state":"live","status":"idle","turn":0,"where":"PROXMOX / 1"}]}`;

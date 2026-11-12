@@ -9,6 +9,9 @@ import {
   parseAppSpaces,
   parseAppTerminal,
 } from "./herdr-launch.mjs";
+// Las pruebas no dependen del entorno de quien las corre (sesión de Herdr o directorios XDG heredados).
+for (const k of ["HC_SESSION", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"]) delete process.env[k];
+
 
 const APP = "/h/.local/bin/herdr-app";
 const LS = JSON.stringify({
