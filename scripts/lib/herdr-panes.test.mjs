@@ -5,6 +5,7 @@ import {
   containsHerdrId,
   createHerdrPanes,
   herdrKeyArgs,
+  herdrOccupies,
   mergeHerdrPanes,
   streamFrame,
   toPane,
@@ -498,4 +499,29 @@ test("hc(): el adaptador, o null con MT3K_HERDR=0 / sin hc", () => {
   assert.equal(createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr }).hc(), herdr);
   assert.equal(createHerdrPanes({ enabled: false }).hc(), null);
   assert.equal(createHerdrPanes({ findHc: () => null }).hc(), null);
+});
+
+test("invalidate durante un refresh en vuelo: el resultado viejo no repuebla la caché", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let call = 0;
+  const herdr = { async list() { call++; if (call === 1) { await gate; return ROWS.slice(0, 1); } return ROWS.slice(0, 2); } };
+  const p = createHerdrPanes({ findHc: () => "/x/hc", createHerdr: () => herdr, now: () => 5000 });
+  const stale = p.refresh();
+  await new Promise((r) => setImmediate(r));
+  p.invalidate(); // p. ej. justo después de crear un terminal
+  const fresh = await p.refresh(); // consulta nueva, no reutiliza la vieja
+  assert.deepEqual(fresh.map((r) => r.id), ["hc:t4", "hc:t9"]);
+  release();
+  assert.equal((await stale).length, 1); // quien esperaba la vieja la recibe
+  assert.deepEqual(p.cachedRows().map((r) => r.id), ["hc:t4", "hc:t9"]); // pero la caché sigue siendo la nueva
+});
+
+test("herdrOccupies: mismo agente + misma carpeta normalizada; otra carpeta/agente o carpeta ilegible no", () => {
+  const norm = (p) => { if (p === "BAD") throw new Error("x"); return p.replace(/\/+$/, ""); };
+  const rows = [{ agent: "claude", cwd: "/w/p/" }, { agent: "codex", cwd: "/w/q" }, { agent: "claude", cwd: "BAD" }, { agent: "claude", cwd: "" }];
+  assert.equal(herdrOccupies(rows, "claude", "/w/p", norm), true);
+  assert.equal(herdrOccupies(rows, "claude", "/w/q", norm), false);
+  assert.equal(herdrOccupies(rows, "codex", "/w/q", norm), true);
+  assert.equal(herdrOccupies([], "claude", "/w/p", norm), false);
 });

@@ -91,7 +91,7 @@ import { gitRefs } from "./lib/git-refs.mjs";
 import { createKillTombstones } from "./lib/kill-tombstones.mjs";
 import { createLedgerStore } from "./lib/ledger-store.mjs";
 import { isHerdrId } from "./lib/herdr.mjs";
-import { containsHerdrId, createHerdrPanes, herdrKeyArgs, herdrUnavailableBody } from "./lib/herdr-panes.mjs";
+import { containsHerdrId, createHerdrPanes, herdrOccupies, herdrKeyArgs, herdrUnavailableBody } from "./lib/herdr-panes.mjs";
 import { createHerdrLauncher, herdrLaunchArgv } from "./lib/herdr-launch.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1108,7 +1108,9 @@ async function resumeProbe(def, agentId, cwd) {
     const alreadyOpen = panes.some((pane) =>
       tildify(realDir(expand(pane.cwd))) === normalizedCwd
       && pane.comms.some((comm) => def.proc.some((name) => procMatches(comm, name)))
-    );
+    )
+      // un terminal vivo de Herdr (lista cacheada, sin llamar a hc) también ocupa agente + carpeta
+      || herdrOccupies(herdrPanes.cachedRows(), agentId, normalizedCwd, (p) => tildify(realDir(expand(p))));
     return { resumeArgs, alreadyOpen, hasHistory: hasResumableHistory(agentId, cwd, { realDir }) };
   } catch {
     return { resumeArgs, alreadyOpen: false, hasHistory: false };

@@ -93,6 +93,7 @@ export function createHerdrLauncher({
     const h = getHerdr();
     if (!h) return { installed: false, running: false, app: false };
     const running = await h.coreUp().catch(() => false);
+    if (!running) return { installed: true, running: false, app: false }; // sin core NO se invoca herdr-app
     const appPath = findApp();
     const app = appPath ? await appUp(appPath) : false;
     return { installed: true, running, app };
@@ -120,7 +121,8 @@ export function createHerdrLauncher({
       const name = launchName(agentId, cwd, i === 0 ? nameSuffix : undefined);
       const r = await h.run({ argv, cwd, name });
       if (r.ok) return { ok: true, address: r.address, via: "core", name };
-      if (!r.nameTaken) return { ok: false, err: r.err };
+      // NOCORE = el adaptador no ejecutó hc (sondeo previo falló): seguro que no se despachó nada
+      if (!r.nameTaken) return { ok: false, err: r.err, notDispatched: r.code === "NOCORE" };
     }
     return { ok: false, err: "nombre de terminal ocupado" };
   }
@@ -146,7 +148,8 @@ export function createHerdrLauncher({
     }
     if (!made) {
       const c = await viaHc(h, input);
-      if (!c.ok) return { ok: false, reason: (await h.coreUp()) ? "error" : "no-core", err: c.err };
+      // "no-core" (→ el servidor abre en tmux) SOLO si es seguro que hc no recibió el comando; si no, "error"
+      if (!c.ok) return { ok: false, reason: c.notDispatched ? "no-core" : "error", err: c.err };
       made = c;
     }
     h.invalidate();

@@ -46,6 +46,17 @@ export function containsHerdrId(value, depth = 0) {
   return Object.values(value).some((v) => containsHerdrId(v, depth + 1));
 }
 
+/**
+ * ¿Hay un terminal de Herdr vivo de este agente en esta carpeta? (ocupación para decidir si reanudar una conversación).
+ * `normalize` lleva ambas carpetas a la misma forma (realpath + tilde); una carpeta ilegible no cuenta como ocupada.
+ */
+export function herdrOccupies(rows, agentId, normalizedCwd, normalize) {
+  return rows.some((r) => {
+    if (r.agent !== agentId || !r.cwd) return false;
+    try { return normalize(r.cwd) === normalizedCwd; } catch { return false; }
+  });
+}
+
 /** Fila normalizada de `list()` → pane del panel. Los panes tmux no llevan `backend` (ausencia = tmux). */
 export function toPane(row, tildify = (p) => p) {
   const status = row.status ?? "idle";
@@ -115,6 +126,7 @@ export function createHerdrPanes({
   let hcCheckedAt = -Infinity;
   let cache = { at: -Infinity, rows: [] };
   let inflight = null;
+  let generation = 0; // sube con cada invalidate(): un resultado de una generación anterior no toca la caché
 
   // Con MT3K_HERDR=0 ni se busca hc. Con hc ausente tampoco hay trabajo (se reintenta cada 30 s).
   function client() {
@@ -179,22 +191,26 @@ export function createHerdrPanes({
     if (!h) return [];
     if (now() - cache.at < (force ? HERDR_FORCE_MIN_MS : ttlMs)) return cache.rows;
     if (inflight) return inflight;
-    inflight = (async () => {
+    const myGen = generation;
+    const mine = (async () => {
       let rows = [];
       try { rows = await enrich(h, await h.list()); } catch { rows = []; }
       if (rows.length === 0 && (conn || details.size) && typeof h.coreAlive === "function" && !(await h.coreAlive())) {
         dropState();
         details.clear();
       }
-      cache = { at: now(), rows };
+      if (myGen === generation) cache = { at: now(), rows };
       return rows;
-    })().finally(() => { inflight = null; });
-    return inflight;
+    })().finally(() => { if (inflight === mine) inflight = null; });
+    inflight = mine;
+    return mine;
   }
 
   /** Olvida la lista cacheada (y las cachés del adaptador): tras crear o cerrar un terminal se lee de nuevo. */
   function invalidate() {
+    generation++;
     cache = { at: -Infinity, rows: [] };
+    inflight = null; // el siguiente refresh() hace una consulta nueva en vez de reutilizar la anterior
     herdr?.invalidate?.();
   }
 
@@ -298,6 +314,8 @@ export function createHerdrPanes({
     enabled,
     refresh,
     invalidate,
+    /** Lista ya cacheada, sin consultar hc (para decisiones que nunca deben tocar el core). */
+    cachedRows: () => cache.rows,
     /** Adaptador hc (o null con MT3K_HERDR=0 / sin hc): lo usa el lanzador de lib/herdr-launch.mjs. */
     hc: client,
     has,

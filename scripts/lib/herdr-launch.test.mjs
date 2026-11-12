@@ -191,9 +191,27 @@ test("launch sin binario herdr-app: va directo a hc run sin ejecutar nada de la 
 
 test("status: installed/running/app sin arrancar nada", async () => {
   assert.deepEqual(await mk({ hc: null }).status(), { installed: false, running: false, app: false });
-  assert.deepEqual(await mk({ hc: fakeHc({ up: false }), app: fakeApp({ status: { err: 2 } }) }).status(), { installed: true, running: false, app: false });
+  const noCoreApp = fakeApp({ status: { out: "{}" } });
+  assert.deepEqual(await mk({ hc: fakeHc({ up: false }), app: noCoreApp }).status(), { installed: true, running: false, app: false });
+  assert.equal(noCoreApp.calls.length, 0); // sin core: ninguna invocación de herdr-app
+  assert.deepEqual(await mk({ hc: fakeHc(), app: fakeApp({ status: { err: 2 } }) }).status(), { installed: true, running: true, app: false });
   assert.deepEqual(await mk({ hc: fakeHc(), app: fakeApp({ status: { out: "{}" } }) }).status(), { installed: true, running: true, app: true });
   const app = fakeApp({});
   assert.deepEqual(await mk({ hc: fakeHc(), app, appPath: null }).status(), { installed: true, running: true, app: false });
   assert.equal(app.calls.length, 0);
+});
+
+test("fallo tras despachar hc run (timeout / respuesta ilegible / core muerto después) → error, NUNCA no-core", async () => {
+  for (const failure of [
+    { ok: false, err: "no se pudo crear el terminal", nameTaken: false },
+    { ok: false, err: "hc no devolvió el terminal" },
+  ]) {
+    let up = true;
+    const hc = { ...fakeHc({ runs: [failure] }), coreUp: async () => { const v = up; up = false; return v; } }; // el core "muere" tras el despacho
+    const r = await mk({ hc, app: fakeApp({}) }).launch(INPUT);
+    assert.deepEqual([r.ok, r.reason], [false, "error"]);
+  }
+  // solo cuando hc ni se ejecutó (sondeo previo falló) es seguro caer a tmux
+  const safe = fakeHc({ runs: [{ ok: false, err: "hc no disponible", code: "NOCORE" }] });
+  assert.equal((await mk({ hc: safe, app: fakeApp({}) }).launch(INPUT)).reason, "no-core");
 });
