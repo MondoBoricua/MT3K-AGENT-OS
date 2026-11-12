@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentRow, PaneRef, PaneEvent } from "../lib/api";
 import { sendToPane, sendKey, launchAgent, resumableFor, killPane, getToken, getMacros, getHosts, uploadFile, UPLOAD_MAX_MB, paneResize, setPaneLabel, webStart, webRestart, webStop, agentKey, type FedHost } from "../lib/api";
 import { applyPaneEvent } from "../lib/pane-stream";
-import { HERDR_NOT_KILLABLE_TITLE, HERDR_UNAVAILABLE_TITLE, isHerdrPane, isHerdrPaneId, isPaneKillable } from "../lib/herdr-pane";
+import { HERDR_UNAVAILABLE_TITLE, KILL_CONFIRM_HERDR_FOREIGN, isHerdrPane, isHerdrPaneId, killPlan, needsForceRetry } from "../lib/herdr-pane";
 import { HerdrBadge } from "./HerdrBadge";
 import { usePaneStream } from "../lib/use-pane-stream";
 import { attachKind } from "../lib/attach-kind";
@@ -526,10 +526,16 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
   }, [aKey, agent, panes.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // kill a tmux session from the panel (confirm first — it takes the agent down with it)
-  const kill = async (pid: string) => {
-    const herdrTarget = isHerdrPaneId(pid);
-    if (!window.confirm(herdrTarget ? "¿Cerrar esta terminal de Herdr? El agente que corre ahí se cierra." : "¿Matar esta sesión de tmux? El agente que corre ahí se cierra.")) return;
-    const r = await killPane(pid, host);
+  const kill = async (pane: PaneRef) => {
+    const pid = pane.paneId;
+    const plan = killPlan(pane);
+    if (!window.confirm(plan.confirm)) return;
+    let r = await killPane(pid, host, plan.force);
+    // the label changed since the list was read: the server wants the "not opened by the panel" confirmation
+    if (needsForceRetry(r, plan.force)) {
+      if (!window.confirm(KILL_CONFIRM_HERDR_FOREIGN)) return;
+      r = await killPane(pid, host, true);
+    }
     if (r?.ok) {
       setKilled((k) => [...k, pid]);
       if (launched?.paneId === pid) setLaunched(null);
@@ -642,7 +648,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                 ＋ nueva
               </button>
             )}
-            <button onClick={() => kill(activePane.paneId)} disabled={!isPaneKillable(activePane)} title={!isPaneKillable(activePane) ? HERDR_NOT_KILLABLE_TITLE : isHerdrPane(activePane) ? "cerrar esta terminal de Herdr" : "matar esta sesión de tmux"}
+            <button onClick={() => kill(activePane)} title={killPlan(activePane).title}
               className="rounded-lg border border-red-400/25 px-2.5 py-1 font-mono text-[10px] text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-red-400/25 disabled:hover:bg-transparent disabled:hover:text-red-300/70">
               ⏻ matar
             </button>
@@ -946,7 +952,7 @@ export default function AgentTerminalSheet({ agent, initialPaneId, projects = []
                   className="shrink-0 rounded-xl border border-ink-line px-3 font-mono text-xs text-white/55 transition hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-ink-line disabled:hover:text-white/55">
                   ✎
                 </button>
-                <button onClick={() => kill(p.paneId)} disabled={!isPaneKillable(p)} title={!isPaneKillable(p) ? HERDR_NOT_KILLABLE_TITLE : "matar esta sesión"}
+                <button onClick={() => kill(p)} title={isHerdrPane(p) ? killPlan(p).title : "matar esta sesión"}
                   className="shrink-0 rounded-xl border border-red-400/25 px-3 font-mono text-xs text-red-300/70 transition hover:border-red-400/60 hover:bg-red-400/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-red-400/25 disabled:hover:bg-transparent disabled:hover:text-red-300/70">
                   ✕
                 </button>

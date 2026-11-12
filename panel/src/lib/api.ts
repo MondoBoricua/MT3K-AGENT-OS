@@ -63,7 +63,8 @@ export const askQuery = (projectId: string, q: string) => jpost<{ ok: boolean; a
 export const sendToPane = (paneId: string, text: string, enter = true, host?: string) => jpost<{ ok: boolean; paneId?: string; err?: string }>(`/api/send${hostQ(host)}`, { paneId, text, enter });
 export const getPane = (paneId: string, host?: string) => jget<{ ok: boolean; content: string; alternate?: boolean; mouse_sgr?: boolean }>(`/api/pane?id=${encodeURIComponent(paneId)}${host ? `&host=${encodeURIComponent(host)}` : ""}`);
 export const sendKey = (paneId: string, key: string, host?: string) => jpost<{ ok: boolean; paneId?: string; key?: string; err?: string }>(`/api/key${hostQ(host)}`, { paneId, key });
-export const killPane = (paneId: string, host?: string) => jpost<{ ok: boolean; err?: string }>(`/api/kill${hostQ(host)}`, { paneId });
+export const killPane = (paneId: string, host?: string, force?: boolean) =>
+  jpost<{ ok: boolean; err?: string; needsConfirm?: boolean }>(`/api/kill${hostQ(host)}`, force === true ? { paneId, force: true } : { paneId });
 export const launchAgent = (agentId: string, opts: { projectId?: string; cwd?: string; create?: boolean; firstPrompt?: string; host?: string; fresh?: boolean }) => {
   const { host, ...rest } = opts;
   return jpost<{ ok: boolean; paneId?: string; label?: string; session?: string; cwd?: string; err?: string; missingDir?: boolean; resumed?: boolean; reason?: string; fallback?: string; backend?: "herdr"; killable?: boolean; warning?: string }>(`/api/launch${hostQ(host)}`, { agentId, ...rest });
