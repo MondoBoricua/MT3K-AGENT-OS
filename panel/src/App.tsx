@@ -140,9 +140,13 @@ export default function App() {
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | undefined;
     let cancelled = false; // el cleanup del efecto (incl. StrictMode) descarta respuestas en vuelo
-    let latest = 0; // solo la respuesta del último request puede actualizar estado
-    const tick = () => { const id = ++latest; getStatus().then((s) => {
-      if (!s || cancelled || id !== latest) return;
+    let issued = 0; // número de cada request
+    let applied = 0; // el último request cuya respuesta se aplicó: una respuesta más vieja que esa se descarta
+    const tick = () => { const id = ++issued; getStatus().then((s) => {
+      // se acepta cualquier respuesta MÁS NUEVA que la última aplicada (no solo la del último request: con el
+      // servidor más lento que el intervalo, exigir "la última" dejaría el panel sin actualizar nunca)
+      if (!s || cancelled || id <= applied) return;
+      applied = id;
       setAgents(s.agents);
       if (s.projectList) {
         setProjectList(s.projectList);
