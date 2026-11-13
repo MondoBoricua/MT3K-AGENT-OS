@@ -66,7 +66,7 @@ test("server.mjs declara hermes en AGENT_DEFS con paneOnly y proc exacto", () =>
   assert.ok(line, "falta la entrada hermes");
   assert.match(line, /bins: \["hermes"\]/);
   assert.match(line, /paths: \["~\/\.hermes"\]/);
-  assert.match(line, /proc: \["hermes"\]/);
+  assert.match(line, /proc: \["hermes", "\.hermes"\]/); // `.hermes`: comm del Hermes interactivo en macOS
   assert.match(line, /paneOnly: true/);
 });
 

@@ -71,6 +71,7 @@ import {
 } from "./lib/adapters/cli-tmux.mjs";
 import { pickWebStarter, webTokenFromLogText } from "./lib/adapters/web-local.mjs";
 import { mergeLocalAgentDefs, readAgentsLocalFile } from "./lib/agents-local.mjs";
+import { procMatches } from "./lib/proc-matches.mjs";
 import { clampTick, paneStatusFor } from "./lib/pane-status.mjs";
 import { detectState, loadManifests } from "./lib/agent-detect.mjs";
 import { parseWaitBaseline, parseWaitCondition, parseWaitTimeout } from "./lib/wait-until.mjs";
@@ -286,10 +287,13 @@ const AGENT_DEFS = [
   // `zcode` is an sh wrapper that execs node (~/.zcode/runtime/…/zcode.mjs); the TUI then
   // re-titles its processes `zcode-cli`, so that's the live pane/run signal (tmux shows "node").
   { id: "zcode", name: "ZCode", bins: ["zcode"], paths: ["~/.zcode"], proc: ["zcode", "zcode-cli"] },
-  // Hermes: el intérprete python se re-titula `hermes` (comm). Un servicio `hermes … gateway run`
+  // Hermes: en Linux el intérprete python se re-titula `hermes` (comm). Un servicio `hermes … gateway run`
   // corre siempre (PPID 1, sin tty) con el mismo nombre → `paneOnly`: solo un Hermes interactivo
   // dentro de un panel de tmux cuenta como running.
-  { id: "hermes", name: "Hermes", bins: ["hermes"], paths: ["~/.hermes"], proc: ["hermes"], paneOnly: true },
+  // En macOS el Hermes interactivo es un Python propio bajo `~/.hermes/tools/…/bin/python3` (comm con el segmento
+  // `.hermes`, nunca `hermes`); en Linux el comm es `hermes`. Por eso `proc` lleva los dos. El gateway de fondo
+  // tiene el mismo comm, así que sigue haciendo falta `paneOnly`.
+  { id: "hermes", name: "Hermes", bins: ["hermes"], paths: ["~/.hermes"], proc: ["hermes", ".hermes"], paneOnly: true },
   // Junie: el CLI es un bash shim (~/.local/bin/junie) que lanza el binario dentro de junie.app
   // (…/junie.app/Contents/MacOS/junie). El conjunto `running` descarta todo lo que vive en un .app, así
   // que ahí nunca aparece: `paneOnly` hace que cuente como vivo cuando un pane de tmux lo tiene en su
@@ -326,7 +330,6 @@ function refreshAgentDefsFromLocal() {
 refreshAgentDefsFromLocal();
 const base = (c) => (c || "").split("/").pop();
 const tildify = (p) => (p && p.startsWith(homedir()) ? "~" + p.slice(homedir().length) : p);
-const procMatches = (comm, proc) => comm.split("/").some((segment) => segment === proc || segment.startsWith(proc + "-"));
 const resumeLaunchReservations = new Set();
 const RESUME_HOLD_MS = 8000;
 // tmux reports the physical cwd (/private/tmp, not /tmp): compare real paths, not lexical ones
