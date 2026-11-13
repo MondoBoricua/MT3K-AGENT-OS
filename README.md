@@ -17,7 +17,7 @@ Your "shared brain": each project is graphed once, then the panel shows its know
 
 <table align="center">
   <tr>
-    <td align="center"><img src="img/agents-view.png" alt="Agents View: mission-control wall with every agent CLI, live sessions and waiting states" width="420"></td>
+    <td align="center"><img src="img/agents-view.png" alt="Agents View: mission-control wall with every agent CLI, live tmux and Herdr sessions (herdr badge) and waiting states" width="420"></td>
     <td align="center"><img src="img/skills.png" alt="Skills view: every SKILL.md in your canon, searchable" width="420"></td>
   </tr>
   <tr>
@@ -53,6 +53,22 @@ Your "shared brain": each project is graphed once, then the panel shows its know
 
 Herdr is an independent project ([herdr.dev](https://herdr.dev)); MT3K Agent OS is not affiliated
 with it.
+
+<p align="center">
+  <a href="https://youtu.be/ZGUh0XgPQKw"><img src="img/trailer-herdr-update.jpg" alt="Trailer: MT3K Agent OS, Herdr Update (45 s, YouTube)" width="640"></a><br>
+  <sub>▶ Trailer (45 s). The interface in the trailer is a motion recreation; the screenshots below are the real panel.</sub>
+</p>
+
+<table align="center">
+  <tr>
+    <td align="center"><img src="img/mosaic-herdr.png" alt="Terminal mosaic 2x2: Codex, Hermes and a shell running in Herdr (herdr badge) next to a tmux shell, each tile with its own status" width="560"></td>
+    <td align="center"><img src="img/settings-herdr-alerts.png" alt="Settings: Abrir terminales con (tmux | Herdr) and the Alertas sonoras section with volume and test buttons" width="300"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Mosaic: Herdr and tmux sessions side by side, in colour</sub></td>
+    <td align="center"><sub>Settings: where sessions open, and sound alerts</sub></td>
+  </tr>
+</table>
 
 ## Support
 
