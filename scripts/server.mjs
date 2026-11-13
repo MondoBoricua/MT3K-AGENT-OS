@@ -71,7 +71,7 @@ import {
 } from "./lib/adapters/cli-tmux.mjs";
 import { pickWebStarter, webTokenFromLogText } from "./lib/adapters/web-local.mjs";
 import { mergeLocalAgentDefs, readAgentsLocalFile } from "./lib/agents-local.mjs";
-import { procMatches } from "./lib/proc-matches.mjs";
+import { paneBelongsTo, strongProcNames } from "./lib/proc-matches.mjs";
 import { clampTick, paneStatusFor } from "./lib/pane-status.mjs";
 import { detectState, loadManifests } from "./lib/agent-detect.mjs";
 import { parseWaitBaseline, parseWaitCondition, parseWaitTimeout } from "./lib/wait-until.mjs";
@@ -360,7 +360,7 @@ const denyUnlessCap = (res, def, op) => {
 
 // Terminales de Herdr (hc) como panes: solo listar/leer/escribir. MT3K_HERDR=0 lo apaga por completo.
 const herdrPanes = createHerdrPanes({ enabled: process.env.MT3K_HERDR !== "0", color: process.env.MT3K_HERDR_COLOR !== "0", tildify,
-  agentMatchers: () => effectiveAgentDefs.filter((a) => a.proc?.length).map(({ id, proc }) => ({ id, proc })) });
+  agentMatchers: () => effectiveAgentDefs.map(({ id, proc }) => ({ id, proc: strongProcNames(proc) })).filter((m) => m.proc.length) });
 // el único `hc connect` (vistas en color) no sobrevive al servidor
 process.on("exit", () => herdrPanes.close());
 const herdrLauncher = createHerdrLauncher({ getHerdr: () => herdrPanes.hc() });
@@ -613,7 +613,7 @@ async function detectAgentsImpl() {
     // segment match: the agent name may be the basename, a vendor/arch name ("codex-aarch64-…"),
     // or a directory in the executable's path (".../cursor-agent/versions/x.y/node").
     const agentPanes = proc.length
-      ? panes.filter((pn) => pn.comms.some((comm) => proc.some((name) => procMatches(comm, name))))
+      ? panes.filter((pn) => paneBelongsTo(pn.comms, a, normalizedAgentDefs))
           .map((pn) => ({ paneId: pn.paneId, panePid: pn.panePid, label: pn.label, window: pn.window, cwd: pn.cwd }))
       : [];
     const isRunning = isAgentRunning(a, { installed, running, agentPanes });
@@ -1119,7 +1119,7 @@ async function resumeProbe(def, agentId, cwd) {
     const panes = await discoverPanes(descendants);
     const alreadyOpen = panes.some((pane) =>
       tildify(realDir(expand(pane.cwd))) === normalizedCwd
-      && pane.comms.some((comm) => def.proc.some((name) => procMatches(comm, name)))
+      && paneBelongsTo(pane.comms, def, normalizedAgentDefs)
     )
       // un terminal vivo de Herdr (lista cacheada, sin llamar a hc) también ocupa agente + carpeta
       || herdrOccupies(herdrPanes.cachedRows(), agentId, normalizedCwd, (p) => tildify(realDir(expand(p))));
@@ -1621,7 +1621,7 @@ async function api(req, res, path) {
             a.id !== "shell" &&
             Array.isArray(a.proc) &&
             a.proc.length > 0 &&
-            pn.comms.some((comm) => a.proc.some((name) => procMatches(comm, name)))
+            paneBelongsTo(pn.comms, a, normalizedAgentDefs)
         );
         agent = matchedDef ? matchedDef.id : "shell";
       }
