@@ -34,6 +34,26 @@ Your "shared brain": each project is graphed once, then the panel shows its know
   </tr>
 </table>
 
+## What's new — Herdr Update (November 2026)
+
+86 commits, 150 files and +22,486 lines since `b46b1ac` (27 Oct 2026), measured at `4450812`.
+
+- **Herdr terminals** — the panel lists, reads, types into, launches and closes
+  [Herdr](https://herdr.dev) terminals next to your tmux ones, in colour, marked with a `herdr`
+  badge. Settings → **Abrir terminales con** (`tmux` | `Herdr`) picks where new sessions open. See
+  [Herdr terminals](#herdr-terminals).
+- **Alerts** — a sound plus a toast in the browser when an agent **needs input** or **finished**
+  (Settings → **Alertas sonoras**, off by default, per device), and an optional phone push through
+  [ntfy](https://ntfy.sh). See [Alerts](#alerts).
+- **11 agents + Terminal** — **Hermes** and **Junie** are new.
+- **Terminal mosaic** — several live sessions on one screen (2x2, 1x2 or 1x1 with a slot strip),
+  each with its own status; also on foldables and tablets.
+- **Clickable paths and branches** — file paths and branch names printed in a terminal are links:
+  a path opens in Files (with a hover preview on desktop), a branch opens on GitHub when it is pushed.
+
+Herdr is an independent project ([herdr.dev](https://herdr.dev)); MT3K Agent OS is not affiliated
+with it.
+
 ## Support
 
 MT3K Agent OS is free and open source (MIT). If it's useful to you, [**become a patron**](https://www.patreon.com/MT3K) — patrons ($5+) get early-access posts on new MT3K releases and a voice in what ships next.
@@ -126,7 +146,14 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
   directory you pick (a tracked project or any path like `~` — created on demand if missing), with an
   optional **first message** that is pasted once the CLI finishes booting.
 - **⏳ waiting** — a pane whose screen goes still (10s on a prompt, 45s otherwise) is flagged amber
-  everywhere; add `data/notify.json` with an [ntfy](https://ntfy.sh) topic to get a push on your phone.
+  everywhere; see [Alerts](#alerts) for sound, toast and phone push.
+- **▦ mosaic** — the mosaic button on the wall shows several live sessions at once (2x2, 1x2, or
+  1x1 with a slot strip; keys `1`-`4` pick a slot). Every tile has its own status, label and
+  compose box, and expands to the fullscreen terminal.
+- **links in the terminal** — file paths and branch names in a session's output are clickable: a
+  path opens in the Files page of the host where the agent runs (hovering it on desktop previews
+  the file), and a branch that exists on GitHub opens there (`GET /api/git/refs`, read-only, no
+  network).
 - **📣 broadcast** — the wall HUD sends one message to every live session on every federated host.
 - **web-UI agents** — tools whose interactive surface is a local web app (e.g. DeepSeek Harness's
   `dsh web`) are detected by a port probe and offered as an **abrir UI web ↗** link instead of a
@@ -145,10 +172,67 @@ The **Agents View** (and the sidebar list) shows every detected agent CLI. Tap o
   applied — no AI). Same flow as any agent: pick a directory, type from the panel, kill when done.
   Its sessions are the ones named `mt3k-shell-*`.
 
+**Agents the panel knows (11 + Terminal):** Claude Code, Codex, OpenCode, Grok CLI, GitHub Copilot,
+Antigravity, Cursor, ZCode, Hermes, Junie and DeepSeek (web UI), plus the plain **Terminal**. One
+that is not installed on a host shows as offline there. Hermes and Junie count as live only when a
+terminal pane is running them: Hermes keeps a background gateway process and Junie's binary lives
+inside an app bundle, so a bare process match would be wrong for both.
+
 All tmux control is **LAN-only** and goes through `tmux` directly (no shell) — see the API table.
 Each `/api/launch` scrubs agent-contaminating variables (`NO_COLOR`, `CODEX_*`, etc.) from tmux's global environment and sets `COLORTERM=truecolor` on the new session.
 
 Windows enlarged by the panel follow the terminal size again when a client attaches or changes sessions, using appended tmux hooks that preserve existing user hooks.
+
+### Herdr terminals
+
+[Herdr](https://herdr.dev) is a terminal multiplexer with a desktop app; its core (`hc`) keeps
+terminals alive in the background, like tmux does. When `hc` is installed and its core is running,
+the panel treats Herdr terminals as panes:
+
+- **See and type** — they show up under their agent with a `herdr` badge, rendered in colour, and
+  accept text and keys from the compose box like any tmux pane.
+- **Launch** — Settings → **Abrir terminales con** chooses `tmux` (default) or `Herdr` for new
+  sessions, per host. With the Herdr window open, a launch appears there as a tab in the space of
+  that folder, or as a new space when no space has exactly that folder; with only the core running
+  it is created in the background and you watch it from the panel. Same binary, flags and resume
+  rules as a tmux launch.
+- **Close** — terminals the panel opened close with the normal confirmation. A terminal you opened
+  yourself in Herdr asks a second, explicit confirmation first, and the server refuses to close it
+  without it (`POST /api/kill` with `force: true`).
+- **Never starts Herdr** — the panel only talks to a core that is already running. If Herdr is
+  selected but not running, the session opens in tmux and the panel says so; if `hc` is not
+  installed the option is disabled.
+
+Limits: renaming, resizing and restore-after-restart are tmux-only; terminals that live on another
+machine added to Herdr are not listed; a terminal nobody is viewing in Herdr is shown as plain text
+(asking for colour would resize it). An agent that Herdr labels as a shell is recognised from the
+command the terminal runs. Verified with Claude Code, Codex, Junie, Hermes and a plain shell, on
+macOS, and running on a Linux host; Windows is covered by unit tests only.
+
+`MT3K_HERDR=0` turns the integration off; `MT3K_HERDR_COLOR=0` keeps it but always reads plain text.
+
+### Alerts
+
+Three channels, all optional:
+
+- **Sound + toast in the browser** — Settings → **Alertas sonoras** → **Avisar con sonido**. Two
+  short synthesized cues (no audio files): one when a session **needs input**, one when a session
+  that was working **finished**, each with a toast such as `Claude necesita input · <folder>` or
+  `3 agentes terminaron`. Off by default and stored per device; browsers only allow sound after you
+  have touched the page once. At most one cue per kind on each refresh, and none for the "finished"
+  of the session you are looking at. It follows the wall's refresh interval (10 s by default), so it
+  can lag by that much; Herdr sessions also use their turn counter, so short turns are not missed.
+- **Phone push (ntfy)** — copy `data/notify.example.json` to `data/notify.json` with your
+  [ntfy](https://ntfy.sh) topic. The server posts `<agent> espera tu input · <folder>` when a pane
+  waits and `<agent> terminó · <folder>` when it finishes (`"onDone": false` turns the second one
+  off), even when no browser has the panel open.
+- **Your own notifier** — if an executable named `bridge-notify` is on the server's `PATH`, the
+  server runs it when a pane blocks: `bridge-notify <needs_approval|needs_input> --agent <id>
+  --session <name> --pane <id> --reason <rule id> --source panel`. It receives metadata only, never
+  screen text, so you can route it anywhere (a voice alert on a phone, for example). Claude Code
+  and Grok are skipped by default because they have their own hooks (`MT3K_NOTIFY_SKIP_AGENTS`);
+  `MT3K_NOTIFY_DONE=1` also sends `done`; `MT3K_BRIDGE_NOTIFY=0` turns it off. Nothing happens
+  when the executable is absent.
 
 ### Terminal scrollback
 
@@ -178,9 +262,10 @@ agent with extra env/flags on a given host, copy `data/launch.example.json` → 
 Optional per-agent `resumeArgs` (for example, `["--continue"]`) are appended after `args` only when
 that agent has no live tmux pane in the same working directory. If one is already open there, the
 panel omits `resumeArgs` and starts a fresh conversation so two panes never resume the same session.
-For Claude Code, Grok and Cursor they are also skipped in a folder with no saved conversation:
+For Claude Code, Grok, Cursor and Junie they are also skipped in a folder with no saved conversation:
 `claude --continue`, `grok -c` and `cursor-agent --continue` exit with an error there instead of
-starting fresh (see `scripts/lib/resume-history.mjs` for where each one keeps its history). Codex
+starting fresh, and Junie (`["--resume"]`) is only resumed where its own session index has an entry
+for that exact folder (see `scripts/lib/resume-history.mjs` for where each one keeps its history). Codex
 (`["resume", "--last"]`, after the flags), OpenCode (`["-c"]`) and Antigravity (`["--continue"]`)
 start a new conversation when there is nothing to resume, so they get their flags every time.
 When there is something to resume, the launch form shows two buttons, **continuar** and **nueva**
@@ -316,7 +401,7 @@ Las operaciones responden **400** con `err` cuando el adaptador del agente no la
 | `POST /api/refresh` | `graphify update` + re-ingest |
 | `POST /api/add-project` | track a repo (graphs it if needed) + ingest |
 | `GET /api/discover` | graphed repos not yet tracked |
-| `GET /api/agents` | detects installed agent CLIs (Claude Code, Codex, OpenCode, Grok, GitHub Copilot `copilot`, Antigravity `agy`, Cursor `cursor-agent`, ZCode `zcode`), their live tmux panes, and whether each is `launchable` (a real binary found on PATH, `~/.local/bin` or any nvm node's bin dir, not just a config dir); each row also includes `adapter`, `adapterVersion`, and `capabilities` (adapter contract v1) |
+| `GET /api/agents` | detects installed agent CLIs (Claude Code, Codex, OpenCode, Grok, GitHub Copilot `copilot`, Antigravity `agy`, Cursor `cursor-agent`, ZCode `zcode`, Hermes `hermes`, Junie `junie`), their live tmux panes and Herdr terminals (`backend: "herdr"`, ids `hc:tN`), and whether each is `launchable` (a real binary found on PATH, `~/.local/bin` or any nvm node's bin dir, not just a config dir); each row also includes `adapter`, `adapterVersion`, and `capabilities` (adapter contract v1) |
 | `POST /api/launch` | spawns a fresh detached tmux session running an agent's CLI (`{ agentId, projectId? \| cwd? }`) and returns the new `paneId` — binary comes from an allowlist, cwd is a tracked project or a real path like `~` |
 | `GET /api/fs/list\|read\|raw?path=` · `POST /api/fs/write\|upload\|move\|delete` | file browser / manager (`?host=` proxies to a federated host) |
 | `POST /api/send` | types text into an agent's tmux pane (`{ paneId, text, enter? }`) — LAN-only, used by Agents View |
@@ -330,6 +415,7 @@ Las operaciones responden **400** con `err` cuando el adaptador del agente no la
 | `GET /api/restore` · `POST /api/restore` | compares the `data/session-snapshot.json` ledger against live panes/tmux sessions (`missing` + `resumable`), relaunches missing sessions (`{ all: true }` or `{ items: [{ agentId, cwd, sessionName? }] }`, HTTP 409 if a restore is already running) re-applying saved labels, or dismisses missing entries (`{ dismiss: ["<sessionName>", ...] }` or `{ dismissAll: true }`) |
 | `GET /api/restore-config` · `POST /api/restore-config` | reads or updates `data/restore.json` (`{ auto: boolean }`) for automatic restore 20s after server startup |
 | `POST /api/kill` | kills a tmux pane (`{ paneId }`); when it was the session's last pane, removes the session from `data/session-snapshot.json` (through the ledger queue, before answering; then reconciles in the background) |
+| `GET /api/launch-backend` · `POST /api/launch-backend` | reads / sets where new sessions open on this host (`{ backend: "tmux" \| "herdr" }`, stored in `data/launch-backend.json`); the GET also reports whether Herdr is installed, its core is running and its window is reachable. `POST /api/kill` on a Herdr terminal the panel did not open answers **409** `needsConfirm` unless the body carries `force: true` |
 | `POST /api/broadcast` | `{ text }` → pasted into every live agent pane, here and on federated hosts |
 | `GET /api/macros` | quick prompts for the compose bar (`data/macros.json` or defaults) |
 
