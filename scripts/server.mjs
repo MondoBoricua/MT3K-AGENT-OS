@@ -57,7 +57,7 @@ import { isAgentRunning } from "./lib/agent-live.mjs";
 import { WIN32_PS_COMMAND, createWin32ProcessSource, withoutWindowsApps } from "./lib/proc-tree-win32.mjs";
 import { nvmBinDirs } from "./lib/bin-dirs.mjs";
 import { createPaneNotifier } from "./lib/pane-notify.mjs";
-import { createUsageReader } from "./lib/usage.mjs";
+import { createUsageReader, runUsageCli } from "./lib/usage.mjs";
 import { describeAgent, normalizeAgentDefs, requireCapability } from "./lib/adapters.mjs";
 import {
   validatePaneId,
@@ -1483,7 +1483,7 @@ if (readRestoreConfig().auto) {
 const USAGE_TIMEOUT_MS = 90_000;
 const usageReader = createUsageReader({
   findBin: () => (IS_WIN ? null : absBin("agent-usage")), // a bash script: Windows hosts report "not available"
-  exec: async (bin) => run(bin, ["--json"], homedir(), USAGE_TIMEOUT_MS, { PATH: await agentPath() }),
+  exec: async (bin) => runUsageCli(bin, ["--json"], { cwd: homedir(), env: { ...process.env, PATH: await agentPath() }, timeoutMs: USAGE_TIMEOUT_MS }),
 });
 
 async function api(req, res, path) {

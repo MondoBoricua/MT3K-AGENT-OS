@@ -76,20 +76,22 @@ export interface UsageCrossing { accountId: string; window: UsageWindow }
 const windowKey = (accountId: string, w: UsageWindow) => `${accountId}|${w.bucket}|${w.window}`;
 /**
  * Windows that went from below HIGH_PCT to HIGH_PCT or more since the previous report.
- * `prev` null = first report: nothing is announced, only remembered.
+ * `prev` null = first report: nothing is announced, only remembered. A window missing from a
+ * report (its provider failed that time) keeps its last known value, so it is not announced
+ * again when it comes back; only a measured drop below HIGH_PCT arms the warning again.
  */
 export function highCrossings(
   prev: Record<string, number> | null,
   accounts: UsageAccount[],
   now: number,
 ): { crossings: UsageCrossing[]; next: Record<string, number> } {
-  const next: Record<string, number> = {};
+  const next: Record<string, number> = { ...(prev ?? {}) };
   const crossings: UsageCrossing[] = [];
   for (const a of accounts) for (const w of a.windows) {
     if (isExpired(w, now)) continue;
     const key = windowKey(a.id, w);
-    next[key] = w.usedPct;
     if (prev && w.usedPct >= HIGH_PCT && (prev[key] ?? 0) < HIGH_PCT) crossings.push({ accountId: a.id, window: w });
+    next[key] = w.usedPct;
   }
   return { crossings, next };
 }

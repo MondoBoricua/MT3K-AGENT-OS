@@ -1,6 +1,7 @@
 // Subscription quota per agent account, read from the `agent-usage` CLI when the host has it.
 // The CLI is optional (it ships with the agent-bridge skill): without it the panel hides the feature.
 // Everything here is pure or injected, so it runs under node --test with no CLI installed.
+import { spawn as nodeSpawn } from "node:child_process";
 
 const MAX_LABEL = 60;
 const MAX_NOTE = 160;
@@ -105,6 +106,7 @@ export function createUsageReader({ findBin, exec, now = Date.now, ttlMs = 5 * 6
     lastRunAt = now();
     inflight = (async () => {
       try {
+        await null; // an exec that throws synchronously must not clear `inflight` before it is assigned
         const r = await exec(bin);
         // the CLI exits non-zero when one account fails but still prints the rest: parse first
         let parsed = null;
@@ -146,4 +148,40 @@ export function createUsageReader({ findBin, exec, now = Date.now, ttlMs = 5 * 6
       return snapshot();
     },
   };
+}
+
+const KILL_GRACE_MS = 5_000;
+
+/**
+ * Runs the CLI in its own process group and resolves only when it has closed. On timeout, or when
+ * it prints more than `maxBytes`, the whole group is killed: the CLI starts other CLIs, and killing
+ * only the parent would leave them running while the reader starts another measurement. POSIX only.
+ *
+ * @returns {Promise<{ ok: boolean, out: string, err: string }>}
+ */
+export function runUsageCli(bin, args, { cwd, env, timeoutMs = 90_000, maxBytes = 2 * 1024 * 1024, spawn = nodeSpawn, killGroup = (pid) => process.kill(-pid, "SIGKILL") } = {}) {
+  return new Promise((resolve) => {
+    let ch;
+    try { ch = spawn(bin, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] }); }
+    catch (e) { resolve({ ok: false, out: "", err: String(e) }); return; }
+    let out = "", size = 0, stopped = "", settled = false, graceTimer;
+    const finish = (r) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(graceTimer); resolve(r); };
+    const stop = (why) => {
+      if (stopped) return;
+      stopped = why;
+      try { if (ch.pid) killGroup(ch.pid); } catch { try { ch.kill("SIGKILL"); } catch { /* already gone */ } }
+      // a descendant that left the group can keep the pipes open: do not wait for it forever
+      graceTimer = setTimeout(() => finish({ ok: false, out: "", err: stopped }), KILL_GRACE_MS);
+    };
+    const timer = setTimeout(() => stop("timeout"), timeoutMs);
+    const take = (keep) => (d) => {
+      size += d.length;
+      if (size > maxBytes) { stop("salida demasiado grande"); return; }
+      if (keep && !stopped) out += d;
+    };
+    ch.stdout.on("data", take(true));
+    ch.stderr.on("data", take(false));
+    ch.on("error", (e) => finish({ ok: false, out: "", err: String(e) }));
+    ch.on("close", (code) => finish(stopped ? { ok: false, out: "", err: stopped } : { ok: code === 0, out: out.trim(), err: "" }));
+  });
 }

@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createUsageReader, normalizeUsage } from "./usage.mjs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createUsageReader, normalizeUsage, runUsageCli } from "./usage.mjs";
 
 const RAW = {
   claude: {
@@ -163,4 +167,59 @@ test("a first run that fails does not hammer the CLI on every read", async () =>
   assert.equal(state.runs, 1, "reads inside the floor do not run again");
   state.t += 60_000;
   assert.equal(pctOf(await reader.read({ fresh: true })), 5);
+});
+
+test("an exec that throws synchronously does not leave the reader stuck", async () => {
+  const state = { t: 1_000_000, calls: 0 };
+  const reader = createUsageReader({
+    findBin: () => "/bin/agent-usage",
+    exec: () => { state.calls++; if (state.calls === 1) throw new Error("sync"); return Promise.resolve(good(9)); },
+    now: () => state.t,
+  });
+  const first = await reader.read({ fresh: true });
+  assert.deepEqual([first.refreshing, first.err], [false, "agent-usage falló"]);
+  state.t += 60_000;
+  assert.equal(pctOf(await reader.read({ fresh: true })), 9);
+});
+
+const POSIX = process.platform !== "win32";
+function script(body) {
+  const dir = mkdtempSync(join(tmpdir(), "usage-cli-"));
+  const file = join(dir, "fake-usage");
+  writeFileSync(file, `#!/bin/sh\n${body}\n`);
+  chmodSync(file, 0o755);
+  return { dir, file };
+}
+const alive = (marker) => { try { return execFileSync("pgrep", ["-f", marker]).toString().trim().split("\n").filter(Boolean).length; } catch { return 0; } };
+
+test("runUsageCli returns stdout and the exit status", { skip: !POSIX }, async () => {
+  const ok = script(`echo '{"a":1}'; echo noise >&2`);
+  const bad = script(`echo partial; exit 3`);
+  try {
+    assert.deepEqual(await runUsageCli(ok.file, []), { ok: true, out: '{"a":1}', err: "" });
+    assert.deepEqual(await runUsageCli(bad.file, []), { ok: false, out: "partial", err: "" });
+    assert.equal((await runUsageCli(join(ok.dir, "missing"), [])).ok, false);
+  } finally { rmSync(ok.dir, { recursive: true, force: true }); rmSync(bad.dir, { recursive: true, force: true }); }
+});
+
+test("runUsageCli kills the whole process group on timeout", { skip: !POSIX }, async () => {
+  const marker = `usage-test-sleep-${process.pid}-${Date.now()}`;
+  const s = script(`sh -c 'exec -a ${marker} sleep 60' &\nsh -c 'exec -a ${marker} sleep 60' &\nwait`);
+  try {
+    const started = Date.now();
+    const pending = runUsageCli(s.file, [], { timeoutMs: 900 });
+    await new Promise((res) => setTimeout(res, 500));
+    assert.equal(alive(marker), 2, "the descendants are running before the timeout");
+    assert.deepEqual(await pending, { ok: false, out: "", err: "timeout" });
+    assert.ok(Date.now() - started < 3_000, "resolves on close, not on the grace timer");
+    assert.equal(alive(marker), 0, "no descendant survives");
+  } finally { try { execFileSync("pkill", ["-f", marker]); } catch { /* none left */ } rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test("runUsageCli stops a CLI that prints too much", { skip: !POSIX }, async () => {
+  const s = script(`while :; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done`);
+  try {
+    const r = await runUsageCli(s.file, [], { maxBytes: 64 * 1024, timeoutMs: 10_000 });
+    assert.deepEqual(r, { ok: false, out: "", err: "salida demasiado grande" });
+  } finally { rmSync(s.dir, { recursive: true, force: true }); }
 });

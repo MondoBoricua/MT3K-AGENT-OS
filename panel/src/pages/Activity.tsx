@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getLogs } from "../lib/api";
 import { filterEvents, groupByDay, kindCounts, NOISY_KINDS, parseLogs, type ActivityEvent } from "../lib/activity";
 
@@ -36,17 +36,26 @@ export default function Activity() {
   const [limit, setLimit] = useState(PAGE);
   const [allKinds, setAllKinds] = useState(false);
 
+  // the first load, the button and the interval can overlap: only a response newer than the last one
+  // applied is used, and none after the page is gone
+  const issued = useRef(0);
+  const applied = useRef(0);
+  const alive = useRef(true);
   const pull = useCallback(async () => {
+    const id = ++issued.current;
     const r = await getLogs();
+    if (!alive.current || id <= applied.current) return;
+    applied.current = id;
     setLoading(false);
     if (!r) { setFailed(true); return; } // keep what is on screen
     setFailed(false);
     setEvents(parseLogs(r.logs || []));
   }, []);
   useEffect(() => {
+    alive.current = true;
     void pull();
     const iv = setInterval(() => { if (document.visibilityState === "visible") void pull(); }, POLL_MS);
-    return () => clearInterval(iv);
+    return () => { alive.current = false; clearInterval(iv); };
   }, [pull]);
 
   const counts = useMemo(() => kindCounts(events), [events]);

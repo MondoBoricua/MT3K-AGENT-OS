@@ -96,7 +96,16 @@ test("highCrossings treats a new window as starting from zero and ignores expire
     acct("cursor", "cursor", [win({ usedPct: 99, resetsAt: "2026-11-15T04:00:00.000Z" })]),
   ], NOW);
   assert.deepEqual(r.crossings.map((c) => c.accountId), ["agy"]);
-  assert.deepEqual(Object.keys(r.next), ["agy|Gemini 4 Argon|7 días"]);
+  assert.deepEqual(r.next, { "codex|seven_day|7 días": 10, "agy|Gemini 4 Argon|7 días": 88 });
+});
+
+test("highCrossings does not repeat the warning when a window disappears and comes back", () => {
+  const high = highCrossings({ "codex|seven_day|7 días": 80 }, [acct("codex", "codex", [win({ usedPct: 90 })])], NOW);
+  assert.equal(high.crossings.length, 1);
+  const failed = highCrossings(high.next, [acct("codex", "codex", [])], NOW);
+  const back = highCrossings(failed.next, [acct("codex", "codex", [win({ usedPct: 90 })])], NOW);
+  assert.deepEqual([failed.crossings.length, back.crossings.length], [0, 0]);
+  assert.notEqual(failed.next, high.next, "the previous map is not mutated");
 });
 
 test("highCrossings announces again after the window resets and climbs back", () => {
