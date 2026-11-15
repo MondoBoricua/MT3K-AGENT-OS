@@ -250,6 +250,40 @@ Three channels, all optional:
   `MT3K_NOTIFY_DONE=1` also sends `done`; `MT3K_BRIDGE_NOTIFY=0` turns it off. Nothing happens
   when the executable is absent.
 
+### Quotas
+
+When an executable named `agent-usage` is on the server's `PATH`, the panel shows how much of each
+subscription is used and when it resets:
+
+- **Agents View** — a thin bar on the nameplate of each local agent with its busiest window
+  (`36% ↻ sáb 12:51`); two accounts of one agent get one bar each (`work`, `bro`).
+- **Home → Cuotas de los agentes** — every account and every measured window, with **↻ medir** to
+  measure again.
+- **Toast** — once, when an account reaches 85 %.
+
+Green below 50 %, amber from 50 %, red from 85 %. The server runs `agent-usage --json` at most once
+a minute, keeps the result for five and never runs two at once; the panel only reads it, it never
+changes a login. It expects this on stdout, one key per account:
+
+```json
+{ "codex": { "plan": "pro", "windows": [
+  { "bucket": "codex", "window": "7 días", "used_pct": 55, "resets_at": "2026-11-18T12:12:31-04:00", "state": "available" }
+] } }
+```
+
+A window without a numeric `used_pct`, or marked `"applicable": false` or `"informational": true`, is
+left out. The accounts `claude`, `claude-work`, `codex`, `cursor`, `agy`, `agy-bro`, `copilot`,
+`opencode` and `zai` are matched to their agent; any other name is listed on Home only. Without the
+executable (and on Windows) nothing is shown. The quota belongs to the host that runs the panel, so
+agents of federated hosts carry no bar.
+
+### Activity
+
+Every action the panel takes is written to `data/logs/<date>.md` and listed here, newest first and
+grouped by day. One chip per kind of event (`send`, `launch`, `kill`…) hides or shows it; the
+high-volume ones (`waiting`, `key`, `pane-resize`, `done`, `uploads-sweep`) start hidden and the
+choice is remembered per device. The search box matches text, session or date.
+
 ### Terminal scrollback
 
 The live terminal ships up to **1,000 lines** of tmux scrollback and only auto-follows the feed while
@@ -439,6 +473,7 @@ Any of the tmux endpoints accepts `?host=<id>` to target a federated host (see `
 the server forwards the call with that host's own token.
 | `GET /api/skills` | reads `~/.agents/skills` SKILL.md frontmatter |
 | `GET /api/logs` | file-based memory for Memory / Activity |
+| `GET /api/usage[?fresh=1]` | quota per agent account from the optional `agent-usage` CLI (cached; this host only) |
 
 ### Waiting on panes & CLI helpers (`mt3k-wait`, `mt3k-prompt`)
 
