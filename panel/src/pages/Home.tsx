@@ -22,7 +22,7 @@ export default function Home({ manifest, go }: { manifest: Manifest | null; go: 
   const gb = (n: number) => (n / 1073741824).toFixed(0);
 
   useEffect(() => {
-    getLogs().then((r) => {
+    getLogs(3).then((r) => { // six recent events: a few days are enough
       const evs: Ev[] = [];
       for (const log of r?.logs || [])
         for (const line of log.content.split("\n")) {

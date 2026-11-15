@@ -30,7 +30,7 @@
  *   GET|POST /api/restore-config          → read/toggle automatic session restore on startup (data/restore.json)
  *   GET|POST /api/launch-backend          → where NEW sessions are created: tmux (default) | herdr (data/launch-backend.json);
  *                                         herdr only when a core is already running (never started), else tmux + `fallback`
- *   GET  /api/logs                        → data/logs/*.md (Memory / Activity pages)
+ *   GET  /api/logs[?days=N]               → data/logs/*.md, newest first; N = only the newest N days
  *   GET  /api/usage[?fresh=1]             → subscription quota per agent account (needs the agent-usage CLI)
  *   GET  /api/skills                      → reads ~/.agents/skills SKILL.md frontmatter (Skills page)
  *   GET  /api/manifest                    → current panel manifest
@@ -259,9 +259,11 @@ function readSkills() {
   return _skills;
 }
 
-function readLogs() {
+// newest first. `days` keeps only that many of the newest files: the pages that poll need today, not every month
+function readLogs(days = 0) {
   if (!existsSync(LOGS)) return [];
-  return readdirSync(LOGS).filter((f) => f.endsWith(".md")).sort().reverse()
+  const files = readdirSync(LOGS).filter((f) => f.endsWith(".md")).sort().reverse();
+  return (days > 0 ? files.slice(0, days) : files)
     .map((f) => ({ date: f.replace(".md", ""), content: readFileSync(join(LOGS, f), "utf8") }));
 }
 
@@ -1492,7 +1494,11 @@ async function api(req, res, path) {
     return sendJSON(res, 200, existsSync(src) ? readJSON(src) : { projects: [] });
   }
   if (path === "/api/skills") return sendJSON(res, 200, { skills: readSkills() });
-  if (path === "/api/logs") return sendJSON(res, 200, { logs: readLogs() });
+  if (path === "/api/logs") {
+    const raw = new URL(req.url, "http://x").searchParams.get("days") || "";
+    const days = /^[1-9]\d{0,3}$/.test(raw) ? Number(raw) : 0; // absent or invalid → every log, as before
+    return sendJSON(res, 200, { logs: readLogs(days) });
+  }
   if (path === "/api/agents") {
     // flat=1 → this host only (what federating peers request; also stops any federation loop)
     const flat = new URL(req.url, "http://x").searchParams.get("flat");

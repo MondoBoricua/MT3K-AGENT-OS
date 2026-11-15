@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getLogs } from "../lib/api";
-import { filterEvents, groupByDay, kindCounts, NOISY_KINDS, parseLogs, type ActivityEvent } from "../lib/activity";
+import { filterEvents, groupByDay, kindCounts, mergeRecent, NOISY_KINDS, parseLogs, type ActivityEvent } from "../lib/activity";
 
 const HIDDEN_KEY = "mt3k.activity.hidden";
 const PAGE = 200; // events rendered per step: months of logs are tens of thousands of lines
 const POLL_MS = 60_000;
+const POLL_DAYS = 2; // the poll brings the two newest days and merges them: the full history is loaded once
 const TOP_KINDS = 8; // chips shown before "+N tipos": the rare kinds would fill a phone screen
 
 function loadHidden(): Set<string> {
@@ -41,15 +42,19 @@ export default function Activity() {
   const issued = useRef(0);
   const applied = useRef(0);
   const alive = useRef(true);
+  const loadedAll = useRef(false);
   const pull = useCallback(async () => {
     const id = ++issued.current;
-    const r = await getLogs();
+    const full = !loadedAll.current;
+    const r = await getLogs(full ? undefined : POLL_DAYS);
     if (!alive.current || id <= applied.current) return;
     applied.current = id;
     setLoading(false);
     if (!r) { setFailed(true); return; } // keep what is on screen
     setFailed(false);
-    setEvents(parseLogs(r.logs || []));
+    const fresh = parseLogs(r.logs || []);
+    if (full) { loadedAll.current = true; setEvents(fresh); }
+    else setEvents((all) => mergeRecent(all, fresh));
   }, []);
   useEffect(() => {
     alive.current = true;

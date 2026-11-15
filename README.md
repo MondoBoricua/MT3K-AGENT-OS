@@ -472,7 +472,7 @@ Las operaciones responden **400** con `err` cuando el adaptador del agente no la
 Any of the tmux endpoints accepts `?host=<id>` to target a federated host (see `data/hosts.json`) —
 the server forwards the call with that host's own token.
 | `GET /api/skills` | reads `~/.agents/skills` SKILL.md frontmatter |
-| `GET /api/logs` | file-based memory for Memory / Activity |
+| `GET /api/logs[?days=N]` | file-based memory for Memory / Activity; `days` = only the newest N daily logs |
 | `GET /api/usage[?fresh=1]` | quota per agent account from the optional `agent-usage` CLI (cached; this host only) |
 
 ### Waiting on panes & CLI helpers (`mt3k-wait`, `mt3k-prompt`)

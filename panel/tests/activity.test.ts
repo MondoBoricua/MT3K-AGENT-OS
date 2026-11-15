@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterEvents, groupByDay, kindCounts, kindOf, NOISY_KINDS, OTHER_KIND, parseLogs } from "../src/lib/activity.ts";
+import { filterEvents, groupByDay, kindCounts, kindOf, mergeRecent, NOISY_KINDS, OTHER_KIND, parseLogs } from "../src/lib/activity.ts";
 
 const LOGS = [
   { date: "2026-11-14", content: "# log\n- 21:59:41 — send · hc:t20 · \"verifica los logs\"\n- 22:02:54 — key · hc:t20 · SendNow\nnot an event\n" },
@@ -55,4 +55,21 @@ test("groupByDay keeps the order and splits on each change of day", () => {
   const groups = groupByDay(parseLogs(LOGS));
   assert.deepEqual(groups.map((g) => [g.date, g.events.length]), [["2026-11-15", 3], ["2026-11-14", 2]]);
   assert.deepEqual(groupByDay([]), []);
+});
+
+test("mergeRecent replaces the polled days and keeps the older ones", () => {
+  const all = parseLogs(LOGS);
+  const today = parseLogs([{ date: "2026-11-15", content: LOGS[1].content + "- 11:00:00 — kill · %3\n" }]);
+  const merged = mergeRecent(all, today);
+  assert.deepEqual(merged.map((e) => `${e.date} ${e.time}`), ["2026-11-15 11:00:00", "2026-11-15 10:00:00", "2026-11-15 09:48:29", "2026-11-15 08:28:59", "2026-11-14 22:02:54", "2026-11-14 21:59:41"]);
+  assert.equal(all.length, 5, "the full list is not mutated");
+});
+
+test("mergeRecent adds a new day, tolerates an empty poll and a full answer from an older server", () => {
+  const all = parseLogs(LOGS);
+  const tomorrow = parseLogs([{ date: "2026-11-16", content: "- 00:00:05 — launch · codex\n" }]);
+  assert.deepEqual(mergeRecent(all, tomorrow).map((e) => e.date), ["2026-11-16", "2026-11-15", "2026-11-15", "2026-11-15", "2026-11-14", "2026-11-14"]);
+  assert.equal(mergeRecent(all, []), all);
+  assert.deepEqual(mergeRecent(all, parseLogs(LOGS)), all);
+  assert.deepEqual(mergeRecent([], tomorrow), tomorrow);
 });

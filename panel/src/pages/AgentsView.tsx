@@ -60,7 +60,7 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
   useEffect(() => {
     let alive = true;
     const pull = async () => {
-      const r = await getLogs();
+      const r = await getLogs(1); // the feed shows the last lines of today
       if (!alive || !r?.logs?.length) return;
       const lines = r.logs[0].content.split("\n").filter((l) => l.startsWith("- "));
       setFeed(lines.slice(-4).reverse().map((l) => l.replace(/^- /, "")));

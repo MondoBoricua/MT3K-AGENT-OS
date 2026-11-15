@@ -55,3 +55,17 @@ export function groupByDay(events: ActivityEvent[]): { date: string; events: Act
   }
   return groups;
 }
+
+/**
+ * Events of a poll that asked for the newest days only, merged into the full list: the days in
+ * `recent` are replaced, older ones kept. Both lists and the result are newest first.
+ */
+export function mergeRecent(all: ActivityEvent[], recent: ActivityEvent[]): ActivityEvent[] {
+  if (!recent.length) return all;
+  const dates = new Set(recent.map((e) => e.date));
+  const oldest = recent[recent.length - 1].date;
+  const newer = all.filter((e) => e.date > oldest && !dates.has(e.date)); // a day the poll did not bring but is newer: keep
+  const older = all.filter((e) => e.date < oldest);
+  const merged = [...newer, ...recent, ...older];
+  return merged.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)); // stable: order inside a day is kept
+}

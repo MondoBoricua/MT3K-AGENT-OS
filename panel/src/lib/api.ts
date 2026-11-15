@@ -60,7 +60,8 @@ async function jpost<T>(url: string, body: unknown): Promise<T | null> {
 
 export const getSkills = () => jget<{ skills: SkillRow[] }>("/api/skills");
 export const getAgents = () => jget<{ agents: AgentRow[] }>("/api/agents");
-export const getLogs = () => jget<{ logs: LogEntry[] }>("/api/logs");
+// `days` = only the newest N daily logs (the full history is over a megabyte); an older server ignores it and sends all
+export const getLogs = (days?: number) => jget<{ logs: LogEntry[] }>(`/api/logs${days ? `?days=${days}` : ""}`);
 // quota per agent account on this host; `fresh` asks the server to measure again (it keeps a floor between runs)
 export const getUsage = (fresh = false) => jget<UsageReport>(`/api/usage${fresh ? "?fresh=1" : ""}`);
 export const askQuery = (projectId: string, q: string) => jpost<{ ok: boolean; answer: string }>("/api/query", { projectId, q });
