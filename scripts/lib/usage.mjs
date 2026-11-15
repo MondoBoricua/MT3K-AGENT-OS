@@ -179,6 +179,7 @@ export function runUsageCli(bin, args, { cwd, env, timeoutMs = 90_000, maxBytes 
       if (size > maxBytes) { stop("salida demasiado grande"); return; }
       if (keep && !stopped) out += d;
     };
+    ch.stdout.setEncoding("utf8"); // a multi-byte character ("días") split across two chunks must not be mangled
     ch.stdout.on("data", take(true));
     ch.stderr.on("data", take(false));
     ch.on("error", (e) => finish({ ok: false, out: "", err: String(e) }));

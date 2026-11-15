@@ -223,3 +223,11 @@ test("runUsageCli stops a CLI that prints too much", { skip: !POSIX }, async () 
     assert.deepEqual(r, { ok: false, out: "", err: "salida demasiado grande" });
   } finally { rmSync(s.dir, { recursive: true, force: true }); }
 });
+
+test("runUsageCli keeps multi-byte characters that arrive split across chunks", { skip: !POSIX }, async () => {
+  // "í" is C3 AD: the two bytes are written half a second apart
+  const s = script(`printf '{"w":"d\\303'; sleep 0.5; printf '\\255as"}'`);
+  try {
+    assert.deepEqual(await runUsageCli(s.file, []), { ok: true, out: '{"w":"días"}', err: "" });
+  } finally { rmSync(s.dir, { recursive: true, force: true }); }
+});
