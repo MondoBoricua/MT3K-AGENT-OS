@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { Manifest } from "../types";
 import { fmt, langTint, money } from "../lib/ui";
 import { getLogs, getFleetVitals, type HostVitals } from "../lib/api";
+import UsagePanel from "../components/UsagePanel";
 
 interface Ev { date: string; time: string; text: string }
 
@@ -72,6 +73,8 @@ export default function Home({ manifest, go }: { manifest: Manifest | null; go: 
           </div>
         </div>
       )}
+
+      <UsagePanel />
 
       <div className="grid min-h-0 flex-1 gap-7 lg:grid-cols-[1.4fr_1fr]">
         {/* projects */}

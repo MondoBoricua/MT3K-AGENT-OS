@@ -18,6 +18,8 @@ import { MOSAIC_QUERY, useMediaQuery } from "./lib/use-media-query";
 import { paneStatus } from "./lib/pane-status";
 import { diffAlerts, loadSoundSettings, paneAlertKey, summarizeAlerts, type AlertLabel, type AlertState, type PaneSnapshot, type StatusMap } from "./lib/alert-sounds";
 import { installAudioUnlock, playAlertSequence } from "./lib/alert-audio";
+import { useUsage } from "./lib/use-usage";
+import { fmtReset, highCrossings, windowLabel } from "./lib/usage";
 
 const BASE = import.meta.env.BASE_URL;
 const NAV = [
@@ -135,6 +137,21 @@ export default function App() {
   const raiseSoundAlertsRef = useRef(raiseSoundAlerts);
   raiseSoundAlertsRef.current = raiseSoundAlerts;
   useEffect(() => installAudioUnlock(), []);
+
+  // Cuotas: un aviso cuando una cuenta llega al 85 % (desde ahí ese canal deja de recibir trabajo).
+  // El primer reporte solo se recuerda: abrir el panel no repite avisos viejos.
+  const { report: usageReport } = useUsage();
+  const usageSeen = useRef<Record<string, number> | null>(null);
+  useEffect(() => {
+    if (!usageReport?.available || !usageReport.observedAt) return;
+    const now = Date.now();
+    const { crossings, next } = highCrossings(usageSeen.current, usageReport.accounts, now);
+    usageSeen.current = next;
+    for (const c of crossings) {
+      const reset = fmtReset(c.window.resetsAt, now);
+      pushToast(`⚠ ${c.accountId} al ${Math.round(c.window.usedPct)}% · ${windowLabel(c.window)}${reset ? ` · reinicia ${reset}` : ""}`, false, 9000);
+    }
+  }, [usageReport]);
 
   // daemon: poll system status on an interval (configurable in Settings) → live agent status
   useEffect(() => {

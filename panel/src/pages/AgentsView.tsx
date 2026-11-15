@@ -5,6 +5,9 @@ import { paneStatus, statusTone } from "../lib/pane-status";
 import AgentLogo from "../components/AgentLogo";
 import { HerdrBadge } from "../components/HerdrBadge";
 import { isHerdrPane } from "../lib/herdr-pane";
+import UsageBar from "../components/UsageBar";
+import { useUsage } from "../lib/use-usage";
+import { accountTag, usageByAgent, worstWindow } from "../lib/usage";
 
 const RESTORE_DISMISS_KEY = "mt3k.restore.dismissed";
 
@@ -33,6 +36,11 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
   const sessions = agents.flatMap((a) => (a.panes ?? []).map((p) => ({ agent: a, pane: p })));
   const waitingCount = sessions.filter((s) => s.pane.waiting).length;
   const doneCount = sessions.filter((s) => paneStatus(s.pane) === "done").length;
+
+  // quota of the accounts logged in on THIS host: shown on local agents only (a federated host has its own)
+  const { report: usage } = useUsage();
+  const usageMap = usage?.available ? usageByAgent(usage.accounts) : {};
+  const usageNow = Date.now();
 
   // broadcast: one message → every live session on every federated host
   const [bcText, setBcText] = useState("");
@@ -364,6 +372,10 @@ export default function AgentsView({ agents, onOpen, onOpenMosaic, onToast, focu
                     {externalLink && (
                       <div className="mt-0.5 font-mono text-[8px] normal-case tracking-normal text-white/30">estado no verificado</div>
                     )}
+                    {!a.host && (usageMap[a.id] ?? []).map((acct) => {
+                      const w = worstWindow(acct, usageNow);
+                      return w ? <UsageBar key={acct.id} window={w} now={usageNow} tag={accountTag(acct.id)} compact /> : null;
+                    })}
                   </div>
                   {/* action hint: live session → write, launchable-only → spawn, web-external → enlace */}
                   {sendable ? (

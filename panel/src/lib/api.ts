@@ -1,4 +1,5 @@
 import type { GitRefs } from "./terminal-links";
+import type { UsageReport } from "./usage";
 export interface SkillRow { name: string; slug: string; description: string }
 export interface LogEntry { date: string; content: string }
 export interface PaneRef {
@@ -60,6 +61,8 @@ async function jpost<T>(url: string, body: unknown): Promise<T | null> {
 export const getSkills = () => jget<{ skills: SkillRow[] }>("/api/skills");
 export const getAgents = () => jget<{ agents: AgentRow[] }>("/api/agents");
 export const getLogs = () => jget<{ logs: LogEntry[] }>("/api/logs");
+// quota per agent account on this host; `fresh` asks the server to measure again (it keeps a floor between runs)
+export const getUsage = (fresh = false) => jget<UsageReport>(`/api/usage${fresh ? "?fresh=1" : ""}`);
 export const askQuery = (projectId: string, q: string) => jpost<{ ok: boolean; answer: string }>("/api/query", { projectId, q });
 export const sendToPane = (paneId: string, text: string, enter = true, host?: string) => jpost<{ ok: boolean; paneId?: string; err?: string }>(`/api/send${hostQ(host)}`, { paneId, text, enter });
 export const getPane = (paneId: string, host?: string) => jget<{ ok: boolean; content: string; alternate?: boolean; mouse_sgr?: boolean }>(`/api/pane?id=${encodeURIComponent(paneId)}${host ? `&host=${encodeURIComponent(host)}` : ""}`);

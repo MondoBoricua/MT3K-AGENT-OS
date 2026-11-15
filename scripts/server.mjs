@@ -31,6 +31,7 @@
  *   GET|POST /api/launch-backend          → where NEW sessions are created: tmux (default) | herdr (data/launch-backend.json);
  *                                         herdr only when a core is already running (never started), else tmux + `fallback`
  *   GET  /api/logs                        → data/logs/*.md (Memory / Activity pages)
+ *   GET  /api/usage[?fresh=1]             → subscription quota per agent account (needs the agent-usage CLI)
  *   GET  /api/skills                      → reads ~/.agents/skills SKILL.md frontmatter (Skills page)
  *   GET  /api/manifest                    → current panel manifest
  *
@@ -56,6 +57,7 @@ import { isAgentRunning } from "./lib/agent-live.mjs";
 import { WIN32_PS_COMMAND, createWin32ProcessSource, withoutWindowsApps } from "./lib/proc-tree-win32.mjs";
 import { nvmBinDirs } from "./lib/bin-dirs.mjs";
 import { createPaneNotifier } from "./lib/pane-notify.mjs";
+import { createUsageReader } from "./lib/usage.mjs";
 import { describeAgent, normalizeAgentDefs, requireCapability } from "./lib/adapters.mjs";
 import {
   validatePaneId,
@@ -1476,6 +1478,14 @@ if (readRestoreConfig().auto) {
   }, 20000).unref();
 }
 
+// agent-usage asks each CLI (codex, agy, copilot, cursor…) for its quota, so it needs the user's real PATH
+// and can take ~25 s when Cursor answers slowly. The reader caches and never runs two at once.
+const USAGE_TIMEOUT_MS = 90_000;
+const usageReader = createUsageReader({
+  findBin: () => (IS_WIN ? null : absBin("agent-usage")), // a bash script: Windows hosts report "not available"
+  exec: async (bin) => run(bin, ["--json"], homedir(), USAGE_TIMEOUT_MS, { PATH: await agentPath() }),
+});
+
 async function api(req, res, path) {
   if (path === "/api/manifest") {
     const src = join(ROOT, "panel", "public", "data", "manifest.json");
@@ -2112,6 +2122,12 @@ async function api(req, res, path) {
     const r = await startWebTool(def);
     if (r.ok) logEvent(`web-restart · ${def.id}`);
     return sendJSON(res, r.ok ? 200 : 500, r);
+  }
+
+  // quota per agent account for this host. Never federated: the accounts are the ones logged in here.
+  if (path === "/api/usage" && req.method === "GET") {
+    const fresh = new URL(req.url, "http://x").searchParams.get("fresh") === "1";
+    return sendJSON(res, 200, await usageReader.read({ fresh }));
   }
 
   if (path === "/api/vitals") {
