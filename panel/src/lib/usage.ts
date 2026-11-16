@@ -9,6 +9,13 @@ export type UsageTone = "emerald" | "amber" | "red";
 export const HIGH_PCT = 85;
 export const MID_PCT = 50;
 
+/**
+ * Tailwind classes per tone. `amber` is the brand colour in tailwind.config.js: a single value with no shades,
+ * so amber-300/400 do not exist there and emit no CSS (the bar stayed empty in the 50-85 % band).
+ */
+export const TONE_FILL: Record<UsageTone, string> = { emerald: "bg-emerald-400", amber: "bg-amber", red: "bg-red-400" };
+export const TONE_TEXT: Record<UsageTone, string> = { emerald: "text-white/55", amber: "text-amber", red: "text-red-300" };
+
 export const usageTone = (pct: number): UsageTone => (pct >= HIGH_PCT ? "red" : pct >= MID_PCT ? "amber" : "emerald");
 
 /** A window whose reset time has passed describes the previous period, not this one. */

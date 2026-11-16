@@ -1,7 +1,7 @@
-import { bucketName, fmtReset, usageTone, windowLabel, type UsageWindow } from "../lib/usage";
+import { TONE_FILL, TONE_TEXT, bucketName, fmtReset, usageTone, windowLabel, type UsageWindow } from "../lib/usage";
 
-const FILL = { emerald: "bg-emerald-400", amber: "bg-amber-400", red: "bg-red-400" } as const;
-const TEXT = { emerald: "text-white/55", amber: "text-amber-300", red: "text-red-300" } as const;
+const FILL = TONE_FILL;
+const TEXT = TONE_TEXT;
 
 /** One quota window: label, percentage used, bar and time of reset. `compact` is the nameplate size. */
 export default function UsageBar({ window: w, now, tag, compact }: { window: UsageWindow; now: number; tag?: string; compact?: boolean }) {

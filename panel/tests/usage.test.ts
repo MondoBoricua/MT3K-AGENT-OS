@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { accountTag, bucketName, fmtReset, highCrossings, isExpired, usageByAgent, usageTone, windowLabel, worstWindow, type UsageAccount, type UsageWindow } from "../src/lib/usage.ts";
+import { TONE_FILL, TONE_TEXT, accountTag, bucketName, fmtReset, highCrossings, isExpired, usageByAgent, usageTone, windowLabel, worstWindow, type UsageAccount, type UsageWindow } from "../src/lib/usage.ts";
 
 const NOW = Date.parse("2026-11-15T15:35:00.000Z");
 const win = (over: Partial<UsageWindow> = {}): UsageWindow => ({ bucket: "seven_day", window: "7 días", usedPct: 10, resetsAt: null, state: "available", ...over });
@@ -114,4 +114,23 @@ test("highCrossings announces again after the window resets and climbs back", ()
   const again = highCrossings(reset.next, [acct("codex", "codex", [win({ usedPct: 85 })])], NOW);
   assert.equal(reset.crossings.length, 0);
   assert.equal(again.crossings.length, 1);
+});
+
+// Regression: tailwind.config.js defines `amber` as one value, so `bg-amber-400` emitted no CSS and the 50-85 % bar stayed empty.
+test("every tone's fill and text class resolves to a colour in the tailwind theme", async () => {
+  const { default: resolveConfig } = await import("tailwindcss/resolveConfig.js");
+  const { default: config } = await import("../tailwind.config.js");
+  const colors = resolveConfig(config).theme.colors as Record<string, unknown>;
+  const resolves = (cls: string): boolean => {
+    const [name, ...shade] = cls.replace(/^(bg|text)-/, "").replace(/\/\d+$/, "").split("-");
+    const entry = colors[name];
+    if (typeof entry === "string") return shade.length === 0;
+    if (entry && typeof entry === "object") return (entry as Record<string, unknown>)[shade[0] ?? "DEFAULT"] !== undefined;
+    return false;
+  };
+  for (const tone of ["emerald", "amber", "red"] as const) {
+    assert.ok(resolves(TONE_FILL[tone]), `${tone} fill ${TONE_FILL[tone]} has no colour`);
+    assert.ok(resolves(TONE_TEXT[tone]), `${tone} text ${TONE_TEXT[tone]} has no colour`);
+  }
+  assert.equal(resolves("bg-amber-400"), false); // the old class: proves the check can fail
 });
