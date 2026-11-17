@@ -50,7 +50,7 @@ const isExecutableFile = (p) => {
  * Ruta absoluta de un binario de Herdr: primero la ubicación conocida, luego PATH con las mismas reglas de confianza
  * que findGit (solo entradas absolutas, nunca "." ni el directorio actual).
  */
-function findBinary({ name, winBundled, pathEnv, platform, home, localAppData, exists, sep }) {
+export function findBinary({ name, winBundled, pathEnv, platform, home, localAppData, exists, sep }) {
   const P = pathFor(platform);
   const ok = exists ?? (platform === "win32" ? isFile : isExecutableFile);
   if (platform === "win32") {
@@ -85,6 +85,11 @@ const finderDefaults = () => ({
 /** Ruta absoluta de `hc`: ubicaciones conocidas y luego PATH. */
 export function findHc(opts = {}) {
   return findBinary({ name: "hc", winBundled: ["Programs", "herdr-core", "hc.exe"], ...finderDefaults(), ...opts });
+}
+
+/** Ruta absoluta de la CLI `herdr` 0.9.x (la app/CLI nueva, distinta de `hc`), con las mismas reglas de confianza. */
+export function findHerdrCli(opts = {}) {
+  return findBinary({ name: "herdr", winBundled: ["Programs", "herdr", "herdr.exe"], ...finderDefaults(), ...opts });
 }
 
 /** Ruta absoluta de `herdr-app` (la ventana de escritorio de Herdr), con las mismas reglas de confianza que `findHc`. */

@@ -5,17 +5,18 @@ import { createHerdrConn as realCreateConn } from "./herdr-conn.mjs";
 import { refineAgent } from "./herdr-agent.mjs";
 import { paintToAnsiLines } from "./herdr-paint.mjs";
 import { runWait } from "./wait-loop.mjs";
+import { startHerdrStream } from "./herdr-stream.mjs";
+
+export { streamFrame, HERDR_STREAM_MIN_TICK_MS } from "./herdr-stream.mjs";
 
 export const HERDR_UNAVAILABLE = "no disponible para sesiones de Herdr";
 export const HERDR_BLOCKED = "bloqueado: requiere a la persona";
 export const HERDR_LIST_TTL_MS = 2000;
-export const HERDR_STREAM_MIN_TICK_MS = 1000;
 const HERDR_FORCE_MIN_MS = 500;
 const MAX_REPOLLS = 3; // repeticiones de la consulta cuando llegan invalidate() mientras corre
 const HC_LOOKUP_MS = 30000;
 const READ_HISTORY_LINES = 1000;
 const TAIL_LINES = 12;
-const STREAM_MISS_LIMIT = 2;
 const DETAILS_TTL_MS = 30000; // carpeta actual: refresco máximo cada 30 s por terminal
 const DETAILS_MAX_PER_POLL = 5; // `hc get` por ciclo de lista
 const SIZE_MAX_AGE_MS = 5000; // el tamaño del snapshot nunca es más viejo que esto
@@ -24,6 +25,13 @@ const PAINT_SLOW_MS = 150; // una conversión más lenta cuenta como fallo (bloq
 const COLOR_BACKOFF_MS = 60000;
 const HEADLESS = { cols: 200, rows: 120 }; // tamaño al que un attach observer sin espectador mueve el terminal
 const NO_VIEWER_PAUSE_MS = 10 * 60 * 1000;
+
+const CLIENT_ERRORS = new Set(["texto inválido", "texto vacío", "texto demasiado largo", "teclas inválidas", "terminal inválido"]);
+/** Respuesta HTTP de un fallo de send/keys de Herdr (compartida por todos los backends). */
+export const herdrFailure = (r) => {
+  if (r.err === HERDR_BLOCKED) return { status: 409, body: { ok: false, err: HERDR_BLOCKED } };
+  return { status: CLIENT_ERRORS.has(r.err) ? 400 : 500, body: { ok: false, err: r.err } };
+};
 
 /** Cuerpo 400 uniforme de los endpoints que Herdr no soporta. */
 export const herdrUnavailableBody = () => ({ ok: false, err: HERDR_UNAVAILABLE });
@@ -93,18 +101,6 @@ export function mergeHerdrPanes(agentRows, terminals, tildify) {
     const panes = [...(row.panes || []), ...extra];
     return { ...row, panes, running: true, waiting: panes.some((p) => p.waiting) };
   });
-}
-
-/** Un fotograma: misma forma que el SSE de tmux (cadena completa primero; con fmt=lines luego diffs). */
-export function streamFrame(last, text, lineDiffs) {
-  const lines = text.split("\n");
-  let from = 0;
-  while (last !== null && from < last.length && from < lines.length && last[from] === lines[from]) from++;
-  if (last !== null && from === last.length && from === lines.length) return { same: true, lines };
-  const payload = last === null || !lineDiffs
-    ? JSON.stringify(text)
-    : JSON.stringify({ from, lines: lines.slice(from), alt: false, mouse_sgr: false });
-  return { same: false, lines, payload };
 }
 
 export function createHerdrPanes({
@@ -371,12 +367,6 @@ export function createHerdrPanes({
     return r.text.trimEnd().split(/\r?\n/).filter((l) => l.trim().length > 0).slice(-TAIL_LINES);
   }
 
-  const CLIENT_ERRORS = new Set(["texto inválido", "texto vacío", "texto demasiado largo", "teclas inválidas", "terminal inválido"]);
-  const failure = (r) => {
-    if (r.err === HERDR_BLOCKED) return { status: 409, body: { ok: false, err: HERDR_BLOCKED } };
-    return { status: CLIENT_ERRORS.has(r.err) ? 400 : 500, body: { ok: false, err: r.err } };
-  };
-
   return {
     enabled,
     refresh,
@@ -392,7 +382,7 @@ export function createHerdrPanes({
     close() { conn?.close(); conn = null; },
     connStats() { return conn ? conn.stats() : null; },
     tailOf,
-    failure,
+    failure: herdrFailure,
     /** Terminales vivos de Herdr para añadir a /api/agents. */
     async applyTo(agentRows) {
       const terminals = await refresh();
@@ -446,54 +436,6 @@ export function createHerdrPanes({
       });
     },
     /** SSE: lee a ≥ 1 s; `gone` si el terminal desaparece de la lista o la lectura falla dos veces. */
-    startStream({ id, tickMs, lineDiffs, write, end, minTickMs = HERDR_STREAM_MIN_TICK_MS }) {
-      const interval = Math.max(minTickMs, tickMs || 0);
-      let last = null;
-      let closed = false;
-      let altSent = false;
-      let misses = 0;
-      let readFails = 0;
-      let timer = null;
-      const stop = () => {
-        closed = true;
-        if (timer) clearTimeout(timer);
-        timer = null;
-      };
-      const gone = () => {
-        write("event: gone\ndata: {}\n\n");
-        stop();
-        end();
-      };
-      const tick = async () => {
-        timer = null;
-        try {
-          if (!(await has(id))) {
-            if (closed) return;
-            if (++misses >= STREAM_MISS_LIMIT) return gone();
-            return;
-          }
-          misses = 0;
-          const r = await view(id);
-          if (closed) return;
-          if (!r.ok) {
-            if (++readFails >= STREAM_MISS_LIMIT) return gone();
-            return;
-          }
-          readFails = 0;
-          const frame = streamFrame(last, r.text, lineDiffs);
-          if (!altSent) {
-            altSent = true;
-            write(`event: alt\ndata: ${JSON.stringify({ alt: false, mouse_sgr: false })}\n\n`);
-          }
-          if (frame.same) return;
-          write(`data: ${frame.payload}\n\n`);
-          last = frame.lines;
-        } finally {
-          if (!closed) timer = setTimeout(tick, interval);
-        }
-      };
-      tick();
-      return { stop };
-    },
+    startStream: (opts) => startHerdrStream({ has, view, ...opts }),
   };
 }

@@ -94,9 +94,11 @@ import { tmuxServerAbsent } from "./lib/tmux-absent.mjs";
 import { gitRefs } from "./lib/git-refs.mjs";
 import { createKillTombstones } from "./lib/kill-tombstones.mjs";
 import { createLedgerStore } from "./lib/ledger-store.mjs";
-import { isHerdrId } from "./lib/herdr.mjs";
-import { containsHerdrId, createHerdrPanes, herdrOccupies, herdrKeyArgs, herdrUnavailableBody } from "./lib/herdr-panes.mjs";
+import { createHerdrPanes, herdrOccupies, herdrKeyArgs, herdrUnavailableBody } from "./lib/herdr-panes.mjs";
 import { createHerdrLauncher, herdrLaunchArgv } from "./lib/herdr-launch.mjs";
+import { createHerdr9Panes } from "./lib/herdr9-panes.mjs";
+import { createHerdr9Launcher } from "./lib/herdr9-launch.mjs";
+import { containsHerdrId, createHerdrMulti, createHerdrMultiLauncher, isHerdrId } from "./lib/herdr-multi.mjs";
 import { LAUNCH_BACKENDS, parseLaunchBackend } from "./lib/launch-backend.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -363,11 +365,18 @@ const denyUnlessCap = (res, def, op) => {
 };
 
 // Terminales de Herdr (hc) como panes: solo listar/leer/escribir. MT3K_HERDR=0 lo apaga por completo.
-const herdrPanes = createHerdrPanes({ enabled: process.env.MT3K_HERDR !== "0", color: process.env.MT3K_HERDR_COLOR !== "0", tildify,
+// Dos backends independientes: hc (Herdr Core 0.1.x, ids hc:tN) y la CLI `herdr` 0.9.x (ids h9:w1:p3). MT3K_HERDR9=0 apaga solo el segundo.
+const herdrColor = process.env.MT3K_HERDR_COLOR !== "0";
+const hcPanes = createHerdrPanes({ enabled: process.env.MT3K_HERDR !== "0", color: herdrColor, tildify,
   agentMatchers: () => effectiveAgentDefs.map(({ id, proc }) => ({ id, proc: strongProcNames(proc) })).filter((m) => m.proc.length) });
+const herdr9Panes = createHerdr9Panes({ enabled: process.env.MT3K_HERDR !== "0" && process.env.MT3K_HERDR9 !== "0", color: herdrColor, tildify });
+const herdrPanes = createHerdrMulti({ hcPanes, h9Panes: herdr9Panes });
 // el único `hc connect` (vistas en color) no sobrevive al servidor
 process.on("exit", () => herdrPanes.close());
-const herdrLauncher = createHerdrLauncher({ getHerdr: () => herdrPanes.hc() });
+const herdrLauncher = createHerdrMultiLauncher({
+  hcLauncher: createHerdrLauncher({ getHerdr: () => hcPanes.hc() }),
+  h9Launcher: createHerdr9Launcher({ getHerdr9: () => herdr9Panes.herdr9() }),
+});
 for (const sig of ["SIGTERM", "SIGINT"]) process.once(sig, () => process.exit(0));
 /** 400 uniforme para los endpoints que no soportan Herdr; true = ya respondió. */
 const denyHerdrId = (res, paneId) => {
@@ -2348,10 +2357,7 @@ async function api(req, res, path) {
     const { paneId, force } = await body(req);
     if (isHerdrId(paneId)) {
       // los del panel (etiqueta mt3k.panel=1, releída al cerrar) se cierran; los ajenos solo con force === true
-      const hc = herdrPanes.hc();
-      if (!hc) return sendJSON(res, 400, herdrUnavailableBody());
-      const closed = await hc.killTerminal(paneId, { force: force === true });
-      herdrPanes.invalidate();
+      const closed = await herdrPanes.kill(paneId, { force: force === true });
       if (!closed.ok) return sendJSON(res, closed.status, { ok: false, err: closed.err, ...(closed.needsConfirm ? { needsConfirm: true } : {}) });
       logEvent(`kill · ${paneId} · herdr${closed.forced ? " · forzado" : ""}`);
       return sendJSON(res, 200, { ok: true, paneId, ledger: "no-aplica" });
