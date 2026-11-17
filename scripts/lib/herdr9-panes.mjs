@@ -33,8 +33,10 @@ export function createHerdr9Panes({
   now = Date.now,
   ttlMs = HERDR_LIST_TTL_MS,
   color = true,
+  log = (m) => console.warn(m),
 } = {}) {
   let herdr = null;
+  let lastHealthKey = "ok"; // el fallo se registra una vez por cambio de estado, no en cada consulta
   let cliPath = null;
   let checkedAt = -Infinity;
   let cache = { at: -Infinity, rows: [] };
@@ -57,6 +59,15 @@ export function createHerdr9Panes({
     return herdr;
   }
 
+  // Un backend roto (exec/timeout/JSON ilegible) sigue devolviendo [] para no romper la lista, pero queda registrado y visible en status().
+  function recordHealth(h) {
+    const hh = typeof h.health === "function" ? h.health() : { ok: true };
+    const key = hh.ok ? "ok" : hh.err;
+    if (key === lastHealthKey) return;
+    lastHealthKey = key;
+    log(hh.ok ? "[mt3k] herdr 0.9: la lista vuelve a responder" : `[mt3k] herdr 0.9: ${hh.err}`);
+  }
+
   // Una sola consulta a la vez; si hubo invalidate() mientras corría se repite (hasta MAX_REPOLLS) para entregar una lista posterior.
   function startLoop(h) {
     const token = {};
@@ -66,6 +77,7 @@ export function createHerdr9Panes({
         for (let i = 0; i <= MAX_REPOLLS; i++) {
           const gen = generation;
           rows = await h.list().catch(() => []);
+          recordHealth(h);
           if (gen === generation) { cache = { at: now(), rows }; break; }
         }
         return rows;
@@ -125,6 +137,8 @@ export function createHerdr9Panes({
     cachedRows: () => cache.rows,
     /** Adaptador herdr 0.9 (o null con MT3K_HERDR=0 / MT3K_HERDR9=0 / sin la CLI): lo usa el lanzador. */
     herdr9: client,
+    /** { ok:true } | { ok:false, err }: último estado de la lista (para /api/launch-backend). */
+    health: () => (lastHealthKey === "ok" ? { ok: true } : { ok: false, err: lastHealthKey }),
     has,
     read,
     view,

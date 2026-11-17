@@ -30,7 +30,9 @@ const CLIENT_ERRORS = new Set(["texto inválido", "texto vacío", "texto demasia
 /** Respuesta HTTP de un fallo de send/keys de Herdr (compartida por todos los backends). */
 export const herdrFailure = (r) => {
   if (r.err === HERDR_BLOCKED) return { status: 409, body: { ok: false, err: HERDR_BLOCKED } };
-  return { status: CLIENT_ERRORS.has(r.err) ? 400 : 500, body: { ok: false, err: r.err } };
+  // un 4xx explícito del backend manda (p. ej. "tecla no permitida" de herdr 0.9)
+  const explicit = Number.isInteger(r.status) && r.status >= 400 && r.status < 500 ? r.status : null;
+  return { status: explicit ?? (CLIENT_ERRORS.has(r.err) ? 400 : 500), body: { ok: false, err: r.err } };
 };
 
 /** Cuerpo 400 uniforme de los endpoints que Herdr no soporta. */

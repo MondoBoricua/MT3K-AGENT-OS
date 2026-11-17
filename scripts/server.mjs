@@ -2356,7 +2356,8 @@ async function api(req, res, path) {
   if (path === "/api/kill" && req.method === "POST") {
     const { paneId, force } = await body(req);
     if (isHerdrId(paneId)) {
-      // los del panel (etiqueta mt3k.panel=1, releída al cerrar) se cierran; los ajenos solo con force === true
+      // los del panel se cierran; los ajenos solo con force === true. "Del panel" se relee al cerrar: en hc es la etiqueta mt3k.panel=1;
+      // en herdr 0.9 (sin etiquetas) es pestaña con nombre mt3k-… Y terminal creado por este proceso (memoria, se pierde al reiniciar)
       const closed = await herdrPanes.kill(paneId, { force: force === true });
       if (!closed.ok) return sendJSON(res, closed.status, { ok: false, err: closed.err, ...(closed.needsConfirm ? { needsConfirm: true } : {}) });
       logEvent(`kill · ${paneId} · herdr${closed.forced ? " · forzado" : ""}`);

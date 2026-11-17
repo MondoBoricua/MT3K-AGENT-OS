@@ -151,6 +151,7 @@ export function createHerdr9({
   ledger = new Set(), // terminal_id de los terminales que creó este proceso
 } = {}) {
   let negative = null;
+  let health = { ok: true }; // resultado del último `list`: distingue "0 terminales" de "el backend falla"
 
   /** ¿Acepta conexiones el socket del servidor? Sin caché positiva (≈1 ms); negativa ≤ 2 s. Nunca arranca nada. */
   async function alive() {
@@ -186,7 +187,16 @@ export function createHerdr9({
       execH(["pane", "list"]),
       ledger.size ? execH(["tab", "list"]) : Promise.resolve(null), // sin nada creado por el panel no hace falta leer etiquetas
     ]);
-    if (!panes.ok) return [];
+    if (!panes.ok) {
+      // NOCORE = el servidor cayó entre el sondeo y el exec: es "no corriendo", no un fallo del backend
+      health = panes.code === "NOCORE" ? { ok: true } : { ok: false, err: `herdr pane list falló (${panes.code})` };
+      return [];
+    }
+    if (!Array.isArray(parseJson(panes.out)?.result?.panes)) {
+      health = { ok: false, err: "herdr pane list devolvió una salida ilegible" };
+      return [];
+    }
+    health = { ok: true };
     const rows = parsePaneList(panes.out);
     const labels = tabs?.ok ? parseTabLabels(tabs.out) : new Map();
     return rows.map((r) => (ownedBy(r.terminalId, labels.get(r.tabId)) ? { ...r, killable: true } : r));
@@ -214,7 +224,6 @@ export function createHerdr9({
       cols: null,
       rows: null,
       tabId,
-      tabPaneCount: Number.isInteger(tab?.pane_count) ? tab.pane_count : null,
       terminalId,
       labels: owned ? { [PANEL_LABEL_KEY]: "1" } : {},
     };
@@ -271,7 +280,7 @@ export function createHerdr9({
     if (argv.length) {
       const r = await execH(["pane", "run", made.pane, argv.map(shellQuote).join(" ")], RUN_TIMEOUT_MS);
       if (!r.ok) {
-        await execH(["tab", "close", made.tab]); // la pestaña es nuestra (recién creada): no se deja huérfana
+        await execH(["pane", "close", made.pane]); // el pane es nuestro (recién creado); cerrar su único pane quita la pestaña (medido)
         return { ok: false, err: "no se pudo escribir el comando" };
       }
     }
@@ -280,7 +289,8 @@ export function createHerdr9({
 
   /**
    * Cierra un terminal: relee `get` justo antes. Los del panel (pestaña con nombre del panel Y terminal en el ledger) se cierran;
-   * los ajenos solo con `force === true`, si no 409 needsConfirm. Un terminal del panel que es el único de su pestaña cierra la pestaña.
+   * los ajenos solo con `force === true`, si no 409 needsConfirm. SIEMPRE `pane close` del pane pedido: nunca `tab close`, porque
+   * la pestaña pudo recibir otro pane entre la lectura y el cierre. Medido (0.9.5): cerrar el único pane de una pestaña la quita sola.
    */
   async function killTerminal(id, { force = false } = {}) {
     const info = await get(id);
@@ -289,13 +299,15 @@ export function createHerdr9({
       const { kill: _k, ...denied } = decision;
       return { ok: false, ...denied };
     }
-    const closeTab = !decision.forced && info.tabId && info.tabPaneCount === 1;
-    const r = await execH(closeTab ? ["tab", "close", info.tabId] : ["pane", "close", paneOf(id)]);
+    const r = await execH(["pane", "close", paneOf(id)]);
     if (!r.ok) return { ok: false, status: 500, err: unavailable(r) ? NA : "cerrar falló" };
     if (info.terminalId) ledger.delete(info.terminalId);
     invalidate();
     return { ok: true, removed: true, forced: decision.forced };
   }
 
-  return { running: alive, coreAlive: alive, coreUp: alive, invalidate, list, get, read, send, keys, openTab, killTerminal };
+  /** { ok:true } | { ok:false, err }: estado del último `list` (nunca lanza ni ejecuta nada). */
+  const getHealth = () => health;
+
+  return { health: getHealth, running: alive, coreAlive: alive, coreUp: alive, invalidate, list, get, read, send, keys, openTab, killTerminal };
 }

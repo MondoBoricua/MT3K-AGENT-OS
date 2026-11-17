@@ -7,7 +7,8 @@ export function createHerdr9Launcher({ getHerdr9 = () => null, nameSuffix } = {}
   async function status() {
     const h = getHerdr9();
     if (!h) return { installed: false, running: false, app: false };
-    return { installed: true, running: await h.coreUp().catch(() => false), app: false };
+    const health = h.health?.() ?? { ok: true };
+    return { installed: true, running: await h.coreUp().catch(() => false), app: false, ...(health.ok ? {} : { error: health.err }) };
   }
 
   /** { ok:true, paneId, address, via, name } | { ok:false, reason: "not-installed" | "no-core" | "error", err? } */

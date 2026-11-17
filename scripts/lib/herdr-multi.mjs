@@ -63,6 +63,9 @@ export function createHerdrMulti({ hcPanes, h9Panes }) {
   };
 }
 
+/** Razones de fallo de un lanzador que prueban que no se creó nada (ver launch() de cada uno). */
+const NOT_DISPATCHED = new Set(["no-core", "not-installed"]);
+
 /**
  * Lanzador de ambos backends. Con los dos presentes se prefiere `hc` si su core está vivo (comportamiento histórico);
  * si no, herdr 0.9 si su servidor está vivo. Razones de fallo: "not-installed" solo si NINGUNO está instalado.
@@ -71,12 +74,19 @@ export function createHerdrMultiLauncher({ hcLauncher, h9Launcher }) {
   return {
     async status() {
       const [a, b] = await Promise.all([hcLauncher.status(), h9Launcher.status()]);
-      return { installed: a.installed || b.installed, running: a.running || b.running, app: a.app };
+      // `errors` solo aparece si un backend está instalado y vivo pero su lista falla (forma de status() de hc + campo opcional)
+      return { installed: a.installed || b.installed, running: a.running || b.running, app: a.app, ...(b.error ? { errors: { herdr9: b.error } } : {}) };
     },
     async launch(input) {
       const [a, b] = await Promise.all([hcLauncher.status(), h9Launcher.status()]);
       if (!a.installed && !b.installed) return { ok: false, reason: "not-installed" };
-      if (a.running) return hcLauncher.launch(input);
+      if (a.running) {
+        const r = await hcLauncher.launch(input);
+        // hc pudo caer entre el sondeo y el envío: solo si el resultado prueba que NO despachó nada se prueba herdr 0.9.
+        // Un "error" puede haber creado ya el terminal: reintentar abriría dos.
+        if (!r.ok && NOT_DISPATCHED.has(r.reason) && b.running) return h9Launcher.launch(input);
+        return r;
+      }
       if (b.running) return h9Launcher.launch(input);
       return { ok: false, reason: "no-core" };
     },
