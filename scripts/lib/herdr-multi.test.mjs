@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { createHerdr9 } from "./herdr9.mjs";
 import { createHerdr9Panes, herdr9KeyArgs } from "./herdr9-panes.mjs";
 import { createHerdr9Launcher } from "./herdr9-launch.mjs";
-import { createHerdrPanes } from "./herdr-panes.mjs";
+import { createHerdrLauncher } from "./herdr-launch.mjs";
+import { createHerdrPanes, herdrFailure } from "./herdr-panes.mjs";
 import { containsHerdrId, createHerdrMulti, createHerdrMultiLauncher, detectBackends, isHerdrId } from "./herdr-multi.mjs";
 
 const FX = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "herdr9");
@@ -18,7 +19,7 @@ function fakeExec(routes) {
     calls.push({ bin, argv });
     const key = argv.join(" ");
     const hit = Object.entries(routes).find(([k]) => key === k || key.startsWith(`${k} `));
-    const r = hit?.[1];
+    const r = typeof hit?.[1] === "function" ? hit[1](argv) : hit?.[1];
     if (!r) return cb(Object.assign(new Error("no route"), { code: 1 }), "", "");
     if (r.err) return cb(Object.assign(new Error("fail"), { code: r.code ?? 1 }), r.out ?? "", "");
     return cb(null, r.out ?? "", "");
@@ -35,12 +36,13 @@ const ROUTES = {
 };
 
 // Panes de herdr 0.9 con un exec falso y la CLI "instalada" (o no)
-function h9Panes({ installed = true, up = true, routes = ROUTES, color = true } = {}) {
+function h9Panes({ installed = true, up = true, routes = ROUTES, color = true, log = () => {} } = {}) {
   const f = fakeExec(routes);
   const panes = createHerdr9Panes({
     findCli: () => (installed ? "/usr/bin/herdr" : null),
     createHerdr9: ({ herdrPath }) => createHerdr9({ herdrPath, exec: f.exec, probe: async () => up, platform: "linux", home: "/h", isSocket: () => false, env: {} }),
     color,
+    log,
     ttlMs: 0,
   });
   return { panes, ...f };
@@ -125,16 +127,38 @@ test("enrutado por prefijo: read/send/keys/has/kill van al backend del id", asyn
   assert.deepEqual(await multi.kill("hc:t1", { force: true }), { ok: true, via: "hc", id: "hc:t1", force: true });
 });
 
-test("view: color con --ansi y cae a texto plano si la lectura en color falla o MT3K_HERDR_COLOR=0", async () => {
-  const ansi = h9Panes();
-  const v = await ansi.panes.view("h9:w1:pB");
-  assert.equal(v.colored, true);
-  assert.ok(ansi.calls.some((c) => c.argv.includes("--ansi")));
-  const plain = h9Panes({ color: false });
-  assert.equal((await plain.panes.view("h9:w1:pB")).colored, undefined);
+test("view: color con --ansi; el respaldo en texto plano funciona en las dos direcciones y con MT3K_HERDR_COLOR=0", async () => {
+  const PLAIN = "texto plano\n";
+  const ANSI = "\x1b[1mcolor\x1b[0m\n";
+  const readRoute = (argv) => {
+    const ansi = argv.includes("--ansi");
+    if (ansi) return mode.ansi === "fail" ? { err: true, code: 1 } : { out: mode.ansi === "empty" ? "" : ANSI };
+    return mode.plain === "fail" ? { err: true, code: 1 } : { out: PLAIN };
+  };
+  const mode = { ansi: "ok", plain: "ok" };
+  const f = h9Panes({ routes: { ...ROUTES, "pane read": readRoute } });
+  // ambas bien → color
+  assert.deepEqual(await f.panes.view("h9:w1:pB"), { ok: true, text: ANSI, colored: true });
+  assert.ok(f.calls.some((c) => c.argv.includes("--ansi")));
+  // falla el color, el texto responde → texto plano (sin colored)
+  mode.ansi = "fail";
+  assert.deepEqual(await f.panes.view("h9:w1:pB"), { ok: true, text: PLAIN });
+  // el color responde vacío → también cae a texto plano
+  mode.ansi = "empty";
+  assert.deepEqual(await f.panes.view("h9:w1:pB"), { ok: true, text: PLAIN });
+  // el color responde, falla el texto → se devuelve el color y la lectura plana ni se intenta
+  mode.ansi = "ok"; mode.plain = "fail";
+  const before = f.calls.length;
+  assert.deepEqual(await f.panes.view("h9:w1:pB"), { ok: true, text: ANSI, colored: true });
+  assert.equal(f.calls.slice(before).filter((c) => !c.argv.includes("--ansi")).length, 0);
+  // fallan las dos → error
+  mode.ansi = "fail";
+  assert.deepEqual(await f.panes.view("h9:w1:pB"), { ok: false, err: "lectura falló" });
+  // color apagado: nunca se pide --ansi
+  mode.ansi = "ok"; mode.plain = "ok";
+  const plain = h9Panes({ color: false, routes: { ...ROUTES, "pane read": readRoute } });
+  assert.deepEqual(await plain.panes.view("h9:w1:pB"), { ok: true, text: PLAIN });
   assert.ok(!plain.calls.some((c) => c.argv.includes("--ansi")));
-  const failing = h9Panes({ routes: { ...ROUTES, "pane read": { err: true, code: 1 } } });
-  assert.deepEqual(await failing.panes.view("h9:w1:pB"), { ok: false, err: "lectura falló" });
 });
 
 test("MT3K_HERDR=0 (enabled:false) o sin CLI → no se ejecuta nada y la lista es []", async () => {
@@ -147,12 +171,52 @@ test("MT3K_HERDR=0 (enabled:false) o sin CLI → no se ejecuta nada y la lista e
   assert.equal(f.calls.length + none.calls.length, 0);
 });
 
-test("errores del lister no salen: exec que falla y servidor caído devuelven []", async () => {
-  const bad = h9Panes({ routes: { "pane list": { err: true, code: "ETIMEDOUT" } } });
-  assert.deepEqual(await bad.panes.refresh(true), []);
-  const down = h9Panes({ up: false });
+test("un backend roto no rompe la lista PERO el fallo queda registrado (una vez por cambio de estado) y visible en status()", async () => {
+  const logs = [];
+  let mode = "timeout";
+  const routes = { ...ROUTES, "pane list": () => (mode === "timeout" ? { err: true, code: "ETIMEDOUT" } : mode === "garbage" ? { out: "basura" } : { out: fx("pane-list.json") }) };
+  const f = h9Panes({ routes, log: (m) => logs.push(m) });
+  const multi = createHerdrMulti({ hcPanes: hcPanes({ installed: true }), h9Panes: f.panes });
+  const poll = async () => { multi.invalidate(); return multi.refresh(true); }; // sin caché: cada llamada ejecuta herdr de verdad
+  const listCalls = () => f.calls.filter((c) => c.argv.join(" ") === "pane list").length;
+  // el otro backend (hc) sigue listando aunque herdr 0.9 falle
+  assert.deepEqual((await poll()).map((r) => r.id), ["hc:t1"]);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /herdr 0\.9: herdr pane list falló \(ETIMEDOUT\)/);
+  // consultas repetidas con el MISMO fallo no vuelven a registrar
+  for (let i = 0; i < 3; i++) await poll();
+  assert.equal(listCalls(), 4); // se consultó 4 veces…
+  assert.equal(logs.length, 1); // …y se registró 1
+  // se expone donde hc expone el suyo: el status del lanzador
+  const launcher = createHerdrMultiLauncher({
+    hcLauncher: { status: async () => ({ installed: true, running: true, app: false }), launch: async () => ({ ok: true }) },
+    h9Launcher: createHerdr9Launcher({ getHerdr9: () => f.panes.herdr9() }),
+  });
+  const st = await launcher.status();
+  assert.equal(st.installed, true);
+  assert.match(st.errors.herdr9, /ETIMEDOUT/);
+  assert.deepEqual(f.panes.health(), { ok: false, err: logs[0].replace("[mt3k] herdr 0.9: ", "") });
+  // otro tipo de fallo = otro estado = otro registro
+  mode = "garbage";
+  await poll();
+  assert.equal(logs.length, 2);
+  assert.match(logs[1], /ilegible/);
+  // recuperación: se registra y el error desaparece del status
+  mode = "ok";
+  assert.equal((await poll()).length, 7);
+  assert.equal(logs.length, 3);
+  assert.match(logs[2], /vuelve a responder/);
+  assert.equal((await launcher.status()).errors, undefined);
+  assert.deepEqual(f.panes.health(), { ok: true });
+});
+
+test("servidor caído no es un fallo del backend: lista [] sin ejecutar nada ni registrar", async () => {
+  const logs = [];
+  const down = h9Panes({ up: false, log: (m) => logs.push(m) });
   assert.deepEqual(await down.panes.refresh(true), []);
   assert.equal(down.calls.length, 0);
+  assert.deepEqual(logs, []);
+  assert.deepEqual(down.panes.health(), { ok: true });
 });
 
 test("herdr9KeyArgs: tabla del panel y teclas que 0.9.5 no soporta", () => {
@@ -197,6 +261,52 @@ test("lanzador combinado: con ambos prefiere hc si su core está vivo; si no, he
   assert.deepEqual(await L(S(false, false), S(false, false)).status(), { installed: false, running: false, app: false });
 });
 
+test("hc vivo en status() pero que cae antes de despachar → se prueba herdr 0.9; tras un posible despacho NUNCA (no se abren dos terminales)", async () => {
+  const S = { installed: true, running: true, app: false };
+  const run = async (hcResult, h9Status = S) => {
+    let hcAttempts = 0, h9Attempts = 0;
+    const l = createHerdrMultiLauncher({
+      hcLauncher: { status: async () => S, launch: async () => { hcAttempts++; return hcResult; } },
+      h9Launcher: { status: async () => h9Status, launch: async () => { h9Attempts++; return { ok: true, tag: "h9" }; } },
+    });
+    return { r: await l.launch({}), hcAttempts, h9Attempts };
+  };
+  // prueba de que NO se despachó nada → se cae a herdr 0.9
+  for (const reason of ["no-core", "not-installed"]) {
+    const o = await run({ ok: false, reason });
+    assert.deepEqual([o.r.tag, o.hcAttempts, o.h9Attempts], ["h9", 1, 1], reason);
+  }
+  // pudo haberse creado el terminal (error / timeout) → NO se reintenta
+  for (const bad of [{ ok: false, reason: "error", err: "x" }, { ok: false, reason: "error" }]) {
+    const o = await run(bad);
+    assert.deepEqual([o.r, o.hcAttempts, o.h9Attempts], [bad, 1, 0]);
+  }
+  // hc funcionó → herdr 0.9 ni se toca
+  const ok = await run({ ok: true, tag: "hc" });
+  assert.deepEqual([ok.r.tag, ok.h9Attempts], ["hc", 0]);
+  // hc cae pero herdr 0.9 tampoco está vivo → se devuelve el no-core de hc (el servidor abrirá en tmux)
+  const none = await run({ ok: false, reason: "no-core" }, { installed: true, running: false, app: false });
+  assert.deepEqual([none.r, none.h9Attempts], [{ ok: false, reason: "no-core" }, 0]);
+});
+
+test("integración real hc→herdr 0.9: hc cae tras el sondeo y el lanzador de herdr 0.9 abre el terminal", async () => {
+  const f = fakeExec(ROUTES);
+  const h9 = createHerdr9({ herdrPath: "/usr/bin/herdr", exec: f.exec, probe: async () => true, platform: "linux", home: "/h", isSocket: () => false, env: {} });
+  let probes = 0;
+  const hcLauncher = createHerdrLauncher({
+    getHerdr: () => ({
+      coreUp: async () => ++probes === 1, // vivo para status(), muerto cuando launch() lo vuelve a sondear
+      hcEnv: async () => null, run: async () => ({ ok: false, err: "x", code: "NOCORE" }), markOwned: async () => ({ ok: true }), invalidate() {},
+    }),
+    findApp: () => null,
+  });
+  const l = createHerdrMultiLauncher({ hcLauncher, h9Launcher: createHerdr9Launcher({ getHerdr9: () => h9 }) });
+  const r = await l.launch({ agentId: "claude", cwd: "/tmp", argv: ["claude"] });
+  assert.equal(r.ok, true);
+  assert.equal(r.paneId, "h9:w1:pB");
+  assert.equal(f.calls.filter((c) => c.argv[0] === "tab" && c.argv[1] === "create").length, 1);
+});
+
 test("kill de herdr 0.9 por la fachada: ajeno sin force → 409 y nada cerrado", async () => {
   const tab = JSON.stringify({ result: { tab: { label: "trabajo", pane_count: 1, tab_id: "w1:tB" } } });
   const f = h9Panes({ routes: { ...ROUTES, "pane get w1:pB": { out: fx("pane-get-owned.json") }, "tab get w1:tB": { out: tab }, "pane close": { out: "" }, "tab close": { out: "" } } });
@@ -206,4 +316,30 @@ test("kill de herdr 0.9 por la fachada: ajeno sin force → 409 y nada cerrado",
   assert.ok(!f.calls.some((c) => c.argv[1] === "close"));
   assert.equal((await multi.kill("h9:w1:pB", { force: true })).ok, true);
   assert.deepEqual(f.calls.at(-1).argv, ["pane", "close", "w1:pB"]);
+  assert.ok(!f.calls.some((c) => c.argv[0] === "tab" && c.argv[1] === "close"));
+});
+
+test("herdrFailure respeta un 4xx explícito de cualquier backend; sin status mantiene el mapa de siempre", () => {
+  assert.deepEqual(herdrFailure({ ok: false, status: 400, err: "tecla no permitida" }), { status: 400, body: { ok: false, err: "tecla no permitida" } });
+  assert.equal(herdrFailure({ ok: false, status: 404, err: "x" }).status, 404);
+  assert.equal(herdrFailure({ ok: false, status: 500, err: "x" }).status, 500); // un 5xx no se promueve
+  assert.equal(herdrFailure({ ok: false, status: 200, err: "x" }).status, 500);
+  assert.equal(herdrFailure({ ok: false, status: "400", err: "x" }).status, 500);
+  assert.equal(herdrFailure({ ok: false, err: "texto vacío" }).status, 400);
+  assert.equal(herdrFailure({ ok: false, err: "envío falló" }).status, 500);
+  assert.equal(herdrFailure({ ok: false, err: "bloqueado: requiere a la persona" }).status, 409);
+});
+
+test("tecla no soportada por herdr 0.9 (Home) en un pane h9 → 400 por la fachada, no 500", async () => {
+  const f = h9Panes();
+  const multi = createHerdrMulti({ hcPanes: hcPanes(), h9Panes: f.panes });
+  for (const key of ["Home", "End", "PageUp", "PageDown"]) {
+    const r = await multi.keys("h9:w1:pB", key);
+    assert.equal(r.ok, false);
+    assert.equal(multi.failure(r).status, 400, key);
+    assert.deepEqual(multi.failure(r).body, { ok: false, err: "tecla no permitida" });
+  }
+  assert.ok(!f.calls.some((c) => c.argv[1] === "send-keys"));
+  const bad = await multi.keys("h9:w1:pB", "Enter"); // control: una tecla válida sí se ejecuta
+  assert.deepEqual(bad, { ok: true });
 });

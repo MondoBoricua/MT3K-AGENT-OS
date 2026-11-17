@@ -132,11 +132,36 @@ test("list: argv fijo `pane list`; sin terminales del panel no se lee `tab list`
   assert.ok(calls[0].opts.timeout > 0 && calls[0].opts.maxBuffer > 0);
 });
 
-test("list: error o salida ilegible → [] sin lanzar", async () => {
-  assert.deepEqual(await make({ "pane list": { err: true, code: 1, out: "" } }).h.list(), []);
-  assert.deepEqual(await make({ "pane list": { out: "basura" } }).h.list(), []);
-  assert.deepEqual(await make({}).h.list(), []);
-  assert.deepEqual(await make({ "pane list": { err: true, code: "ETIMEDOUT" } }).h.list(), []);
+test("list: error, timeout o salida ilegible → [] sin lanzar PERO el fallo queda registrado en health()", async () => {
+  for (const routes of [{ "pane list": { err: true, code: 1, out: "" } }, { "pane list": { out: "basura" } }, {}, { "pane list": { err: true, code: "ETIMEDOUT" } }, { "pane list": { out: '{"result":{"panes":"x"}}' } }]) {
+    const { h } = make(routes);
+    assert.equal(h.health().ok, true); // antes de listar no hay nada que reportar
+    assert.deepEqual(await h.list(), []);
+    const hh = h.health();
+    assert.equal(hh.ok, false, JSON.stringify(routes));
+    assert.match(hh.err, /herdr pane list/);
+  }
+  const ok = make({ "pane list": { out: fx("pane-list.json") } });
+  assert.equal((await ok.h.list()).length, 6);
+  assert.deepEqual(ok.h.health(), { ok: true });
+  // una lista legítimamente vacía NO es un fallo
+  const empty = make({ "pane list": { out: '{"result":{"panes":[]}}' } });
+  assert.deepEqual(await empty.h.list(), []);
+  assert.deepEqual(empty.h.health(), { ok: true });
+  // servidor caído = "no corriendo", no un backend roto
+  const off = make({}, { probe: down });
+  assert.deepEqual(await off.h.list(), []);
+  assert.deepEqual(off.h.health(), { ok: true });
+});
+
+test("health se recupera cuando la lista vuelve a responder", async () => {
+  let fail = true;
+  const { h } = make({ "pane list": () => (fail ? { err: true, code: 1 } : { out: fx("pane-list.json") }) });
+  await h.list();
+  assert.equal(h.health().ok, false);
+  fail = false;
+  assert.equal((await h.list()).length, 6);
+  assert.deepEqual(h.health(), { ok: true });
 });
 
 test("read: argv por fuente/líneas/color, id inválido rechazado sin ejecutar", async () => {
@@ -200,9 +225,9 @@ test("openTab: sin argv solo crea la pestaña; entrada inválida no ejecuta nada
   assert.deepEqual(await b.h.openTab({ cwd: "rel", label: "mt3k-a-0a1b2c-x1", argv: [] }), { ok: false, err: "carpeta inválida" });
   assert.equal(b.calls.length, 0);
 
-  const c = make({ "tab create": { out: fx("tab-create.json") }, "pane run": { err: true, code: 1 }, "tab close": { out: "" } });
+  const c = make({ "tab create": { out: fx("tab-create.json") }, "pane run": { err: true, code: 1 }, "pane close": { out: "" } });
   assert.deepEqual(await c.h.openTab({ cwd: "/tmp", label: "mt3k-a-0a1b2c-x1", argv: ["x"] }), { ok: false, err: "no se pudo escribir el comando" });
-  assert.deepEqual(c.calls.at(-1).argv, ["tab", "close", "w1:tB"]);
+  assert.deepEqual(c.calls.at(-1).argv, ["pane", "close", "w1:pB"]); // pane propio recién creado; nunca `tab close`
 
   assert.equal((await make({ "tab create": { err: true, code: 1 } }).h.openTab({ cwd: "/tmp", label: "mt3k-a-0a1b2c-x1", argv: [] })).err, "no se pudo crear el terminal");
   assert.equal((await make({ "tab create": { out: "{}" } }).h.openTab({ cwd: "/tmp", label: "mt3k-a-0a1b2c-x1", argv: [] })).err, "herdr no devolvió el terminal");
@@ -223,19 +248,18 @@ test("get: etiqueta mt3k.panel solo con terminal en el ledger Y pestaña con nom
   const g = await mk(new Set([mine]), "mt3k-claude-0a1b2c-x1").h.get("h9:w1:pB");
   assert.equal(g.cwd, "/tmp");
   assert.equal(g.state, "live");
-  assert.equal(g.tabPaneCount, 1);
   assert.deepEqual(await make({}).h.get("hc:t1"), { ok: false, err: "terminal inválido" });
 });
 
-test("killTerminal: del panel → cierra la pestaña; ajeno sin force → 409 sin tocar nada; ajeno con force:true → pane close; force no booleano no vale", async () => {
+test("killTerminal: del panel → `pane close` de ESE pane; ajeno sin force → 409 sin tocar nada; ajeno con force:true → pane close; force no booleano no vale", async () => {
   const tabNamed = (label) => JSON.stringify({ result: { tab: { label, pane_count: 1, tab_id: "w1:tB" } } });
   const mine = "term_6606d82b37789b";
   const routes = (label) => ({ ...OWNED_ROUTES, "tab get w1:tB": { out: tabNamed(label) }, "tab close": { out: fx("tab-close.txt") }, "pane close": { out: "" } });
-  const closes = (calls) => calls.filter((c) => c.argv[1] === "close" || c.argv[0] === "tab" && c.argv[1] === "close");
+  const closes = (calls) => calls.filter((c) => c.argv[1] === "close");
 
   const own = make(routes("mt3k-claude-0a1b2c-x1"), { ledger: new Set([mine]) });
   assert.deepEqual(await own.h.killTerminal("h9:w1:pB"), { ok: true, removed: true, forced: false });
-  assert.deepEqual(closes(own.calls).map((c) => c.argv), [["tab", "close", "w1:tB"]]);
+  assert.deepEqual(closes(own.calls).map((c) => c.argv), [["pane", "close", "w1:pB"]]);
 
   const foreign = make(routes("trabajo"), { ledger: new Set([mine]) });
   const denied = await foreign.h.killTerminal("h9:w1:pB");
@@ -257,9 +281,24 @@ test("killTerminal: del panel → cierra la pestaña; ajeno sin force → 409 si
   assert.equal((await make({}).h.killTerminal("hc:t1")).status, 400);
 });
 
+test("killTerminal: otro pane añadido a la pestaña entre la lectura y el cierre NUNCA provoca `tab close`", async () => {
+  const mine = "term_6606d82b37789b";
+  let tabReads = 0;
+  // la primera lectura ve 1 pane; cualquier otra (o el estado real al cerrar) ya tendría 2: el cierre no puede depender de ese conteo
+  const tab = () => { tabReads++; return { out: JSON.stringify({ result: { tab: { label: "mt3k-claude-0a1b2c-x1", pane_count: tabReads === 1 ? 1 : 2, tab_id: "w1:tB" } } }) }; };
+  const m = make({ ...OWNED_ROUTES, "tab get w1:tB": tab, "pane close": { out: "" }, "tab close": { out: "" } }, { ledger: new Set([mine]) });
+  assert.deepEqual(await m.h.killTerminal("h9:w1:pB"), { ok: true, removed: true, forced: false });
+  assert.ok(!m.calls.some((c) => c.argv[0] === "tab" && c.argv[1] === "close"), JSON.stringify(m.calls.map((c) => c.argv)));
+  assert.deepEqual(m.calls.at(-1).argv, ["pane", "close", "w1:pB"]);
+  // tampoco forzado ni con una pestaña que ya traía varios panes
+  const f = make({ ...OWNED_ROUTES, "tab get w1:tB": { out: JSON.stringify({ result: { tab: { label: "x", pane_count: 3, tab_id: "w1:tB" } } }) }, "pane close": { out: "" }, "tab close": { out: "" } });
+  assert.equal((await f.h.killTerminal("h9:w1:pB", { force: true })).ok, true);
+  assert.ok(!f.calls.some((c) => c.argv[0] === "tab" && c.argv[1] === "close"));
+});
+
 test("killTerminal: un fallo de `close` no lanza y se informa", async () => {
   const tabNamed = JSON.stringify({ result: { tab: { label: "mt3k-claude-0a1b2c-x1", pane_count: 1, tab_id: "w1:tB" } } });
-  const m = make({ ...OWNED_ROUTES, "tab get w1:tB": { out: tabNamed }, "tab close": { err: true, code: 1 } }, { ledger: new Set(["term_6606d82b37789b"]) });
+  const m = make({ ...OWNED_ROUTES, "tab get w1:tB": { out: tabNamed }, "pane close": { err: true, code: 1 } }, { ledger: new Set(["term_6606d82b37789b"]) });
   const r = await m.h.killTerminal("h9:w1:pB");
   assert.deepEqual([r.ok, r.status], [false, 500]);
 });
@@ -272,10 +311,40 @@ test("list marca killable solo los terminales del panel (ledger + nombre de pest
   assert.deepEqual(await run("4"), []);
 });
 
-test("timeouts: se pasan a execFile y un timeout no lanza fuera del adaptador", async () => {
-  const { h, calls } = make({ "pane read": { err: true, code: "ETIMEDOUT" } });
-  assert.deepEqual(await h.read("h9:w1:p1"), { ok: false, err: "lectura falló" });
-  assert.equal(calls[0].opts.timeout, 8000);
+test("timeout y maxBuffer llegan a execFile en CADA llamada de cada operación", async () => {
+  const tab = JSON.stringify({ result: { tab: { label: "mt3k-claude-0a1b2c-x1", pane_count: 1, tab_id: "w1:tB" } } });
+  const { h, calls } = make({
+    "pane list": { out: fx("pane-list.json") }, "tab list": { out: fx("tab-list.json") },
+    "pane get w1:pB": { out: fx("pane-get-owned.json") }, "tab get w1:tB": { out: tab },
+    "pane read": { out: "x" }, "pane run": { out: "" }, "pane send-keys": { out: "" },
+    "tab create": { out: fx("tab-create.json") }, "pane close": { out: "" },
+  }, { ledger: new Set(["term_6606d82b37789b"]) });
+  const MARK = () => calls.length;
+  const slices = {};
+  const step = async (name, fn) => { const from = MARK(); await fn(); slices[name] = calls.slice(from); };
+  await step("list", () => h.list());
+  await step("get", () => h.get("h9:w1:pB"));
+  await step("read", () => h.read("h9:w1:pB", { lines: 10 }));
+  await step("send", () => h.send("h9:w1:pB", "x"));
+  await step("keys", () => h.keys("h9:w1:pB", ["up"]));
+  await step("openTab", () => h.openTab({ cwd: "/tmp", label: "mt3k-claude-0a1b2c-x1", argv: ["x"] }));
+  await step("kill", () => h.killTerminal("h9:w1:pB"));
+  const want = {
+    list: [["pane list", 5000], ["tab list", 5000]],
+    get: [["pane get w1:pB", 5000], ["tab get w1:tB", 5000]],
+    read: [["pane read w1:pB --source recent --lines 10", 8000]],
+    send: [["pane run w1:pB x", 5000]],
+    keys: [["pane send-keys w1:pB up", 5000]],
+    openTab: [["tab create --no-focus --label mt3k-claude-0a1b2c-x1 --cwd /tmp", 8000], ["pane run w1:pB 'x'", 8000]],
+    kill: [["pane get w1:pB", 5000], ["tab get w1:tB", 5000], ["pane close w1:pB", 5000]],
+  };
+  for (const [name, expected] of Object.entries(want)) {
+    assert.deepEqual(slices[name].map((c) => [c.argv.join(" "), c.opts.timeout]), expected, name);
+    for (const c of slices[name]) assert.equal(c.opts.maxBuffer, 4 * 1024 * 1024, `${name}: ${c.argv.join(" ")}`);
+  }
+  // y un timeout real de execFile (ETIMEDOUT) no lanza fuera del adaptador
+  const t = make({ "pane read": { err: true, code: "ETIMEDOUT" } });
+  assert.deepEqual(await t.h.read("h9:w1:p1"), { ok: false, err: "lectura falló" });
   const throwing = createHerdr9({ herdrPath: "/x", exec: () => { throw Object.assign(new Error("boom"), { code: "ERR_INVALID_ARG_VALUE" }); }, probe: up, platform: "linux", home: "/h", isSocket: () => false, env: {} });
   assert.deepEqual(await throwing.list(), []);
 });
