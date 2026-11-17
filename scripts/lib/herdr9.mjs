@@ -3,8 +3,8 @@
 // Solo execFile con argv fijo y ids validados; nunca arranca ni para un servidor ni redimensiona: cada invocación pasa
 // antes por un sondeo del socket (`~/.config/herdr/herdr.sock`) y sin servidor vivo no se ejecuta nada.
 // Terminales "del panel": `herdr` 0.9 no tiene etiquetas por terminal, así que el panel crea una PESTAÑA con un nombre
-// `mt3k-<agente>-<hash>-<sufijo>` y recuerda en memoria el `terminal_id` de lo que creó (ledger). Solo con AMBAS
-// condiciones un terminal cuenta como del panel; cualquier otro exige `force` estricto para cerrarse (ver decideKill).
+// `mt3k-<agente>-<hash>-<sufijo>` y recuerda en memoria lo que creó (ledger: terminal_id + pane + pestaña + nombre exacto).
+// Solo si TODO coincide con la fila actual un terminal cuenta como del panel; cualquier otro exige `force` estricto para cerrarse (ver decideKill).
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { posix } from "node:path";
@@ -149,11 +149,11 @@ export function createHerdr9({
   probe = probeUnixSocket,
   home = homedir(),
   timeoutMs, // opcional: sustituye TODOS los timeouts (solo para pruebas con un proceso lento real)
-  ledger = new Set(), // terminal_id de los terminales que creó este proceso
+  // terminal_id → { terminal, pane, tab, label, at }: REGISTRO de lo que `tab create` devolvió (no un conjunto de ids)
+  ledger = new Map(),
 } = {}) {
   let negative = null;
   let socketPath = null; // el endpoint sondeado por la última alive() positiva: la CLI se ejecuta contra ESTE mismo
-  const born = new Map(); // terminal_id → instante de creación (el ledger no se poda durante un margen)
   let health = { ok: true }; // resultado del último `list`: distingue "0 terminales" de "el backend falla"
 
   /** ¿Acepta conexiones el socket del servidor? Sin caché positiva (≈1 ms); negativa ≤ 2 s. Nunca arranca nada. */
@@ -177,13 +177,26 @@ export function createHerdr9({
   const unavailable = (r) => r.code === "ENOENT" || r.code === "NOCORE";
   const NA = "herdr no disponible";
 
-  const remember = (terminal) => {
+  // Tras LEDGER_MAX lanzamientos se descarta el más antiguo (FIFO) aunque siga vivo: pasa a "ajeno" y su cierre pide confirmación
+  // (la dirección segura).
+  const remember = (terminal, { pane, tab, label }) => {
     if (!terminal) return;
-    if (ledger.size >= LEDGER_MAX) { const oldest = ledger.values().next().value; ledger.delete(oldest); born.delete(oldest); }
-    ledger.add(terminal);
-    born.set(terminal, now());
+    if (!ledger.has(terminal) && ledger.size >= LEDGER_MAX) ledger.delete(ledger.keys().next().value);
+    ledger.set(terminal, { terminal, pane, tab, label, at: now() });
   };
-  const ownedBy = (terminalId, label) => Boolean(terminalId) && ledger.has(terminalId) && typeof label === "string" && PANEL_TAB_RE.test(label);
+  /**
+   * ¿Es del panel? Solo si terminal_id, pane, pestaña y nombre exacto coinciden con lo que se creó Y el nombre sigue siendo el del panel.
+   * Un desajuste definitivo (otro pane/pestaña, o nombre leído distinto) borra la entrada vieja; con el nombre desconocido
+   * (lectura fallida) solo se niega, sin borrar.
+   */
+  function ownedBy({ terminalId, pane, tab, label }) {
+    const e = terminalId ? ledger.get(terminalId) : undefined;
+    if (!e) return false;
+    if (e.pane !== pane || e.tab !== tab) { ledger.delete(terminalId); return false; }
+    if (typeof label !== "string") return false;
+    if (label !== e.label || !PANEL_TAB_RE.test(label)) { ledger.delete(terminalId); return false; }
+    return true;
+  }
 
   function invalidate() { negative = null; }
 
@@ -194,12 +207,9 @@ export function createHerdr9({
   function pruneLedger(rows) {
     const present = new Set(rows.map((r) => r.terminalId).filter(Boolean));
     const t = now();
-    for (const id of [...ledger]) {
-      if (present.has(id)) continue;
-      const at = born.get(id);
-      if (at !== undefined && t - at < LEDGER_GRACE_MS) continue;
+    for (const [id, e] of [...ledger]) {
+      if (present.has(id) || t - e.at < LEDGER_GRACE_MS) continue;
       ledger.delete(id);
-      born.delete(id);
     }
   }
 
@@ -224,7 +234,7 @@ export function createHerdr9({
     const tabsBad = tabs !== null && (!tabs.ok ? tabs.code !== "NOCORE" : !Array.isArray(parseJson(tabs.out)?.result?.tabs));
     health = tabsBad ? { ok: false, err: tabs.ok ? "herdr tab list devolvió una salida ilegible" : `herdr tab list falló (${tabs.code})` } : { ok: true };
     const labels = tabs?.ok ? parseTabLabels(tabs.out) : new Map();
-    return rows.map((r) => (ownedBy(r.terminalId, labels.get(r.tabId)) ? { ...r, killable: true } : r));
+    return rows.map((r) => (ownedBy({ terminalId: r.terminalId, pane: r.address, tab: r.tabId, label: labels.get(r.tabId) }) ? { ...r, killable: true } : r));
   }
 
   /** `pane get` + etiqueta de su pestaña → forma de `hc get` (labels[mt3k.panel] = "1" solo si es del panel). */
@@ -241,7 +251,7 @@ export function createHerdr9({
       const t = await execH(["tab", "get", tabId]);
       tab = t.ok ? parseJson(t.out)?.result?.tab ?? null : null;
     }
-    const owned = ownedBy(terminalId, tab?.label);
+    const owned = ownedBy({ terminalId, pane: v.pane, tab: tabId, label: tab?.label });
     return {
       ok: true,
       state: "live",
@@ -301,7 +311,7 @@ export function createHerdr9({
     if (!c.ok) return { ok: false, err: unavailable(c) ? NA : "no se pudo crear el terminal", code: c.code };
     const made = parseTabCreate(c.out);
     if (!made) return { ok: false, err: "herdr no devolvió el terminal" };
-    remember(made.terminal);
+    remember(made.terminal, { pane: made.pane, tab: made.tab, label });
     if (argv.length) {
       const r = await execH(["pane", "run", made.pane, argv.map(shellQuote).join(" ")], RUN_TIMEOUT_MS);
       if (!r.ok) {
