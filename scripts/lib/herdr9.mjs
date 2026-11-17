@@ -6,7 +6,6 @@
 // `mt3k-<agente>-<hash>-<sufijo>` y recuerda en memoria el `terminal_id` de lo que creó (ledger). Solo con AMBAS
 // condiciones un terminal cuenta como del panel; cualquier otro exige `force` estricto para cerrarse (ver decideKill).
 import { execFile } from "node:child_process";
-import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix } from "node:path";
 import { PANEL_LABEL_KEY, decideKill, mapAgent, mapStatus, probeUnixSocket } from "./herdr.mjs";
@@ -20,6 +19,7 @@ const SEND_MAX_BYTES = 64 * 1024;
 const READ_LINES_MAX = 2000;
 const KEYS_MAX = 32;
 const LEDGER_MAX = 512;
+const LEDGER_GRACE_MS = 10000;
 const CMD_ARGV_MAX = 64;
 const CMD_ARG_MAX_BYTES = 8192;
 // C0 salvo \t \n \r (texto pegado en un terminal); en rutas y argv no se admite ninguno
@@ -38,15 +38,16 @@ export const isHerdr9Id = (id) => typeof id === "string" && id.startsWith(H9_PRE
 /** `h9:w1:p3` → `w1:p3`; null si el id no es válido. */
 export const paneOf = (id) => (isHerdr9Id(id) ? id.slice(H9_PREFIX.length) : null);
 
-const isSocketFile = (p) => { try { return statSync(p).isSocket(); } catch { return false; } };
-
-/** Sockets donde puede escuchar el servidor (sesión por defecto): HERDR_SOCKET_PATH (si es un socket) y el de ~/.config. */
-export function herdr9SocketCandidates({ env = process.env, home = homedir(), isSocket = isSocketFile } = {}) {
-  const out = [];
-  if (env.HERDR_SOCKET_PATH && posix.isAbsolute(env.HERDR_SOCKET_PATH) && isSocket(env.HERDR_SOCKET_PATH)) out.push(env.HERDR_SOCKET_PATH);
+/**
+ * El ÚNICO socket que se sondea y contra el que se ejecuta la CLI. Medido (0.9.5): con HERDR_SOCKET_PATH la CLI usa SOLO esa
+ * ruta (`herdr status server --json` → "socket":"<ruta>", `pane list` → server_not_running, sin caer al socket por defecto);
+ * sin ella usa ~/.config/herdr/herdr.sock. Un HERDR_SOCKET_PATH no absoluto → null (sin endpoint: nada se ejecuta).
+ */
+export function herdr9SocketPath({ env = process.env, home = homedir() } = {}) {
+  const override = env.HERDR_SOCKET_PATH;
+  if (override !== undefined && override !== "") return posix.isAbsolute(override) ? override : null;
   const config = env.XDG_CONFIG_HOME && posix.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : posix.join(env.HOME || home, ".config");
-  out.push(posix.join(config, "herdr", "herdr.sock"));
-  return out;
+  return posix.join(config, "herdr", "herdr.sock");
 }
 
 function parseJson(text) {
@@ -147,10 +148,12 @@ export function createHerdr9({
   platform = process.platform,
   probe = probeUnixSocket,
   home = homedir(),
-  isSocket = isSocketFile,
+  timeoutMs, // opcional: sustituye TODOS los timeouts (solo para pruebas con un proceso lento real)
   ledger = new Set(), // terminal_id de los terminales que creó este proceso
 } = {}) {
   let negative = null;
+  let socketPath = null; // el endpoint sondeado por la última alive() positiva: la CLI se ejecuta contra ESTE mismo
+  const born = new Map(); // terminal_id → instante de creación (el ledger no se poda durante un margen)
   let health = { ok: true }; // resultado del último `list`: distingue "0 terminales" de "el backend falla"
 
   /** ¿Acepta conexiones el socket del servidor? Sin caché positiva (≈1 ms); negativa ≤ 2 s. Nunca arranca nada. */
@@ -158,28 +161,47 @@ export function createHerdr9({
     if (platform === "win32" || !herdrPath) return false;
     const t = now();
     if (negative && t - negative.at < NEGATIVE_CACHE_MS) return false;
-    const socks = herdr9SocketCandidates({ env: env ? { ...process.env, ...env } : process.env, home, isSocket });
-    const live = (await Promise.all(socks.map((s) => probe(s)))).some(Boolean);
+    const sock = herdr9SocketPath({ env: env ? { ...process.env, ...env } : process.env, home });
+    const live = sock !== null && Boolean(await probe(sock));
     negative = live ? null : { at: t };
+    socketPath = live ? sock : null;
     return live;
   }
 
   /** Única vía de ejecución de herdr: sin servidor vivo → NOCORE (nada se ejecuta). */
   async function execH(argv, timeout = TIMEOUT_MS, maxBuffer = MAX_BUFFER) {
     if (!(await alive())) return { ok: false, code: "NOCORE" };
-    return runExec(exec, herdrPath, argv, { timeout, env, maxBuffer });
+    // HERDR_SOCKET_PATH explícito = el socket que se acaba de sondear (la CLI lo respeta, medido): nunca otro distinto
+    return runExec(exec, herdrPath, argv, { timeout: timeoutMs ?? timeout, env: { ...env, HERDR_SOCKET_PATH: socketPath }, maxBuffer });
   }
   const unavailable = (r) => r.code === "ENOENT" || r.code === "NOCORE";
   const NA = "herdr no disponible";
 
   const remember = (terminal) => {
     if (!terminal) return;
-    if (ledger.size >= LEDGER_MAX) ledger.delete(ledger.values().next().value);
+    if (ledger.size >= LEDGER_MAX) { const oldest = ledger.values().next().value; ledger.delete(oldest); born.delete(oldest); }
     ledger.add(terminal);
+    born.set(terminal, now());
   };
   const ownedBy = (terminalId, label) => Boolean(terminalId) && ledger.has(terminalId) && typeof label === "string" && PANEL_TAB_RE.test(label);
 
   function invalidate() { negative = null; }
+
+  /**
+   * Olvida los terminales recordados que ya no aparecen en una lista VÁLIDA: un id reutilizado después no hereda "abierto por el
+   * panel". Margen tras la creación para que una lista que empezó antes de crear el terminal no lo poda.
+   */
+  function pruneLedger(rows) {
+    const present = new Set(rows.map((r) => r.terminalId).filter(Boolean));
+    const t = now();
+    for (const id of [...ledger]) {
+      if (present.has(id)) continue;
+      const at = born.get(id);
+      if (at !== undefined && t - at < LEDGER_GRACE_MS) continue;
+      ledger.delete(id);
+      born.delete(id);
+    }
+  }
 
   async function list() {
     if (!(await alive())) return [];
@@ -196,8 +218,11 @@ export function createHerdr9({
       health = { ok: false, err: "herdr pane list devolvió una salida ilegible" };
       return [];
     }
-    health = { ok: true };
     const rows = parsePaneList(panes.out);
+    pruneLedger(rows);
+    // `tab list` fallido = filas degradadas (sin killable) pero el fallo se registra por la misma vía que el de `pane list`
+    const tabsBad = tabs !== null && (!tabs.ok ? tabs.code !== "NOCORE" : !Array.isArray(parseJson(tabs.out)?.result?.tabs));
+    health = tabsBad ? { ok: false, err: tabs.ok ? "herdr tab list devolvió una salida ilegible" : `herdr tab list falló (${tabs.code})` } : { ok: true };
     const labels = tabs?.ok ? parseTabLabels(tabs.out) : new Map();
     return rows.map((r) => (ownedBy(r.terminalId, labels.get(r.tabId)) ? { ...r, killable: true } : r));
   }
