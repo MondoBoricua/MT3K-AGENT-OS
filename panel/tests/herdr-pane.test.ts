@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HERDR_UNAVAILABLE_TITLE, isHerdrPane, isHerdrPaneId } from "../src/lib/herdr-pane.ts";
 
-test("isHerdrPaneId: solo ids hc:", () => {
+test("isHerdrPaneId: solo ids hc: y h9:", () => {
   assert.equal(isHerdrPaneId("hc:t9"), true);
+  assert.equal(isHerdrPaneId("h9:w1:p3"), true);
+  assert.equal(isHerdrPane({ paneId: "h9:w1:pA" }), true);
   assert.equal(isHerdrPaneId("%12"), false);
   assert.equal(isHerdrPaneId("mt3k-claude-x:0.0"), false);
   assert.equal(isHerdrPaneId(undefined), false);
