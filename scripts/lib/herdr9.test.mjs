@@ -571,7 +571,7 @@ test("timeout REAL: el proceso ARRANCA y lo corta el timeout de execFile (no un 
 
 // --- comillas: la línea que se escribe en el terminal nuevo se EJECUTA de verdad en cada shell ---
 const NASTY = ["a\\' ; echo INJECTED #", "termina en barra\\", "$(id)", "`id`", 'comillas "dobles"', "dos\\\\barras", "con  espacios", "", "ñandú ✓ 日本", "$HOME ${HOME} ~", "a;b&c|d>e", "'", "''", "\\'"];
-const SHELLS = [["sh", "/bin/sh"], ["zsh", "/bin/zsh"], ["fish", "/opt/homebrew/bin/fish"], ["bash", "/bin/bash"]];
+const SHELLS = [["sh", "/bin/sh"], ["zsh", "/bin/zsh"], ["fish", ["/opt/homebrew/bin/fish", "/usr/local/bin/fish", "/usr/bin/fish"].find((f) => existsSync(f)) || "/usr/bin/fish"], ["bash", "/bin/bash"]];
 for (const [name, bin] of SHELLS) {
   const have = existsSync(bin);
   test(`shellQuote ejecutado en ${name}: cada argumento sale literal y nunca el marcador inyectado`, { skip: have ? false : `${name} no está instalado (${bin})` }, () => {
@@ -637,7 +637,7 @@ test("openTab: si `pane run` falla y el cierre del pane propio funciona, la entr
 });
 
 test("fixtures sin uso previo: pane-get.json (terminal ajeno → labels vacío) y agent-list.json (coherente con pane-list.json)", async () => {
-  const g = await make({ "pane get w1:p7": { out: fx("pane-get.json") }, "tab get": { out: fx("tab-list.json") } }).h.get("h9:w1:p7");
+  const g = await make({ "pane get w1:p7": { out: fx("pane-get.json") }, "tab get": { out: fx("tab-get.json") } }).h.get("h9:w1:p7");
   assert.equal(g.ok, true);
   assert.equal(g.cwd, "/home/mondo");
   assert.equal(g.tabId, "w1:t7");
