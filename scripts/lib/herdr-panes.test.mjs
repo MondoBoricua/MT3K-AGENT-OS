@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   HERDR_UNAVAILABLE,
-  containsHerdrId,
+  containsHcId,
   createHerdrPanes,
   herdrKeyArgs,
   herdrOccupies,
@@ -70,11 +70,12 @@ test("herdrKeyArgs: tabla del panel, SendNow y teclas no soportadas", () => {
   assert.equal(herdrKeyArgs(undefined), null);
 });
 
-test("containsHerdrId: body de restore anidado", () => {
-  assert.equal(containsHerdrId({ items: [{ sessionName: "hc:t9" }] }), true);
-  assert.equal(containsHerdrId({ dismiss: ["hc:t1b"] }), true);
-  assert.equal(containsHerdrId({ items: [{ sessionName: "mt3k-claude-x" }], all: true }), false);
-  assert.equal(containsHerdrId(null), false);
+test("containsHcId (solo hc): body de restore anidado", () => {
+  assert.equal(containsHcId({ items: [{ sessionName: "hc:t9" }] }), true);
+  assert.equal(containsHcId({ dismiss: ["hc:t1b"] }), true);
+  assert.equal(containsHcId({ items: [{ sessionName: "mt3k-claude-x" }], all: true }), false);
+  assert.equal(containsHcId(null), false);
+  assert.equal(containsHcId({ items: [{ sessionName: "h9:w1:p3" }] }), false); // los h9: los cubre la fachada (herdr-multi), no esta
 });
 
 test("streamFrame: completa, igual y diffs por línea", () => {

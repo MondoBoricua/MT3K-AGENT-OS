@@ -87,6 +87,11 @@ test("isHerdrId / containsHerdrId aceptan ambos formatos y nada más", () => {
   for (const bad of ["%3", "w1:p3", "h9:x", "hc:", null]) assert.equal(isHerdrId(bad), false);
   assert.equal(containsHerdrId({ a: [{ b: "h9:w1:pA" }] }), true);
   assert.equal(containsHerdrId({ a: ["%1", "x"] }), false);
+  // cuerpos de /api/restore: ids h9: anidados en items y dismiss, y mezclados con ids de tmux
+  assert.equal(containsHerdrId({ items: [{ sessionName: "h9:w1:p3" }] }), true);
+  assert.equal(containsHerdrId({ items: [{ sessionName: "mt3k-claude-x" }], dismiss: ["h9:w2:pA"] }), true);
+  assert.equal(containsHerdrId({ items: [{ sessionName: "hc:t9" }] }), true);
+  assert.equal(containsHerdrId({ items: [{ sessionName: "mt3k-claude-x" }], dismiss: ["%1"], all: true }), false);
 });
 
 test("listado: los panes de herdr 0.9 salen bajo su agente con backend herdr, estado y carpeta", async () => {

@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHerdr9Panes } from "./herdr9-panes.mjs";
+import { createHerdr9Launcher } from "./herdr9-launch.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -563,5 +566,87 @@ test("timeout REAL: el proceso ARRANCA y lo corta el timeout de execFile (no un 
     assert.equal(h.health().ok, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- comillas: la línea que se escribe en el terminal nuevo se EJECUTA de verdad en cada shell ---
+const NASTY = ["a\\' ; echo INJECTED #", "termina en barra\\", "$(id)", "`id`", 'comillas "dobles"', "dos\\\\barras", "con  espacios", "", "ñandú ✓ 日本", "$HOME ${HOME} ~", "a;b&c|d>e", "'", "''", "\\'"];
+const SHELLS = [["sh", "/bin/sh"], ["zsh", "/bin/zsh"], ["fish", "/opt/homebrew/bin/fish"], ["bash", "/bin/bash"]];
+for (const [name, bin] of SHELLS) {
+  const have = existsSync(bin);
+  test(`shellQuote ejecutado en ${name}: cada argumento sale literal y nunca el marcador inyectado`, { skip: have ? false : `${name} no está instalado (${bin})` }, () => {
+    const line = ["printf", "<%s>\\n", ...NASTY].map(shellQuote).join(" ");
+    const r = spawnSync(bin, ["-c", line], { encoding: "utf8", timeout: 10000 });
+    assert.equal(r.status, 0, `${name}: ${r.stderr}`);
+    assert.equal(r.stdout, NASTY.map((a) => `<${a}>\n`).join(""), name);
+    assert.ok(!r.stdout.split("\n").includes("INJECTED"), name);
+  });
+}
+
+test("servidor caído tras un fallo: health vuelve a ok, status() sin error y el log de recuperación sale UNA vez", async () => {
+  const logs = [];
+  let mode = "fail";
+  let upNow = true;
+  const f = fakeExec({ "pane list": () => (mode === "fail" ? { err: true, code: 1 } : { out: fx("pane-list.json") }) });
+  const panes = createHerdr9Panes({
+    findCli: () => "/usr/bin/herdr",
+    createHerdr9: ({ herdrPath }) => createHerdr9({ herdrPath, exec: f.exec, probe: async () => upNow, platform: "linux", home: "/h", env: { HERDR_SOCKET_PATH: "" } }),
+    log: (m) => logs.push(m),
+    ttlMs: 0,
+  });
+  const launcher = createHerdr9Launcher({ getHerdr9: () => panes.herdr9() });
+  const poll = async () => { panes.invalidate(); return panes.refresh(true); };
+  await poll();
+  assert.equal(logs.length, 1);
+  assert.deepEqual(await launcher.status(), { installed: true, running: true, app: false, error: logs[0].replace("[mt3k] herdr 0.9: ", "") });
+  upNow = false; // el servidor se cae
+  assert.deepEqual(await poll(), []);
+  assert.deepEqual(panes.health(), { ok: true });
+  assert.deepEqual(await launcher.status(), { installed: true, running: false, app: false }); // sin `error` ni `errors`
+  assert.equal(logs.length, 2);
+  assert.match(logs[1], /vuelve a responder/);
+  for (let i = 0; i < 3; i++) await poll();
+  assert.equal(logs.length, 2); // una sola línea de recuperación
+  upNow = true; mode = "ok"; // vuelve sano: no hay nada más que registrar
+  assert.equal((await poll()).length, 6);
+  assert.equal(logs.length, 2);
+});
+
+test("win32: el backend 0.9 está apagado del todo: no se busca el binario y status() dice installed:false", async () => {
+  let looked = 0;
+  const panes = createHerdr9Panes({ platform: "win32", findCli: () => { looked++; return "C:\\x\\herdr.exe"; }, now: (() => { let t = 0; return () => (t += 60000); })() });
+  assert.equal(panes.herdr9(), null);
+  assert.deepEqual(await panes.refresh(true), []);
+  assert.deepEqual(await createHerdr9Launcher({ getHerdr9: () => panes.herdr9() }).status(), { installed: false, running: false, app: false });
+  assert.deepEqual(await createHerdr9Launcher({ getHerdr9: () => panes.herdr9() }).launch({ agentId: "claude", cwd: "/tmp", argv: [] }), { ok: false, reason: "not-installed" });
+  assert.equal(looked, 0);
+  const posix = createHerdr9Panes({ platform: "linux", findCli: () => { looked++; return "/usr/bin/herdr"; } });
+  assert.ok(posix.herdr9());
+  assert.equal(looked, 1); // control: en Linux sí se busca
+});
+
+test("openTab: si `pane run` falla y el cierre del pane propio funciona, la entrada del ledger se borra; si el cierre falla se conserva", async () => {
+  const a = new Map();
+  const ok = make({ "tab create": { out: fx("tab-create.json") }, "pane run": { err: true, code: 1 }, "pane close": { out: "" } }, { ledger: a });
+  assert.equal((await ok.h.openTab({ cwd: "/tmp", label: "mt3k-a-0a1b2c-x1", argv: ["x"] })).ok, false);
+  assert.equal(a.size, 0);
+  const b = new Map();
+  const bad = make({ "tab create": { out: fx("tab-create.json") }, "pane run": { err: true, code: 1 }, "pane close": { err: true, code: 1 } }, { ledger: b });
+  assert.equal((await bad.h.openTab({ cwd: "/tmp", label: "mt3k-a-0a1b2c-x1", argv: ["x"] })).ok, false);
+  assert.equal(b.size, 1); // el pane pudo quedar vivo: se conserva hasta que la poda lo resuelva
+});
+
+test("fixtures sin uso previo: pane-get.json (terminal ajeno → labels vacío) y agent-list.json (coherente con pane-list.json)", async () => {
+  const g = await make({ "pane get w1:p7": { out: fx("pane-get.json") }, "tab get": { out: fx("tab-list.json") } }).h.get("h9:w1:p7");
+  assert.equal(g.ok, true);
+  assert.equal(g.cwd, "/home/mondo");
+  assert.equal(g.tabId, "w1:t7");
+  assert.deepEqual(g.labels, {});
+  const agents = JSON.parse(fx("agent-list.json")).result.agents;
+  const byPane = Object.fromEntries(parsePaneList(fx("pane-list.json")).map((r) => [r.address, r]));
+  assert.ok(agents.length >= 3);
+  for (const a of agents) {
+    assert.equal(byPane[a.pane_id]?.app, a.agent, a.pane_id);
+    assert.equal(byPane[a.pane_id]?.terminalId, a.terminal_id, a.pane_id);
   }
 });
