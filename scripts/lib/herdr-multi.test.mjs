@@ -216,7 +216,7 @@ test("un `tab list` roto también queda registrado y visible por la fachada (fil
   const tabsOk = JSON.stringify({ result: { tabs: [{ tab_id: "w1:t7", label: "mt3k-cursor-0a1b2c-x1" }] } });
   const routes = { ...ROUTES, "tab list": () => (tabMode === "timeout" ? { err: true, code: "ETIMEDOUT" } : tabMode === "garbage" ? { out: "basura" } : { out: tabsOk }) };
   const f = fakeExec(routes);
-  const ledger = new Set(["term_6606d374946717"]); // el terminal de w1:p7
+  const ledger = new Map([["term_6606d374946717", { terminal: "term_6606d374946717", pane: "w1:p7", tab: "w1:t7", label: "mt3k-cursor-0a1b2c-x1", at: 0 }]]); // el terminal de w1:p7
   const panes = createHerdr9Panes({
     findCli: () => "/usr/bin/herdr",
     createHerdr9: ({ herdrPath }) => createHerdr9({ herdrPath, exec: f.exec, probe: async () => true, platform: "linux", home: "/h", env: { HERDR_SOCKET_PATH: "" }, ledger }),
@@ -328,7 +328,7 @@ test("hc vivo en status() pero que cae antes de despachar → se prueba herdr 0.
   assert.deepEqual([none.r, none.h9Attempts], [{ ok: false, reason: "no-core" }, 0]);
 });
 
-test("integración real hc→herdr 0.9: hc cae tras el sondeo y el lanzador de herdr 0.9 abre el terminal", async () => {
+test("hc→herdr 0.9 con lanzadores reales y exec/sondeos simulados: hc cae tras el sondeo y se abre el terminal con herdr 0.9", async () => {
   const f = fakeExec(ROUTES);
   const h9 = createHerdr9({ herdrPath: "/usr/bin/herdr", exec: f.exec, probe: async () => true, platform: "linux", home: "/h", isSocket: () => false, env: {} });
   let probes = 0;

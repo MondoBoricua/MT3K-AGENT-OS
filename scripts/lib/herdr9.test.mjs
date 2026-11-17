@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +27,13 @@ function fakeExec(routes) {
   };
   return { exec, calls };
 }
+// ledger = REGISTRO de lo que `tab create` devolvió: terminal_id + pane + pestaña + nombre exacto
+const REC = {
+  term_6606d82b37789b: { pane: "w1:pB", tab: "w1:tB", label: "mt3k-claude-0a1b2c-x1" },
+  term_6606d374946717: { pane: "w1:p7", tab: "w1:t7", label: "mt3k-cursor-0a1b2c-x1" },
+  term_old: { pane: "w1:p9", tab: "w1:t9", label: "mt3k-claude-0a1b2c-x1" },
+};
+const L = (...ids) => new Map(ids.map((id) => [id, { terminal: id, ...REC[id], at: 0 }]));
 const up = async () => true;
 const down = async () => false;
 const make = (routes, extra = {}) => {
@@ -181,7 +189,7 @@ test("list: error, timeout o salida ilegible → [] sin lanzar PERO el fallo que
 });
 
 test("fallo de `tab list`: las filas vuelven degradadas (sin killable) y el fallo queda en health()", async () => {
-  const ledger = new Set(["term_6606d374946717"]);
+  const ledger = L("term_6606d374946717");
   const lbl = JSON.stringify({ result: { tabs: [{ tab_id: "w1:t7", label: "mt3k-cursor-0a1b2c-x1" }] } });
   const variants = [
     [{ err: true, code: "ETIMEDOUT" }, /herdr tab list falló \(ETIMEDOUT\)/],
@@ -190,7 +198,7 @@ test("fallo de `tab list`: las filas vuelven degradadas (sin killable) y el fall
     [{ out: '{"result":{"tabs":"x"}}' }, /ilegible/],
   ];
   for (const [tabRoute, re] of variants) {
-    const { h } = make({ "pane list": { out: fx("pane-list.json") }, "tab list": tabRoute }, { ledger: new Set(ledger) });
+    const { h } = make({ "pane list": { out: fx("pane-list.json") }, "tab list": tabRoute }, { ledger: new Map(ledger) });
     const rows = await h.list();
     assert.equal(rows.length, 6); // la lista sigue entera
     assert.ok(rows.every((r) => !r.killable));
@@ -198,7 +206,7 @@ test("fallo de `tab list`: las filas vuelven degradadas (sin killable) y el fall
     assert.match(h.health().err, re);
   }
   // con `tab list` sano el mismo ledger sí marca killable y health queda ok
-  const ok = make({ "pane list": { out: fx("pane-list.json") }, "tab list": { out: lbl } }, { ledger: new Set(ledger) });
+  const ok = make({ "pane list": { out: fx("pane-list.json") }, "tab list": { out: lbl } }, { ledger: new Map(ledger) });
   assert.deepEqual((await ok.h.list()).filter((r) => r.killable).map((r) => r.id), ["h9:w1:p7"]);
   assert.deepEqual(ok.h.health(), { ok: true });
 });
@@ -256,7 +264,7 @@ test("keys: send-keys con teclas validadas", async () => {
 });
 
 test("openTab: crea pestaña sin foco con nombre del panel y escribe el argv entre comillas; el terminal queda en el ledger", async () => {
-  const ledger = new Set();
+  const ledger = new Map();
   const { h, calls } = make({ "tab create": { out: fx("tab-create.json") }, "pane run": { out: "" } }, { ledger });
   const r = await h.openTab({ cwd: "/tmp", label: "mt3k-claude-0a1b2c-x1", argv: ["/usr/bin/env", "PATH=/a b", "claude", "it's"] });
   assert.deepEqual(r, { ok: true, pane: "w1:pB", id: "h9:w1:pB", tab: "w1:tB" });
@@ -291,10 +299,10 @@ test("get: etiqueta mt3k.panel solo con terminal en el ledger Y pestaña con nom
   const tabNamed = (label) => JSON.stringify({ result: { tab: { label, pane_count: 1, tab_id: "w1:tB" } } });
   const mk = (ledger, label) => make({ ...OWNED_ROUTES, "tab get w1:tB": { out: tabNamed(label) } }, { ledger });
   const mine = "term_6606d82b37789b";
-  assert.equal((await mk(new Set([mine]), "mt3k-claude-0a1b2c-x1").h.get("h9:w1:pB")).labels["mt3k.panel"], "1");
-  assert.deepEqual((await mk(new Set(), "mt3k-claude-0a1b2c-x1").h.get("h9:w1:pB")).labels, {}); // nombre del panel pero otro proceso/arranque
-  assert.deepEqual((await mk(new Set([mine]), "mt3k-fixture").h.get("h9:w1:pB")).labels, {}); // en el ledger pero renombrada
-  const g = await mk(new Set([mine]), "mt3k-claude-0a1b2c-x1").h.get("h9:w1:pB");
+  assert.equal((await mk(L(mine), "mt3k-claude-0a1b2c-x1").h.get("h9:w1:pB")).labels["mt3k.panel"], "1");
+  assert.deepEqual((await mk(new Map(), "mt3k-claude-0a1b2c-x1").h.get("h9:w1:pB")).labels, {}); // nombre del panel pero otro proceso/arranque
+  assert.deepEqual((await mk(L(mine), "mt3k-fixture").h.get("h9:w1:pB")).labels, {}); // en el ledger pero renombrada
+  const g = await mk(L(mine), "mt3k-claude-0a1b2c-x1").h.get("h9:w1:pB");
   assert.equal(g.cwd, "/tmp");
   assert.equal(g.state, "live");
   assert.deepEqual(await make({}).h.get("hc:t1"), { ok: false, err: "terminal inválido" });
@@ -306,11 +314,11 @@ test("killTerminal: del panel → `pane close` de ESE pane; ajeno sin force → 
   const routes = (label) => ({ ...OWNED_ROUTES, "tab get w1:tB": { out: tabNamed(label) }, "tab close": { out: fx("tab-close.txt") }, "pane close": { out: "" } });
   const closes = (calls) => calls.filter((c) => c.argv[1] === "close");
 
-  const own = make(routes("mt3k-claude-0a1b2c-x1"), { ledger: new Set([mine]) });
+  const own = make(routes("mt3k-claude-0a1b2c-x1"), { ledger: L(mine) });
   assert.deepEqual(await own.h.killTerminal("h9:w1:pB"), { ok: true, removed: true, forced: false });
   assert.deepEqual(closes(own.calls).map((c) => c.argv), [["pane", "close", "w1:pB"]]);
 
-  const foreign = make(routes("trabajo"), { ledger: new Set([mine]) });
+  const foreign = make(routes("trabajo"), { ledger: L(mine) });
   const denied = await foreign.h.killTerminal("h9:w1:pB");
   assert.equal(denied.ok, false);
   assert.equal(denied.status, 409);
@@ -335,7 +343,7 @@ test("killTerminal: otro pane añadido a la pestaña entre la lectura y el cierr
   let tabReads = 0;
   // la primera lectura ve 1 pane; cualquier otra (o el estado real al cerrar) ya tendría 2: el cierre no puede depender de ese conteo
   const tab = () => { tabReads++; return { out: JSON.stringify({ result: { tab: { label: "mt3k-claude-0a1b2c-x1", pane_count: tabReads === 1 ? 1 : 2, tab_id: "w1:tB" } } }) }; };
-  const m = make({ ...OWNED_ROUTES, "tab get w1:tB": tab, "pane close": { out: "" }, "tab close": { out: "" } }, { ledger: new Set([mine]) });
+  const m = make({ ...OWNED_ROUTES, "tab get w1:tB": tab, "pane close": { out: "" }, "tab close": { out: "" } }, { ledger: L(mine) });
   assert.deepEqual(await m.h.killTerminal("h9:w1:pB"), { ok: true, removed: true, forced: false });
   assert.ok(!m.calls.some((c) => c.argv[0] === "tab" && c.argv[1] === "close"), JSON.stringify(m.calls.map((c) => c.argv)));
   assert.deepEqual(m.calls.at(-1).argv, ["pane", "close", "w1:pB"]);
@@ -347,13 +355,13 @@ test("killTerminal: otro pane añadido a la pestaña entre la lectura y el cierr
 
 test("killTerminal: un fallo de `close` no lanza y se informa", async () => {
   const tabNamed = JSON.stringify({ result: { tab: { label: "mt3k-claude-0a1b2c-x1", pane_count: 1, tab_id: "w1:tB" } } });
-  const m = make({ ...OWNED_ROUTES, "tab get w1:tB": { out: tabNamed }, "pane close": { err: true, code: 1 } }, { ledger: new Set(["term_6606d82b37789b"]) });
+  const m = make({ ...OWNED_ROUTES, "tab get w1:tB": { out: tabNamed }, "pane close": { err: true, code: 1 } }, { ledger: L("term_6606d82b37789b") });
   const r = await m.h.killTerminal("h9:w1:pB");
   assert.deepEqual([r.ok, r.status], [false, 500]);
 });
 
 test("list marca killable solo los terminales del panel (ledger + nombre de pestaña)", async () => {
-  const ledger = new Set(["term_6606d374946717"]); // el de w1:p7 (pestaña w1:t7)
+  const ledger = L("term_6606d374946717"); // el de w1:p7 (pestaña w1:t7)
   const labels = (l) => JSON.stringify({ result: { tabs: [{ tab_id: "w1:t7", label: l }] } });
   const run = async (l) => (await make({ "pane list": { out: fx("pane-list.json") }, "tab list": { out: labels(l) } }, { ledger }).h.list()).filter((r) => r.killable).map((r) => r.id);
   assert.deepEqual(await run("mt3k-cursor-0a1b2c-x1"), ["h9:w1:p7"]);
@@ -362,9 +370,9 @@ test("list marca killable solo los terminales del panel (ledger + nombre de pest
 
 test("el ledger olvida un terminal que ya no aparece en la lista: un id reutilizado con nombre mt3k-… NO hereda 'abierto por el panel'", async () => {
   let t = 1000;
-  const ledger = new Set();
+  const ledger = new Map();
   const X = "term_6606d82b37789b"; // el id de tab-create.json
-  const listJson = (terminals) => JSON.stringify({ result: { panes: terminals.map((tid, i) => ({ pane_id: `w1:p${i + 1}`, tab_id: "w1:tB", terminal_id: tid, cwd: "/tmp" })) } });
+  const listJson = (terminals) => JSON.stringify({ result: { panes: terminals.map((tid, i) => ({ pane_id: i === 0 ? "w1:pB" : `w1:p${i + 1}`, tab_id: "w1:tB", terminal_id: tid, cwd: "/tmp" })) } });
   const tabsJson = JSON.stringify({ result: { tabs: [{ tab_id: "w1:tB", label: "mt3k-claude-0a1b2c-x1" }] } });
   let panes = listJson([X]);
   const { h } = make({
@@ -396,7 +404,7 @@ test("el ledger olvida un terminal que ya no aparece en la lista: un id reutiliz
 
 test("el ledger NO se poda con una lista fallida", async () => {
   let t = 1000;
-  const ledger = new Set(["term_old"]);
+  const ledger = L("term_old");
   let mode = "bad";
   const { h } = make({ "pane list": () => (mode === "bad" ? { err: true, code: 1 } : { out: '{"result":{"panes":[]}}' }), "tab list": { out: '{"result":{"tabs":[]}}' } }, { ledger, now: () => t });
   t += 60000;
@@ -407,6 +415,85 @@ test("el ledger NO se poda con una lista fallida", async () => {
   assert.equal(ledger.has("term_old"), false); // sin registro de creación (inyectado) se poda en la primera lista válida
 });
 
+test("un terminal_id reutilizado sin ver su ausencia NO hereda la propiedad: otro pane/pestaña u otro nombre mt3k-… → no killable, cierre sin force 409 y ningún `pane close`", async () => {
+  const X = "term_6606d82b37789b"; // creado por el panel en w1:pB / w1:tB como mt3k-claude-0a1b2c-x1
+  const label = (l) => JSON.stringify({ result: { tab: { label: l, pane_count: 1, tab_id: "w2:t2" } } });
+  const scenario = (paneId, tabId, tabLabel) => {
+    const lst = JSON.stringify({ result: { panes: [{ pane_id: paneId, tab_id: tabId, terminal_id: X, cwd: "/tmp" }] } });
+    const tabs = JSON.stringify({ result: { tabs: [{ tab_id: tabId, label: tabLabel }] } });
+    const get = JSON.stringify({ result: { pane: { pane_id: paneId, tab_id: tabId, terminal_id: X, cwd: "/tmp" } } });
+    const tab = JSON.stringify({ result: { tab: { label: tabLabel, pane_count: 1, tab_id: tabId } } });
+    return { "pane list": { out: lst }, "tab list": { out: tabs }, [`pane get ${paneId}`]: { out: get }, [`tab get ${tabId}`]: { out: tab }, "pane close": { out: "" } };
+  };
+  const cases = [
+    ["otro pane y otra pestaña, nombre del panel idéntico", "w2:p2", "w2:t2", "mt3k-claude-0a1b2c-x1"],
+    ["mismos pane y pestaña, otro nombre mt3k-…", "w1:pB", "w1:tB", "mt3k-claude-ffffff-z9"],
+    ["mismo pane, otra pestaña", "w1:pB", "w2:t2", "mt3k-claude-0a1b2c-x1"],
+  ];
+  for (const [name, pane, tabId, tabLabel] of cases) {
+    const ledger = L(X);
+    const { h, calls } = make(scenario(pane, tabId, tabLabel), { ledger, now: () => 5 }); // sin lista vacía entre medias; dentro del margen de gracia
+    const rows = await h.list();
+    assert.equal(rows.length, 1, name);
+    assert.equal(rows[0].killable, undefined, name);
+    assert.equal(ledger.has(X), false, `${name}: la entrada vieja se borra`);
+    // y con la entrada restaurada, `get`/`killTerminal` tampoco la heredan
+    const again = make(scenario(pane, tabId, tabLabel), { ledger: L(X) });
+    assert.deepEqual((await again.h.get(`h9:${pane}`)).labels, {}, name);
+    const k = await make(scenario(pane, tabId, tabLabel), { ledger: L(X) }).h.killTerminal(`h9:${pane}`);
+    assert.deepEqual([k.ok, k.status, k.needsConfirm], [false, 409, true], name);
+    const kc = make(scenario(pane, tabId, tabLabel), { ledger: L(X) });
+    await kc.h.killTerminal(`h9:${pane}`);
+    assert.ok(!kc.calls.some((c) => c.argv[1] === "close"), `${name}: no debe emitir close`);
+    void calls;
+  }
+  // control: con pane, pestaña y nombre exactos SÍ es del panel
+  const ok = make(scenario("w1:pB", "w1:tB", "mt3k-claude-0a1b2c-x1"), { ledger: L(X) });
+  assert.equal((await ok.h.list())[0].killable, true);
+});
+
+test("un fallo al leer el nombre de la pestaña niega la propiedad pero NO borra la entrada", async () => {
+  const X = "term_6606d82b37789b";
+  const ledger = L(X);
+  const { h } = make({ ...OWNED_ROUTES, "tab get w1:tB": { err: true, code: "ETIMEDOUT" }, "pane close": { out: "" } }, { ledger });
+  assert.deepEqual((await h.get("h9:w1:pB")).labels, {});
+  assert.equal(ledger.has(X), true);
+});
+
+test("abrir y cerrar 20 terminales no deja residuo: un solo registro (ledger) y queda vacío", async () => {
+  const ledger = new Map();
+  let n = 0;
+  const create = () => { n++; return { out: JSON.stringify({ result: { root_pane: { pane_id: `w1:p${n}`, tab_id: `w1:t${n}`, terminal_id: `term_${n}` }, tab: { tab_id: `w1:t${n}` } } }) }; };
+  let cur = 0;
+  const labelOf = (i) => `mt3k-claude-0a1b2c-${(i % 36).toString(36)}`;
+  const { h } = make({
+    "tab create": create, "pane run": { out: "" }, "pane close": { out: "" }, "pane list": { out: '{"result":{"panes":[]}}' }, "tab list": { out: '{"result":{"tabs":[]}}' },
+    "pane get": (argv) => ({ out: JSON.stringify({ result: { pane: { pane_id: argv[2], tab_id: `w1:t${cur}`, terminal_id: `term_${cur}` } } }) }),
+    "tab get": () => ({ out: JSON.stringify({ result: { tab: { label: labelOf(cur), pane_count: 1, tab_id: `w1:t${cur}` } } }) }),
+  }, { ledger });
+  for (let i = 1; i <= 20; i++) {
+    cur = i;
+    const r = await h.openTab({ cwd: "/tmp", label: labelOf(i), argv: ["x"] });
+    assert.equal(r.ok, true);
+    assert.equal(ledger.size, 1);
+    assert.equal((await h.killTerminal(r.id)).ok, true);
+    assert.equal(ledger.size, 0);
+  }
+  await h.list();
+  assert.equal(ledger.size, 0);
+});
+
+test("LEDGER_MAX: pasados 512 lanzamientos se descarta el más antiguo (FIFO) aunque siga vivo → pasa a ajeno (dirección segura)", async () => {
+  const ledger = new Map();
+  let n = 0;
+  const create = () => { n++; return { out: JSON.stringify({ result: { root_pane: { pane_id: `w1:p${n}`, tab_id: `w1:t${n}`, terminal_id: `term_${n}` }, tab: { tab_id: `w1:t${n}` } } }) }; };
+  const { h } = make({ "tab create": create }, { ledger });
+  for (let i = 1; i <= 513; i++) await h.openTab({ cwd: "/tmp", label: "mt3k-claude-0a1b2c-x1", argv: [] });
+  assert.equal(ledger.size, 512);
+  assert.equal(ledger.has("term_1"), false);
+  assert.equal(ledger.has("term_513"), true);
+});
+
 test("timeout y maxBuffer llegan a execFile en CADA llamada de cada operación", async () => {
   const tab = JSON.stringify({ result: { tab: { label: "mt3k-claude-0a1b2c-x1", pane_count: 1, tab_id: "w1:tB" } } });
   const { h, calls } = make({
@@ -414,7 +501,7 @@ test("timeout y maxBuffer llegan a execFile en CADA llamada de cada operación",
     "pane get w1:pB": { out: fx("pane-get-owned.json") }, "tab get w1:tB": { out: tab },
     "pane read": { out: "x" }, "pane run": { out: "" }, "pane send-keys": { out: "" },
     "tab create": { out: fx("tab-create.json") }, "pane close": { out: "" },
-  }, { ledger: new Set(["term_6606d82b37789b"]) });
+  }, { ledger: L("term_6606d82b37789b") });
   const MARK = () => calls.length;
   const slices = {};
   const step = async (name, fn) => { const from = MARK(); await fn(); slices[name] = calls.slice(from); };
@@ -445,22 +532,35 @@ test("timeout y maxBuffer llegan a execFile en CADA llamada de cada operación",
   assert.deepEqual(await throwing.list(), []);
 });
 
-test("timeout REAL: un proceso lento se corta por el timeout de execFile y la llamada falla en vez de colgarse", async () => {
+test("timeout REAL: el proceso ARRANCA y lo corta el timeout de execFile (no un fallo de arranque ni un fallo inmediato)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mt3k-h9-slow-"));
+  const TIMEOUT = 600;
   try {
-    // seam: `herdrPath` es un script inofensivo que solo duerme (nunca el `herdr` real); exec = el execFile real del módulo
+    // seam: `herdrPath` es un script inofensivo (nunca el `herdr` real) que deja una marca y duerme; exec = el execFile real
+    const marker = join(dir, "started");
     const slow = join(dir, "herdr-slow");
-    writeFileSync(slow, "#!/bin/sh\nexec sleep 8\n");
+    writeFileSync(slow, `#!/bin/sh\necho started >> '${marker}'\nexec sleep 8\n`);
     chmodSync(slow, 0o755);
-    const h = createHerdr9({ herdrPath: slow, probe: up, platform: "linux", home: dir, env: { HERDR_SOCKET_PATH: "" }, timeoutMs: 300 });
+    const errors = [];
+    const spy = (bin, argv, opts, cb) => execFile(bin, argv, opts, (err, so, se) => { errors.push(err); cb(err, so, se); });
+    const h = createHerdr9({ herdrPath: slow, exec: spy, probe: up, platform: "linux", home: dir, env: { HERDR_SOCKET_PATH: "" }, timeoutMs: TIMEOUT });
     for (const [name, fn] of [["read", () => h.read("h9:w1:p1")], ["send", () => h.send("h9:w1:p1", "x")], ["list", () => h.list()]]) {
+      const before = errors.length;
       const t0 = Date.now();
       const r = await fn();
       const took = Date.now() - t0;
+      assert.ok(took >= TIMEOUT - 50, `${name} volvió en ${took} ms: no esperó al timeout (fallo inmediato)`);
       assert.ok(took < 3000, `${name} tardó ${took} ms: el timeout no cortó el proceso`);
       assert.ok(Array.isArray(r) ? r.length === 0 : r.ok === false, name);
+      const err = errors[before];
+      assert.ok(err, `${name}: execFile devolvió error`);
+      assert.notEqual(err.code, "ENOENT", `${name}: fallo de arranque, no timeout`);
+      assert.equal(err.killed, true, `${name}: no fue cortado por el timeout`);
+      assert.equal(err.signal, "SIGTERM", name);
     }
-    assert.equal(h.health().ok, false); // el list lento queda registrado como fallo del backend
+    // el script llegó a ejecutarse (con la máquina cargada el timeout puede cortar alguna llamada antes de que escriba su marca)
+    assert.ok(readFileSync(marker, "utf8").trim().split("\n").length >= 1);
+    assert.equal(h.health().ok, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
