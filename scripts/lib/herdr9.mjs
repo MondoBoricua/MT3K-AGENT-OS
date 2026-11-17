@@ -106,8 +106,12 @@ export function parseErrorCode(text) {
   return typeof c === "string" ? c : null;
 }
 
-/** Comillas simples POSIX (también válidas en fish): el argv se escribe como UNA línea en el shell del terminal nuevo. */
-export const shellQuote = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+/**
+ * Comillas para escribir el argv como UNA línea en el shell del terminal nuevo (sh, bash, zsh y fish). Dentro de '…' fish trata
+ * `\'` y `\\` como escapes, así que NUNCA se deja `\` ni `'` dentro de un tramo entre comillas: se cierran, se escapan fuera
+ * (`\\` y `\'` valen igual en los cuatro shells) y se reabren.
+ */
+export const shellQuote = (s) => `'${String(s).replace(/[\\']/g, "'\\$&'")}'`;
 
 /** null = válido; si no, el mensaje. Para abrir una pestaña con un comando. */
 export function openInputError({ cwd, label, argv }) {
@@ -214,7 +218,7 @@ export function createHerdr9({
   }
 
   async function list() {
-    if (!(await alive())) return [];
+    if (!(await alive())) { health = { ok: true }; return []; } // servidor no corriendo ≠ backend roto: no se arrastra un fallo viejo
     const [panes, tabs] = await Promise.all([
       execH(["pane", "list"]),
       ledger.size ? execH(["tab", "list"]) : Promise.resolve(null), // sin nada creado por el panel no hace falta leer etiquetas
@@ -315,7 +319,8 @@ export function createHerdr9({
     if (argv.length) {
       const r = await execH(["pane", "run", made.pane, argv.map(shellQuote).join(" ")], RUN_TIMEOUT_MS);
       if (!r.ok) {
-        await execH(["pane", "close", made.pane]); // el pane es nuestro (recién creado); cerrar su único pane quita la pestaña (medido)
+        const closed = await execH(["pane", "close", made.pane]); // el pane es nuestro (recién creado); cerrar su único pane quita la pestaña (medido)
+        if (closed.ok) ledger.delete(made.terminal); // ya no existe: no hace falta esperar al margen de la poda
         return { ok: false, err: "no se pudo escribir el comando" };
       }
     }

@@ -7,8 +7,10 @@ export function createHerdr9Launcher({ getHerdr9 = () => null, nameSuffix } = {}
   async function status() {
     const h = getHerdr9();
     if (!h) return { installed: false, running: false, app: false };
+    const running = await h.coreUp().catch(() => false);
     const health = h.health?.() ?? { ok: true };
-    return { installed: true, running: await h.coreUp().catch(() => false), app: false, ...(health.ok ? {} : { error: health.err }) };
+    // `error` solo con el servidor vivo: sin servidor no hay "lista que falla" (contrato de errors en herdr-multi.mjs)
+    return { installed: true, running, app: false, ...(running && !health.ok ? { error: health.err } : {}) };
   }
 
   /** { ok:true, paneId, address, via, name } | { ok:false, reason: "not-installed" | "no-core" | "error", err? } */

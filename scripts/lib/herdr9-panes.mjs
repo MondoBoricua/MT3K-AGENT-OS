@@ -34,6 +34,7 @@ export function createHerdr9Panes({
   ttlMs = HERDR_LIST_TTL_MS,
   color = true,
   log = (m) => console.warn(m),
+  platform = process.platform,
 } = {}) {
   let herdr = null;
   let lastHealthKey = "ok"; // el fallo se registra una vez por cambio de estado, no en cada consulta
@@ -45,7 +46,7 @@ export function createHerdr9Panes({
 
   // Con MT3K_HERDR=0 / MT3K_HERDR9=0 ni se busca la CLI; ausente se reintenta cada 30 s.
   function client() {
-    if (!enabled) return null;
+    if (!enabled || platform === "win32") return null; // sin sockets unix (no medido en Windows): ni se busca el binario
     const t = now();
     if (t - checkedAt >= LOOKUP_MS) {
       checkedAt = t;

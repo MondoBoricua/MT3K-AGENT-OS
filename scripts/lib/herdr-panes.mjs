@@ -51,11 +51,11 @@ export function herdrKeyArgs(name) {
   return [...KEY_TABLE[name]];
 }
 
-/** ¿Algún string del valor (profundidad acotada) es un id de Herdr? Para rechazar bodies de /api/restore. */
-export function containsHerdrId(value, depth = 0) {
+/** SOLO ids de hc (`hc:tN`). Para rechazar bodies de /api/restore usar `containsHerdrId` de herdr-multi.mjs (cubre también `h9:`). */
+export function containsHcId(value, depth = 0) {
   if (typeof value === "string") return isHerdrId(value);
   if (depth > 4 || value === null || typeof value !== "object") return false;
-  return Object.values(value).some((v) => containsHerdrId(v, depth + 1));
+  return Object.values(value).some((v) => containsHcId(v, depth + 1));
 }
 
 /**
