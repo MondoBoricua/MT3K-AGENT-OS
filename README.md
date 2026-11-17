@@ -236,7 +236,7 @@ The panel speaks to both, detected independently, so a host can have `hc`, `herd
 | Colour | snapshot over `hc connect` | `herdr pane read --ansi` (no resizing involved) |
 | Keys | the full panel set | all but Home, End, PageUp, PageDown (not supported by 0.9.5) |
 | Launch | `hc run --bg` or the Herdr window | a new tab (`tab create --no-focus`) named `mt3k-<agent>-<hash>-<n>` with the command typed into its shell |
-| Panel-owned | label `mt3k.panel=1` | tab name `mt3k-…` **and** the terminal is in this server process's memory; after a panel restart earlier terminals count as yours and ask for confirmation |
+| Panel-owned | label `mt3k.panel=1` | tab name `mt3k-…` **and** the terminal is in this server process's memory; after a panel restart earlier terminals count as foreign and ask for confirmation |
 
 With both installed, **Abrir terminales con: Herdr** uses `hc` when its core is running, otherwise `herdr` 0.9 when its
 server is running; the panel never starts either. `MT3K_HERDR9=0` turns off only the 0.9 backend.
