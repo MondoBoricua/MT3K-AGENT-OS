@@ -225,6 +225,22 @@ machine added to Herdr are not listed; a terminal nobody is viewing in Herdr is 
 command the terminal runs. Verified with Claude Code, Codex, Junie, Hermes and a plain shell, on
 macOS, and running on a Linux host; Windows is covered by unit tests only.
 
+#### Two Herdr generations
+
+The panel speaks to both, detected independently, so a host can have `hc`, `herdr`, both or neither:
+
+| | `hc` (Herdr Core 0.1.x) | `herdr` 0.9.x (e.g. Omarchy/Arch `/usr/bin/herdr`) |
+|---|---|---|
+| Pane ids | `hc:t9` | `h9:w1:p3` (workspace `w1`, pane `p3`; the suffix can be hex, `h9:w1:pA`) |
+| Needs | the `hc` binary and a running core | the `herdr` CLI and a running server (`~/.config/herdr/herdr.sock`) |
+| Colour | snapshot over `hc connect` | `herdr pane read --ansi` (no resizing involved) |
+| Keys | the full panel set | all but Home, End, PageUp, PageDown (not supported by 0.9.5) |
+| Launch | `hc run --bg` or the Herdr window | a new tab (`tab create --no-focus`) named `mt3k-<agent>-<hash>-<n>` with the command typed into its shell |
+| Panel-owned | label `mt3k.panel=1` | tab name `mt3k-…` **and** the terminal is in this server process's memory; after a panel restart earlier terminals count as yours and ask for confirmation |
+
+With both installed, **Abrir terminales con: Herdr** uses `hc` when its core is running, otherwise `herdr` 0.9 when its
+server is running; the panel never starts either. `MT3K_HERDR9=0` turns off only the 0.9 backend.
+
 `MT3K_HERDR=0` turns the integration off; `MT3K_HERDR_COLOR=0` keeps it but always reads plain text.
 
 ### Alerts
