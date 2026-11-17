@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  PANEL_TAB_RE, createHerdr9, herdr9SocketCandidates, isHerdr9Id, openInputError, paneOf,
+  PANEL_TAB_RE, createHerdr9, herdr9SocketPath, isHerdr9Id, openInputError, paneOf,
   parseErrorCode, parsePaneList, parseTabCreate, parseTabLabels, shellQuote,
 } from "./herdr9.mjs";
 
@@ -29,7 +30,7 @@ const up = async () => true;
 const down = async () => false;
 const make = (routes, extra = {}) => {
   const f = fakeExec(routes);
-  const h = createHerdr9({ herdrPath: "/usr/bin/herdr", exec: f.exec, probe: up, platform: "linux", home: "/h", isSocket: () => false, env: {}, ...extra });
+  const h = createHerdr9({ herdrPath: "/usr/bin/herdr", exec: f.exec, probe: up, platform: "linux", home: "/h", env: { HERDR_SOCKET_PATH: "" }, ...extra });
   return { h, ...f };
 };
 
@@ -100,11 +101,36 @@ test("shellQuote / openInputError: comillas simples y validación estricta", () 
   assert.ok(PANEL_TAB_RE.test("mt3k-claude-0a1b2c-x1"));
 });
 
-test("herdr9SocketCandidates: ~/.config/herdr/herdr.sock y HERDR_SOCKET_PATH solo si es un socket absoluto", () => {
-  assert.deepEqual(herdr9SocketCandidates({ env: {}, home: "/home/u", isSocket: () => false }), ["/home/u/.config/herdr/herdr.sock"]);
-  assert.deepEqual(herdr9SocketCandidates({ env: { XDG_CONFIG_HOME: "/x" }, home: "/home/u", isSocket: () => false }), ["/x/herdr/herdr.sock"]);
-  assert.deepEqual(herdr9SocketCandidates({ env: { HERDR_SOCKET_PATH: "/run/h.sock" }, home: "/home/u", isSocket: (p) => p === "/run/h.sock" }), ["/run/h.sock", "/home/u/.config/herdr/herdr.sock"]);
-  assert.deepEqual(herdr9SocketCandidates({ env: { HERDR_SOCKET_PATH: "rel.sock" }, home: "/home/u", isSocket: () => true }), ["/home/u/.config/herdr/herdr.sock"]);
+test("herdr9SocketPath: UN solo endpoint (override si existe, si no el de ~/.config); override inválido = ninguno", () => {
+  assert.equal(herdr9SocketPath({ env: {}, home: "/home/u" }), "/home/u/.config/herdr/herdr.sock");
+  assert.equal(herdr9SocketPath({ env: { XDG_CONFIG_HOME: "/x" }, home: "/home/u" }), "/x/herdr/herdr.sock");
+  assert.equal(herdr9SocketPath({ env: { HERDR_SOCKET_PATH: "/run/h.sock" }, home: "/home/u" }), "/run/h.sock");
+  assert.equal(herdr9SocketPath({ env: { HERDR_SOCKET_PATH: "rel.sock" }, home: "/home/u" }), null);
+  assert.equal(herdr9SocketPath({ env: { HERDR_SOCKET_PATH: "" }, home: "/home/u" }), "/home/u/.config/herdr/herdr.sock");
+});
+
+test("override caído + socket por defecto vivo → NO corriendo y cero exec (no se valida un socket distinto del que usaría la CLI)", async () => {
+  const probed = [];
+  const probe = async (sock) => { probed.push(sock); return sock === "/h/.config/herdr/herdr.sock"; }; // el por defecto vive, el override no
+  const { h, calls } = make({ "pane list": { out: fx("pane-list.json") } }, { probe, env: { HERDR_SOCKET_PATH: "/run/muerto.sock", HOME: "/h" } });
+  assert.equal(await h.coreUp(), false);
+  assert.deepEqual(await h.list(), []);
+  assert.equal((await h.send("h9:w1:p1", "x")).ok, false);
+  assert.equal(calls.length, 0);
+  assert.ok(probed.length >= 1 && probed.every((p) => p === "/run/muerto.sock"), probed.join(","));
+  assert.deepEqual(h.health(), { ok: true }); // servidor no corriendo ≠ backend roto
+});
+
+test("la CLI se ejecuta con HERDR_SOCKET_PATH = el socket que se sondeó (override o por defecto)", async () => {
+  for (const [env, want] of [[{ HERDR_SOCKET_PATH: "/run/h.sock" }, "/run/h.sock"], [{ HERDR_SOCKET_PATH: "", HOME: "/h", XDG_CONFIG_HOME: "" }, "/h/.config/herdr/herdr.sock"]]) {
+    const { h, calls } = make({ "pane list": { out: fx("pane-list.json") } }, { env, probe: async (s) => s === want });
+    assert.equal((await h.list()).length, 6);
+    assert.equal(calls[0].opts.env.HERDR_SOCKET_PATH, want);
+  }
+  assert.equal(herdr9SocketPath({ env: { HERDR_SOCKET_PATH: "rel.sock" } }), null);
+  const bad = make({ "pane list": { out: fx("pane-list.json") } }, { env: { HERDR_SOCKET_PATH: "rel.sock" } });
+  assert.deepEqual(await bad.h.list(), []);
+  assert.equal(bad.calls.length, 0);
 });
 
 test("sin servidor vivo (o win32, o sin binario) NINGÚN método ejecuta herdr", async () => {
@@ -152,6 +178,29 @@ test("list: error, timeout o salida ilegible → [] sin lanzar PERO el fallo que
   const off = make({}, { probe: down });
   assert.deepEqual(await off.h.list(), []);
   assert.deepEqual(off.h.health(), { ok: true });
+});
+
+test("fallo de `tab list`: las filas vuelven degradadas (sin killable) y el fallo queda en health()", async () => {
+  const ledger = new Set(["term_6606d374946717"]);
+  const lbl = JSON.stringify({ result: { tabs: [{ tab_id: "w1:t7", label: "mt3k-cursor-0a1b2c-x1" }] } });
+  const variants = [
+    [{ err: true, code: "ETIMEDOUT" }, /herdr tab list falló \(ETIMEDOUT\)/],
+    [{ err: true, code: 1 }, /herdr tab list falló \(1\)/],
+    [{ out: "basura" }, /tab list devolvió una salida ilegible/],
+    [{ out: '{"result":{"tabs":"x"}}' }, /ilegible/],
+  ];
+  for (const [tabRoute, re] of variants) {
+    const { h } = make({ "pane list": { out: fx("pane-list.json") }, "tab list": tabRoute }, { ledger: new Set(ledger) });
+    const rows = await h.list();
+    assert.equal(rows.length, 6); // la lista sigue entera
+    assert.ok(rows.every((r) => !r.killable));
+    assert.equal(h.health().ok, false);
+    assert.match(h.health().err, re);
+  }
+  // con `tab list` sano el mismo ledger sí marca killable y health queda ok
+  const ok = make({ "pane list": { out: fx("pane-list.json") }, "tab list": { out: lbl } }, { ledger: new Set(ledger) });
+  assert.deepEqual((await ok.h.list()).filter((r) => r.killable).map((r) => r.id), ["h9:w1:p7"]);
+  assert.deepEqual(ok.h.health(), { ok: true });
 });
 
 test("health se recupera cuando la lista vuelve a responder", async () => {
@@ -311,6 +360,53 @@ test("list marca killable solo los terminales del panel (ledger + nombre de pest
   assert.deepEqual(await run("4"), []);
 });
 
+test("el ledger olvida un terminal que ya no aparece en la lista: un id reutilizado con nombre mt3k-… NO hereda 'abierto por el panel'", async () => {
+  let t = 1000;
+  const ledger = new Set();
+  const X = "term_6606d82b37789b"; // el id de tab-create.json
+  const listJson = (terminals) => JSON.stringify({ result: { panes: terminals.map((tid, i) => ({ pane_id: `w1:p${i + 1}`, tab_id: "w1:tB", terminal_id: tid, cwd: "/tmp" })) } });
+  const tabsJson = JSON.stringify({ result: { tabs: [{ tab_id: "w1:tB", label: "mt3k-claude-0a1b2c-x1" }] } });
+  let panes = listJson([X]);
+  const { h } = make({
+    "tab create": { out: fx("tab-create.json") }, "pane run": { out: "" },
+    "pane list": () => ({ out: panes }), "tab list": { out: tabsJson },
+    "pane get": { out: fx("pane-get-owned.json") }, "tab get": { out: JSON.stringify({ result: { tab: { label: "mt3k-claude-0a1b2c-x1", pane_count: 1, tab_id: "w1:tB" } } }) },
+    "pane close": { out: "" },
+  }, { ledger, now: () => t });
+  await h.openTab({ cwd: "/tmp", label: "mt3k-claude-0a1b2c-x1", argv: ["x"] });
+  assert.ok(ledger.has(X));
+  assert.equal((await h.list())[0].killable, true); // propio y presente
+  // desaparece fuera del panel; dentro del margen de creación todavía se conserva (una lista previa no lo poda)…
+  panes = listJson([]);
+  t += 2000;
+  await h.list();
+  assert.ok(ledger.has(X));
+  // …pasado el margen, una lista válida sin él lo olvida
+  t += 20000;
+  await h.list();
+  assert.equal(ledger.has(X), false);
+  // más tarde otro terminal recibe el mismo id y una pestaña mt3k-…: NO es del panel
+  panes = listJson([X]);
+  const again = await h.list();
+  assert.equal(again[0].killable, undefined);
+  assert.deepEqual((await h.get("h9:w1:pB")).labels, {});
+  const closed = await h.killTerminal("h9:w1:pB");
+  assert.deepEqual([closed.ok, closed.status, closed.needsConfirm], [false, 409, true]);
+});
+
+test("el ledger NO se poda con una lista fallida", async () => {
+  let t = 1000;
+  const ledger = new Set(["term_old"]);
+  let mode = "bad";
+  const { h } = make({ "pane list": () => (mode === "bad" ? { err: true, code: 1 } : { out: '{"result":{"panes":[]}}' }), "tab list": { out: '{"result":{"tabs":[]}}' } }, { ledger, now: () => t });
+  t += 60000;
+  await h.list();
+  assert.ok(ledger.has("term_old")); // el fallo no prueba que el terminal haya desaparecido
+  mode = "ok";
+  await h.list();
+  assert.equal(ledger.has("term_old"), false); // sin registro de creación (inyectado) se poda en la primera lista válida
+});
+
 test("timeout y maxBuffer llegan a execFile en CADA llamada de cada operación", async () => {
   const tab = JSON.stringify({ result: { tab: { label: "mt3k-claude-0a1b2c-x1", pane_count: 1, tab_id: "w1:tB" } } });
   const { h, calls } = make({
@@ -342,9 +438,30 @@ test("timeout y maxBuffer llegan a execFile en CADA llamada de cada operación",
     assert.deepEqual(slices[name].map((c) => [c.argv.join(" "), c.opts.timeout]), expected, name);
     for (const c of slices[name]) assert.equal(c.opts.maxBuffer, 4 * 1024 * 1024, `${name}: ${c.argv.join(" ")}`);
   }
-  // y un timeout real de execFile (ETIMEDOUT) no lanza fuera del adaptador
+  // simulado (NO prueba el corte de un proceso lento: eso lo hace el test con un proceso real): solo la traducción del error
   const t = make({ "pane read": { err: true, code: "ETIMEDOUT" } });
   assert.deepEqual(await t.h.read("h9:w1:p1"), { ok: false, err: "lectura falló" });
   const throwing = createHerdr9({ herdrPath: "/x", exec: () => { throw Object.assign(new Error("boom"), { code: "ERR_INVALID_ARG_VALUE" }); }, probe: up, platform: "linux", home: "/h", isSocket: () => false, env: {} });
   assert.deepEqual(await throwing.list(), []);
+});
+
+test("timeout REAL: un proceso lento se corta por el timeout de execFile y la llamada falla en vez de colgarse", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mt3k-h9-slow-"));
+  try {
+    // seam: `herdrPath` es un script inofensivo que solo duerme (nunca el `herdr` real); exec = el execFile real del módulo
+    const slow = join(dir, "herdr-slow");
+    writeFileSync(slow, "#!/bin/sh\nexec sleep 8\n");
+    chmodSync(slow, 0o755);
+    const h = createHerdr9({ herdrPath: slow, probe: up, platform: "linux", home: dir, env: { HERDR_SOCKET_PATH: "" }, timeoutMs: 300 });
+    for (const [name, fn] of [["read", () => h.read("h9:w1:p1")], ["send", () => h.send("h9:w1:p1", "x")], ["list", () => h.list()]]) {
+      const t0 = Date.now();
+      const r = await fn();
+      const took = Date.now() - t0;
+      assert.ok(took < 3000, `${name} tardó ${took} ms: el timeout no cortó el proceso`);
+      assert.ok(Array.isArray(r) ? r.length === 0 : r.ok === false, name);
+    }
+    assert.equal(h.health().ok, false); // el list lento queda registrado como fallo del backend
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -210,6 +210,45 @@ test("un backend roto no rompe la lista PERO el fallo queda registrado (una vez 
   assert.deepEqual(f.panes.health(), { ok: true });
 });
 
+test("un `tab list` roto también queda registrado y visible por la fachada (filas degradadas, lista entera)", async () => {
+  const logs = [];
+  let tabMode = "timeout";
+  const tabsOk = JSON.stringify({ result: { tabs: [{ tab_id: "w1:t7", label: "mt3k-cursor-0a1b2c-x1" }] } });
+  const routes = { ...ROUTES, "tab list": () => (tabMode === "timeout" ? { err: true, code: "ETIMEDOUT" } : tabMode === "garbage" ? { out: "basura" } : { out: tabsOk }) };
+  const f = fakeExec(routes);
+  const ledger = new Set(["term_6606d374946717"]); // el terminal de w1:p7
+  const panes = createHerdr9Panes({
+    findCli: () => "/usr/bin/herdr",
+    createHerdr9: ({ herdrPath }) => createHerdr9({ herdrPath, exec: f.exec, probe: async () => true, platform: "linux", home: "/h", env: { HERDR_SOCKET_PATH: "" }, ledger }),
+    log: (m) => logs.push(m),
+    ttlMs: 0,
+  });
+  const multi = createHerdrMulti({ hcPanes: hcPanes({ installed: true }), h9Panes: panes });
+  const poll = async () => { multi.invalidate(); return multi.refresh(true); };
+  let rows = await poll();
+  assert.equal(rows.filter((r) => r.id.startsWith("h9:")).length, 6); // la lista llega entera
+  assert.ok(rows.every((r) => !r.killable));
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /herdr tab list falló \(ETIMEDOUT\)/);
+  await poll();
+  assert.equal(logs.length, 1); // mismo fallo: no se repite
+  const launcher = createHerdrMultiLauncher({
+    hcLauncher: { status: async () => ({ installed: true, running: true, app: false }), launch: async () => ({ ok: true }) },
+    h9Launcher: createHerdr9Launcher({ getHerdr9: () => panes.herdr9() }),
+  });
+  assert.match((await launcher.status()).errors.herdr9, /tab list falló \(ETIMEDOUT\)/);
+  tabMode = "garbage";
+  await poll();
+  assert.equal(logs.length, 2);
+  assert.match(logs[1], /tab list devolvió una salida ilegible/);
+  tabMode = "ok";
+  rows = await poll();
+  assert.equal(logs.length, 3);
+  assert.match(logs[2], /vuelve a responder/);
+  assert.deepEqual(rows.filter((r) => r.killable).map((r) => r.id), ["h9:w1:p7"]);
+  assert.equal((await launcher.status()).errors, undefined);
+});
+
 test("servidor caído no es un fallo del backend: lista [] sin ejecutar nada ni registrar", async () => {
   const logs = [];
   const down = h9Panes({ up: false, log: (m) => logs.push(m) });
